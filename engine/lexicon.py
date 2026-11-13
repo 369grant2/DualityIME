@@ -282,6 +282,15 @@ CORRECTION_MIN_USES = 2  # a choice there counts once picked this many times
 KEYS_SECTION = "standard"  # keys.json keeps them under the keyboard's name
 AS_ENGLISH = "en"  # 代碼記憶's choice: the keys are English (mp3), not the zhuyin they spell
 
+# 快速填入 until quick_fill.json is first saved (#33, as ASUS 快捷文字本 ships them; the same list in
+# cpp/engine/lexicon.cpp, installer/src/Settings.cs and settings/ui/bridge.js: tests.test_engine checks them)
+QUICK_FILL_SAMPLES = (
+    ("sample@example.com", "email"), ("王小明", "name1"), ("John", "name2"), ("Xiaoming Wang", "name3"),
+    ("0912345678", "phone"), ("A123456789", "id"), ("西元_年_月_日", "birth"), ("_市_區_路_巷_號_樓", "addr"),
+    ("感謝您的幫忙", "tks"), ("(*'∀')~♥", "em1"), ("( ˙ 3 ˙ )", "em2"), ("(\"∀\")", "em3"), ("∑( ° Δ °)", "em4"),
+)
+_NOT_READ = object()  # (a file's modification time before the first look: then even "no file" is news)
+
 
 def is_code(keys):
     """A code for 代碼記憶: letters and digits only, both, 2-16 of them (mp3, win10, rtx4090; ji3 too,
@@ -595,9 +604,9 @@ class UserModel:
         self.reload_custom()
         # 快速填入 (#21): [(text, shortcut)] in the order given, quick_fill.json next to user.json (its own file:
         # a version before it rewriting dictionary.json would drop it)
-        self.quick_fill = []
         self.quick_fill_path = os.path.join(os.path.dirname(path), "quick_fill.json") if path else None
-        self._quick_fill_mtime = None
+        self.quick_fill = []
+        self._quick_fill_mtime = _NOT_READ
         self.reload_quick_fill()
         if path and os.path.exists(path):
             try:
@@ -639,7 +648,8 @@ class UserModel:
         return self.custom_english | typed if typed else self.custom_english
 
     def reload_quick_fill(self):
-        """Re-read quick_fill.json if it changed: {"format": 1, "items": [["text", "shortcut"], ...]}."""
+        """Re-read quick_fill.json if it changed: {"format": 1, "items": [["text", "shortcut"], ...]}.
+        No file (never saved): QUICK_FILL_SAMPLES; a file, even empty or unreadable: what it holds."""
         if not self.quick_fill_path:
             return False
         try:
@@ -649,7 +659,7 @@ class UserModel:
         if mtime == self._quick_fill_mtime:
             return False
         self._quick_fill_mtime = mtime
-        items = []
+        items = list(QUICK_FILL_SAMPLES) if mtime is None else []
         if mtime is not None:
             try:
                 with open(self.quick_fill_path, encoding="utf-8-sig") as f:

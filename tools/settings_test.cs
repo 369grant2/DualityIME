@@ -194,6 +194,21 @@ static class SettingsTest {
             bad = (Dictionary<string, object>)b.ReadBackup(file);
             Check("a file of another app is refused with the message", (string)bad["error"] == "這不是兩儀輸入法匯出的檔案", json.Serialize(bad));
 
+            // 快速填入 (#33): never saved (no quick_fill.json): the 13 samples, as the engines list them; nothing written
+            var samples = (List<object>)call("quickFill", null);
+            Check("no quick_fill.json: the 13 samples", !File.Exists(Path.Combine(dir, "quick_fill.json")) && samples.Count == 13 &&
+                  (string)((object[])samples[0])[0] == "sample@example.com" && (string)((object[])samples[12])[1] == "em4" &&
+                  (string)((object[])samples[12])[0] == "∑( ° Δ °)", json.Serialize(samples));
+            // ...not in a backup: the samples are not the user's (they would join another computer's list on restore)
+            b.WriteBackup(file);
+            var noFill = (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+            Check("never saved: the backup has no 快速填入", !noFill.ContainsKey("quick_fill") &&
+                  (int)((Dictionary<string, object>)b.ReadBackup(file))["quickFill"] == 0, json.Serialize(noFill));
+            // ...and every row deleted and saved: an empty file, no samples again
+            call("saveQuickFill", new Dictionary<string, object> { { "rows", new object[0] } });
+            Check("an emptied quick_fill.json stays empty", ((List<object>)call("quickFill", null)).Count == 0 &&
+                  File.Exists(Path.Combine(dir, "quick_fill.json")), "");
+
             // 快速填入 (#21): written to quick_fill.json, checked, in the backup, merged on restore
             call("saveQuickFill", new Dictionary<string, object> { { "rows", new object[] {
                 new object[] { "sample@example.com", "email" }, new object[] { "王小明", "name1" } } } });
@@ -216,6 +231,26 @@ static class SettingsTest {
             var after = (List<object>)call("quickFill", null);
             Check("restore merges 快速填入 (a 捷徑 here kept as it is)", (int)fillInfo["quickFill"] == 2 && after.Count == 2 &&
                   (string)((object[])after[0])[0] == "另一個" && (string)((object[])after[1])[1] == "name1", json.Serialize(after));
+            // ...restored where none was ever saved (a new computer): the backup's rows, not the samples kept over them (#33)
+            call("saveQuickFill", new Dictionary<string, object> { { "rows", new object[] {
+                new object[] { "mine@example.com", "email" }, new object[] { "0987000111", "phone" } } } });
+            string fillFile = file + ".fill.json";
+            b.WriteBackup(fillFile);
+            File.Delete(Path.Combine(dir, "quick_fill.json"));
+            b.ReadBackup(fillFile);
+            call("restoreBackup", new Dictionary<string, object> { { "quickFill", true } });
+            after = (List<object>)call("quickFill", null);
+            Check("restore with no quick_fill.json takes the backup's rows, no samples", after.Count == 2 &&
+                  (string)((object[])after[0])[0] == "mine@example.com" && (string)((object[])after[1])[0] == "0987000111",
+                  json.Serialize(after));
+            // ...and with nothing it can take (a hand-edited backup, every row bad): nothing written, the samples stay
+            File.WriteAllText(fillFile, "{\"app\": \"" + Migrate.AppName + "\", \"format\": 1, \"quick_fill\": [[\"x\", \"a b\"]]}",
+                              new UTF8Encoding(false));
+            File.Delete(Path.Combine(dir, "quick_fill.json"));
+            b.ReadBackup(fillFile);
+            call("restoreBackup", new Dictionary<string, object> { { "quickFill", true } });
+            Check("restore taking no row writes no quick_fill.json", !File.Exists(Path.Combine(dir, "quick_fill.json")) &&
+                  ((List<object>)call("quickFill", null)).Count == 13, "");
 
             // a backup of before #23 (cand_per_row only) over a grid here: its row again, the keys 1-9 (review 2026-11-13)
             call("setConfig", new Dictionary<string, object> { { "key", "cand_layout" }, { "value", "grid" } });

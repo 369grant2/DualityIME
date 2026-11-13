@@ -14,6 +14,13 @@ namespace sz {
 
 static const std::vector<Scored> kNoScored;
 
+// 快速填入 until quick_fill.json is first saved (#33; engine/lexicon.py QUICK_FILL_SAMPLES, the same in Settings.cs)
+static const std::vector<std::pair<ustr, ustr>> kQuickFillSamples = {
+    {U"sample@example.com", U"email"}, {U"王小明", U"name1"}, {U"John", U"name2"}, {U"Xiaoming Wang", U"name3"},
+    {U"0912345678", U"phone"}, {U"A123456789", U"id"}, {U"西元_年_月_日", U"birth"}, {U"_市_區_路_巷_號_樓", U"addr"},
+    {U"感謝您的幫忙", U"tks"}, {U"(*'∀')~♥", U"em1"}, {U"( ˙ 3 ˙ )", U"em2"}, {U"(\"∀\")", U"em3"}, {U"∑( ° Δ °)", U"em4"},
+};
+
 Lexicon::Lexicon(const std::wstring& path) {
     std::string text;
     if (!read_file(path, text)) return;
@@ -802,14 +809,16 @@ static bool is_han_text(const ustr& s) {
 }
 
 bool UserModel::reload_quick_fill() {
-    // {"format": 1, "items": [["text", "shortcut"], ...]}: rows that are not two strings, or with no text, left out
+    // {"format": 1, "items": [["text", "shortcut"], ...]}: rows that are not two strings, or with no text, left out.
+    // No file (never saved): the samples; a file, even empty or unreadable: what it holds
     if (quick_fill_path_.empty()) return false;
     long long mtime = 0;
     bool exists = file_mtime(quick_fill_path_, mtime);
-    if (exists == quick_fill_exists_ && (!exists || mtime == quick_fill_mtime_)) return false;
-    quick_fill_exists_ = exists;
+    int state = exists ? 1 : 0;
+    if (state == quick_fill_state_ && (!exists || mtime == quick_fill_mtime_)) return false;
+    quick_fill_state_ = state;
     quick_fill_mtime_ = mtime;
-    std::vector<std::pair<ustr, ustr>> items;
+    std::vector<std::pair<ustr, ustr>> items = exists ? std::vector<std::pair<ustr, ustr>>{} : kQuickFillSamples;
     std::string text;
     if (exists && read_file(quick_fill_path_, text)) {
         bool ok = false;

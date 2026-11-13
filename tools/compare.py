@@ -302,7 +302,8 @@ CONFIGS = [
     {"import_memory": 1},  # a backup restored (備份與還原): IMPORTED is merged before typing
     {"autocorrect": True},  # 注音自動校正
     {"long_sentence": False},  # 長句選字加強 off ({} above: on, the default)
-    {"cand_keys": "1234qweras", "cand_layout": "grid"},  # other candidate keys, a grid (#23)
+    {"cand_keys": "1234qweras", "cand_layout": "grid",  # other candidate keys, a grid (#23)
+     "no_quick_fill": True},  # (not a setting: no quick_fill.json, so 快速填入 lists its samples, #33)
 ]
 DICTIONARY = {
     "words": [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"], ["史芸", "ㄕˇㄩㄣˊ"], ["好", "ㄏㄠˇ"], ["ㄎㄎ", ""], ["Kazuma", ""],
@@ -345,7 +346,13 @@ def compare(cases, config, tmp):
         for name in ("user.json", "keys.json", "custom_picks.json"):
             if os.path.exists(os.path.join(tmp, side, name)):
                 os.remove(os.path.join(tmp, side, name))
-        files = [("config.json", config), ("dictionary.json", DICTIONARY), ("quick_fill.json", QUICK_FILL)]
+        settings = {k: v for k, v in config.items() if k != "no_quick_fill"}
+        files = [("config.json", settings), ("dictionary.json", DICTIONARY)]
+        if config.get("no_quick_fill"):
+            if os.path.exists(os.path.join(tmp, side, "quick_fill.json")):  # (an earlier setting's)
+                os.remove(os.path.join(tmp, side, "quick_fill.json"))
+        else:
+            files.append(("quick_fill.json", QUICK_FILL))
         if config.get("import_memory"):
             files.append(("import-memory.json", IMPORTED))
         files.append(("keys.json", AUTOCORRECT))

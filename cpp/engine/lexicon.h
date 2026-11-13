@@ -266,7 +266,7 @@ private:
     double faded(double count, const int* day) const;
     void prune();
     std::wstring path_, custom_path_, quick_fill_path_;
-    bool quick_fill_exists_ = false;
+    int quick_fill_state_ = -1;  // -1 not looked at yet, 0 no file, 1 a file (the first look always reads)
     long long quick_fill_mtime_ = 0;
     std::function<int()> today_;
     bool keep_files_ = false;

@@ -31,7 +31,10 @@ const api = (() => {
   };
   const dict = { words: [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"]], shortcuts: [["addr", "台北市信義區…"]] };
   const images = {};  // 自訂外觀's photos: file -> data: URL
-  let quickFill = [["sample@example.com", "email"], ["王小明", "name1"], ["0912345678", "phone"], ["西元_年_月_日", "birth"]];
+  // (the samples a new install starts with, #33: Settings.cs QuickFillSamples)
+  let quickFill = [["sample@example.com", "email"], ["王小明", "name1"], ["John", "name2"], ["Xiaoming Wang", "name3"],
+    ["0912345678", "phone"], ["A123456789", "id"], ["西元_年_月_日", "birth"], ["_市_區_路_巷_號_樓", "addr"],
+    ["感謝您的幫忙", "tks"], ["(*'∀')~♥", "em1"], ["( ˙ 3 ˙ )", "em2"], ["(\"∀\")", "em3"], ["∑( ° Δ °)", "em4"]];
   const sys = { ok: true, default_ime: true, language_hk: false };
   const wait = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms));
   const demo = new URLSearchParams(location.search).get("update") || "";

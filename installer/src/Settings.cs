@@ -611,7 +611,22 @@ public class Backend {
     // ---- 快速填入 (#21): quick_fill.json {"format": 1, "items": [["內容", "捷徑"]...]} -----------------------
     string QuickFillPath { get { return Path.Combine(dataDir, "quick_fill.json"); } }
 
-    List<object> ReadQuickFill() { return QuickFillRows(ReadJson(QuickFillPath)); }
+    // what the page shows: no file yet (never saved) the samples, as the engines list them; a file, even empty,
+    // what it holds (#33)
+    List<object> ReadQuickFill() {
+        return SavedQuickFill() ?? QuickFillSamples.Select(p => (object)new object[] { p[0], p[1] }).ToList();
+    }
+
+    // what the user saved, or null when never: the backup and restore go by this, never by the samples
+    List<object> SavedQuickFill() { return File.Exists(QuickFillPath) ? QuickFillRows(ReadJson(QuickFillPath)) : null; }
+
+    // 快速填入 until quick_fill.json is first saved (engine/lexicon.py QUICK_FILL_SAMPLES, cpp/engine/lexicon.cpp)
+    public static readonly string[][] QuickFillSamples = {
+        new[] { "sample@example.com", "email" }, new[] { "王小明", "name1" }, new[] { "John", "name2" },
+        new[] { "Xiaoming Wang", "name3" }, new[] { "0912345678", "phone" }, new[] { "A123456789", "id" },
+        new[] { "西元_年_月_日", "birth" }, new[] { "_市_區_路_巷_號_樓", "addr" }, new[] { "感謝您的幫忙", "tks" },
+        new[] { "(*'∀')~♥", "em1" }, new[] { "( ˙ 3 ˙ )", "em2" }, new[] { "(\"∀\")", "em3" }, new[] { "∑( ° Δ °)", "em4" },
+    };
 
     Dictionary<string, object> ReadJson(string path) {
         try { return json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>; } catch { return null; }
@@ -730,9 +745,12 @@ public class Backend {
         var data = new Dictionary<string, object> {
             { "app", Migrate.AppName }, { "format", BackupFormat }, { "created", DateTime.Now.ToString("yyyy-MM-dd HH:mm") },
             { "memory", memory ?? new Dictionary<string, object>() }, { "dictionary", ReadDictionary() }, { "config", config },
-            { "quick_fill", ReadQuickFill() },  // (快速填入, #21: an older version reading the backup leaves it)
             { "appearance_images", BackupImages() }  // (自訂外觀's photos, #22: {file: base64}; restored with 設定)
         };
+        // 快速填入 (#21: an older version reading the backup leaves it), only once saved: the samples shown before
+        // that are not the user's and would join another computer's list on restore (#33)
+        var savedFill = SavedQuickFill();
+        if (savedFill != null) data["quick_fill"] = savedFill;
         File.WriteAllText(path, json.Serialize(data), new UTF8Encoding(false));
         return true;
     }
@@ -844,7 +862,10 @@ public class Backend {
         }
         int addedQuickFill = 0;
         if (quickFill) {  // 快速填入: a 捷徑 already here is kept as it is
-            var mine = ReadQuickFill();
+            // (what the file holds: never saved, nothing here; the samples ReadQuickFill shows then would keep the
+            // backup's own email, phone ... out, #33)
+            var saved = SavedQuickFill();
+            var mine = saved ?? new List<object>();
             foreach (object r in BackupQuickFill()) {
                 object[] pair = (object[])r;
                 string text = "" + pair[0], shortcut = "" + pair[1];
@@ -853,9 +874,11 @@ public class Backend {
                 mine.Add(new object[] { text, shortcut });
                 addedQuickFill++;
             }
-            Directory.CreateDirectory(dataDir);
-            File.WriteAllText(QuickFillPath, json.Serialize(new Dictionary<string, object> { { "format", 1 }, { "items", mine } }),
-                              new UTF8Encoding(false));
+            if (saved != null || addedQuickFill > 0) {  // (never saved and nothing taken: the samples stay)
+                Directory.CreateDirectory(dataDir);
+                File.WriteAllText(QuickFillPath, json.Serialize(new Dictionary<string, object> { { "format", 1 }, { "items", mine } }),
+                                  new UTF8Encoding(false));
+            }
         }
         var theirMemory = backup.ContainsKey("memory") ? backup["memory"] as Dictionary<string, object> : null;
         if (memory && theirMemory != null) {

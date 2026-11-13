@@ -2550,6 +2550,54 @@ class QuickFillTest(unittest.TestCase):
             c.key(k)
         self.assertEqual(c.commit, "`")
 
+    SAMPLES = ["email", "name1", "name2", "name3", "phone", "id", "birth", "addr", "tks", "em1", "em2", "em3", "em4"]
+
+    def test_no_file_samples(self):
+        # never saved (a new install, or 3.2.5 with nothing set): the 13 samples (#33)
+        os.remove(os.path.join(self.tmp.name, "quick_fill.json"))
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS)
+        self.press_on(c, "`", " ")
+        typed, items, index = c.fill_shown()
+        self.assertEqual([s for _, s in items], self.SAMPLES)
+        self.assertEqual(items[-1], ("∑( ° Δ °)", "em4"))
+        self.press_on(c, "ENTER")
+        self.assertEqual(c.commit, "sample@example.com")
+
+    def test_emptied_stays_empty(self):
+        # every row deleted and saved: no samples again
+        self.write([])
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS)
+        self.press_on(c, "`", " ")
+        self.assertEqual(c.fill_shown(), ("", [], 0))
+
+    def test_file_removed_samples_again(self):
+        # the file taken away while running: as never saved
+        os.remove(os.path.join(self.tmp.name, "quick_fill.json"))
+        self.press("`", " ")
+        self.assertEqual([s for _, s in self.c.fill_shown()[1]], self.SAMPLES)
+
+    def test_samples_same_everywhere(self):
+        # the four copies (the C++ engine, the settings tool, the settings page's preview data) are this list
+        import re
+        from engine.lexicon import QUICK_FILL_SAMPLES
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        strings = re.compile(r'"((?:[^"\\]|\\.)*)"')
+        for path, start, end in (("cpp/engine/lexicon.cpp", "kQuickFillSamples = {", "};"),
+                                 ("installer/src/Settings.cs", "QuickFillSamples = {", "};"),
+                                 ("settings/ui/bridge.js", "let quickFill = [", "];")):
+            with open(os.path.join(root, path), encoding="utf-8") as f:
+                text = f.read()
+            block = text[text.index(start) + len(start):]
+            block = block[:block.index(end)]
+            found = [json.loads('"' + s + '"') for s in strings.findall(block)]
+            self.assertEqual(list(zip(found[0::2], found[1::2])), list(QUICK_FILL_SAMPLES), path)
+
+    def test_no_folder_no_samples(self):
+        # no memory folder at all (UserModel(None), the tests'): nothing listed
+        self.assertEqual(UserModel(None).quick_fill, [])
+
 
 class CandKeysTest(unittest.TestCase):
     """The candidate list with other keys and layouts (#23): a page as many as the keys, a key picks its place on

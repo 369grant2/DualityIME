@@ -6487,5 +6487,26 @@ class OrderDigitsWithModelTest(Base):
         self.assertEqual([(t.kind, t.raw) for t in out], [("zh", "ji3"), ("en", "817")])
 
 
+class OpenCCDataTest(unittest.TestCase):
+    """簡體輸出 (#32): OpenCC's tables in data/opencc (tools/build_opencc.py writes them)."""
+
+    DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "opencc")
+
+    def rows(self, name):
+        with open(os.path.join(self.DIR, name), encoding="utf-8") as f:
+            return [line.rstrip("\n").split("\t") for line in f if line.strip() and not line.startswith("#")]
+
+    def test_files(self):
+        for name in ("TSPhrases.txt", "TSCharacters.txt", "TWVariantsRev.txt", "TWVariantsRevPhrases.txt",
+                     "TWPhrasesRev.txt", "TWPhrases.txt", "mainland_words.txt"):
+            self.assertTrue(self.rows(name), name)
+        rev = {k: v.split() for k, v in self.rows("TWPhrasesRev.txt")}
+        self.assertEqual(rev["影片"], ["視頻"])
+        self.assertEqual(rev["軟體"], ["軟件"])
+        for word, reading in self.rows("mainland_words.txt"):
+            self.assertEqual(len(reading.split("-")), len(word), word)
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(self.DIR), "LICENSE-OpenCC.txt")))
+
+
 if __name__ == "__main__":
     unittest.main()

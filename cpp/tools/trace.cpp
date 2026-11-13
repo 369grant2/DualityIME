@@ -6,7 +6,7 @@
 //     the engine takes (loading, every key) and its memory (tools/key_latency_cpp.py)
 // Script lines: characters as typed, {DOWN} {ENTER} ... special keys,
 // {#5} a numpad key, {CAPS} Caps Lock on/off, {UNDO} take back the last commit,
-// {FW} 全形 on/off, {RESET} focus change, {LB} a literal "{".
+// {FW} 全形 on/off, {SC} 簡體輸出 on/off (#32), {RESET} focus change, {LB} a literal "{".
 #include <chrono>
 #include <cstdio>
 #include <crtdbg.h>
@@ -180,6 +180,7 @@ int main(int argc, char** argv) {
                 if (name == "CAPS") { caps = !caps; continue; }
                 if (name == "UNDO") extra = "undo:" + to_utf8(c.undo_commit());
                 else if (name == "FW") extra = std::string("fw:") + (c.toggle_full_width() ? "1" : "0");
+                else if (name == "SC") extra = std::string("sc:") + (c.toggle_simplified() ? "1" : "0");
                 else if (name == "RESET") c.reset();
                 else if (name == "LB") extra = c.key(U'{', "", caps) ? "1" : "0";
                 else if (name[0] == '#') extra = c.type_literal(static_cast<char32_t>(name[1])) ? "1" : "0";

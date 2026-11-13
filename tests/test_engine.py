@@ -6775,6 +6775,26 @@ class SimplifiedTypingTest(unittest.TestCase):
         self.pick(c, "台北市信义区")  # (a 映射詞彙 picked is sent at once)
         self.assertEqual(c.commit, "台北市信义区")
 
+    def test_toggle_converts_composition(self):
+        c = self.composer(False)
+        self.assertEqual(self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "軟體")
+        self.assertTrue(c.toggle_simplified())
+        self.assertEqual((c.composition, c.config.simplified, c.user.simplified), ("软体", True, True))
+        self.assertFalse(c.toggle_simplified())
+        self.assertEqual(c.composition, "軟體")
+
+    def test_toggle_while_candidates_open(self):
+        c = self.composer(False)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "LEFT", "LEFT", "DOWN")
+        self.assertIn("軟體", c.candidates)
+        c.toggle_simplified()
+        self.assertTrue(c.candidates)
+        self.assertNotIn("軟體", c.candidates)
+        self.assertIn("软体", c.candidates)
+        c.key(special="ENTER")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, c.lexicon.script.to_simplified(c.commit))
+
     def test_replacement_bar_converted(self):
         # the bar shown with the caret inside the text: Simplified characters too
         bars = []

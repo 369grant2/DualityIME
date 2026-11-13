@@ -113,6 +113,7 @@ public:
     bool type_full_punct(char32_t ch);
     void reset();
     bool toggle_full_width();
+    bool toggle_simplified();  // 簡體輸出 (#32): Traditional <-> Simplified, remembered in the settings
     void settings_changed();
     ustr undo_commit();
     std::pair<std::vector<ustr>, int> page_candidates() const;

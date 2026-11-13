@@ -1547,6 +1547,17 @@ class Composer:
         self._render()
         return self.config.full_width
 
+    def toggle_simplified(self):
+        """簡體輸出 (#32): Traditional <-> Simplified (the key the user set), remembered in the settings; what is
+        being typed and an open list turn at once."""
+        self.config.save(simplified=not self.config.simplified)
+        self.user.set_simplified(self.config.simplified)
+        listed, index = bool(self.candidates), self.cand_index
+        self._refresh()
+        if listed and self._open_candidates():
+            self.cand_index = min(index, len(self.candidates) - 1)
+        return self.config.simplified
+
     def settings_changed(self):
         """Call after the config was reloaded."""
         self.user.forget_words(self.config.forget_words)

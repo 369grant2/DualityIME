@@ -1917,6 +1917,17 @@ bool Composer::toggle_full_width() {
     return config.flag("full_width");
 }
 
+bool Composer::toggle_simplified() {
+    // 簡體輸出 (#32): what is being typed and an open list turn at once (see engine/composer.py)
+    config.save("simplified", Json(!config.flag("simplified")));
+    user.set_simplified(config.flag("simplified"));
+    bool listed = !candidates.empty();
+    int index = cand_index;
+    refresh();
+    if (listed && open_candidates()) cand_index = std::min(index, static_cast<int>(candidates.size()) - 1);
+    return config.flag("simplified");
+}
+
 void Composer::settings_changed() {
     user.forget_words(config.number("forget_words"));
     user.forget_emails(config.number("forget_emails"));

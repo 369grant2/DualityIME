@@ -1,0 +1,12 @@
+# End-to-end checks of 簡體輸出 (#32), starting in Simplified mode with its key on (one engine for all lines, so
+# what is picked carries over):
+#   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 cpp\tools\simplified_cases.txt -Config cpp\tools\simplified_config.json
+# e2e-args: -Config cpp\tools\simplified_config.json
+# a Taiwan word: the characters only; a Mainland word the dictionary lacks; the Mainland word first in the list
+u/3qu04{ENTER} => 影片
+ej; fm {ENTER} => 光驱
+bj03wu3{DOWN}1{ENTER} => 软件
+bj03wu3{ENTER} => 软体
+# Ctrl+Shift+F (the key, ticked in this config) to Traditional and back
+{^F}bj03wu3{ENTER}{^F} => 軟體
+bj03wu3{ENTER} => 软体

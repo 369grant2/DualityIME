@@ -31,6 +31,8 @@ CASES = [
     "bj03wu3{DOWN}1{ENTER}bj03wu3{DOWN}1{ENTER}bj03wu3{ENTER}bj03wu3{DOWN}2{ENTER}bj03wu3{ENTER}",
     "jo4m06yj3{DOWN}1{LEFT}{RIGHT}{BACK}{ENTER}jo4m06yj3{DOWN}1{ENTER}",
     "ej; fm {ENTER}2l3tj {ENTER}u/3qu04{ENTER}",
+    # ...switched while typing and with the list open, and back (the setting is saved: every case ends as it began)
+    "bj03wu3{SC}{DOWN}{SC}{ENTER}{ENTER}bj03wu3{SC}{ENTER}{SC}",
     # (before any pick of 試: with one, 試試 comes without the model too)
     "ji3y94u h4g4g4{ENTER}",  # 我再一次試試: 試試 only with 長句選字加強 (逝世 without)
     # (first: the presses counted are those of a list nothing has reordered yet)

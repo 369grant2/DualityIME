@@ -57,6 +57,7 @@ def tree_of(rev, jobs):
                                    stdout=subprocess.PIPE)
         with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
             tar.extractall(tree, filter="data")
+        archive.stdout.read()  # (the padding after the end-of-archive blocks: or git waits on a full pipe for ever)
         if archive.wait() != 0:
             sys.exit(f"git archive {rev} failed")
         env = dict(os.environ, CMAKE_BUILD_PARALLEL_LEVEL=str(jobs))

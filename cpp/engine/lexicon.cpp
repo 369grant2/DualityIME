@@ -56,6 +56,7 @@ Lexicon::Lexicon(const std::wstring& path) {
     std::wstring names_path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"names.txt";
     std::string names_text;
     if (read_file(names_path, names_text)) add_names(names_text);
+    script_.load(path.substr(0, path.find_last_of(L"\\/") + 1));  // 簡體輸出 (#32): the opencc folder next to it
     ok_ = true;
 }
 

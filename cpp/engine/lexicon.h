@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "script.h"
 #include "util.h"
 
 namespace sz {
@@ -45,6 +46,7 @@ class Lexicon {
 public:
     explicit Lexicon(const std::wstring& path);
     bool ok() const { return ok_; }
+    const Script& script() const { return script_; }  // 簡體輸出 (#32): OpenCC's tables
 
     const std::vector<Scored>& lookup(const std::vector<ustr>& readings) const;
     const std::vector<Scored>* find(const ustr& reading_key) const;
@@ -81,6 +83,7 @@ public:
 
 private:
     bool ok_ = false;
+    Script script_;
     std::unordered_map<ustr, std::vector<Scored>> entries_;
     std::unordered_map<ustr, std::vector<Scored>> names_;
     std::unordered_map<ustr, ustr> name_written_;

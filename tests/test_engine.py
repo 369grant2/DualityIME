@@ -6508,5 +6508,40 @@ class OpenCCDataTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(os.path.dirname(self.DIR), "LICENSE-OpenCC.txt")))
 
 
+class ScriptTest(unittest.TestCase):
+    """簡體輸出 (#32): Traditional (Taiwan) to Simplified, and Taiwan words to their Mainland ones (engine/script.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = Lexicon().script
+
+    def test_to_simplified(self):
+        s = self.script.to_simplified
+        self.assertEqual(s("軟體"), "软体")  # (the characters only: 軟件 is a choice, not a conversion)
+        self.assertEqual(s("影片"), "影片")
+        self.assertEqual(s("裡面"), "里面")
+        self.assertEqual(s("頭髮與發展"), "头发与发展")
+        self.assertEqual(s("hello 你好"), "hello 你好")
+        self.assertEqual(s(""), "")
+
+    def test_mainland_terms(self):
+        m = self.script.mainland_terms
+        self.assertEqual(m("影片"), ["視頻"])
+        self.assertEqual(m("乙太網路"), ["以太網", "以太網絡", "以太網路"])
+        self.assertEqual(m("你好"), [])
+
+    def test_mainland_words(self):
+        self.assertEqual(self.script.mainland_words.get("主板"), "ㄓㄨˇ-ㄅㄢˇ")  # (not in the dictionary)
+        self.assertTrue(self.script.is_mainland("視頻"))
+        self.assertTrue(self.script.is_mainland("主板"))
+        self.assertFalse(self.script.is_mainland("影片"))
+
+    def test_no_files(self):
+        from engine.script import Script
+        empty = Script.load(os.path.join(tempfile.gettempdir(), "no-such-dualityime-dir"))
+        self.assertEqual(empty.to_simplified("軟體"), "軟體")
+        self.assertEqual(empty.mainland_terms("影片"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

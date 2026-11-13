@@ -66,6 +66,9 @@ class Lexicon:
         if os.path.isfile(names_path):
             with open(names_path, encoding="utf-8") as f:
                 self.add_names(f)
+        # 簡體輸出 (#32): OpenCC's tables (data/opencc next to the dictionary)
+        from engine.script import Script
+        self.script = Script.load(os.path.dirname(path))
 
     def add_names(self, lines):
         """Lines of names.txt: "reading<TAB>name<TAB>score", a character's with "<TAB>written" too - its Han

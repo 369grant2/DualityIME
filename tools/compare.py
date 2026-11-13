@@ -339,7 +339,11 @@ AUTOCORRECT = {"format": 1, "standard": {"picks": {"si3": {"ㄋㄧˇ": 3}, "817"
 # (字 and 像 written for good: repick may not put them into 自由, 現象 - variant_is_written, VARIANT_PAIR)
 IMPORTED = {"phrases": {"ㄊㄞˊ-ㄨㄢ": {"臺灣": 30}, "ㄋㄧˇ-ㄏㄠˇ": {"妳好": 12}, "ㄗˋ": {"字": 7}, "ㄒㄧㄤˋ": {"像": 8}},
             "english": ["up", "t"],
-            "words": {"python": 5}, "emails": {"kazumasan@example.com": 3}}
+            "words": {"python": 5}, "emails": {"kazumasan@example.com": 3},
+            # 簡體輸出's own memory (#32): merged into user_simplified.json (compared below)
+            "simplified": {"format": 1, "phrases": {"ㄖㄨㄢˇ-ㄊㄧˇ": {"軟體": 2}},
+                           "used": {"phrases": {"ㄖㄨㄢˇ-ㄊㄧˇ": {"軟體": 20000}}},
+                           "replacements": {"影片": {"視頻": 3}}, "replacements_used": {"影片": {"視頻": 20000}}}}
 
 
 def run(cmd):

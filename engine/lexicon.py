@@ -958,6 +958,26 @@ class UserModel:
             self.corrections.merge(data["keys"])
         if "custom_picks" in data:  # 自訂詞彙 taken with Tab: its own file
             self.custom_picks.merge(data["custom_picks"])
+        simp = data.get("simplified")
+        if isinstance(simp, dict):  # 簡體輸出's own memory (#32): the higher count and the later day, as above
+            simp_used = simp.get("used") if isinstance(simp.get("used"), dict) else {}
+            for counts, days, theirs, their_days in (
+                    (self._simp_phrases, self._simp_used, simp.get("phrases"), simp_used.get("phrases")),
+                    (self.replacements, self.replacement_used, simp.get("replacements"), simp.get("replacements_used"))):
+                their_days = their_days if isinstance(their_days, dict) else {}
+                for k, bucket in (theirs if isinstance(theirs, dict) else {}).items():
+                    if not isinstance(bucket, dict):
+                        continue
+                    for p, n in bucket.items():
+                        if not isinstance(n, (int, float)) or isinstance(n, bool):
+                            continue
+                        mine = counts.setdefault(k, {})
+                        mine[p] = max(mine.get(p, 0), n)
+                        day = (their_days.get(k) or {}).get(p) if isinstance(their_days.get(k), dict) else None
+                        if mine[p]:
+                            dd = days.setdefault(k, {})
+                            dd[p] = max(dd.get(p, 0), day if isinstance(day, int) else today)
+            self._save_simplified()
 
     def words_starting(self, prefix, limit=3):
         """Remembered words starting with prefix (case-insensitive), most used first."""

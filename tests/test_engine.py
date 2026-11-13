@@ -6638,6 +6638,28 @@ class SimplifiedMemoryTest(unittest.TestCase):
         self.assertEqual(self.read("user_simplified.json")["phrases"], {})
         self.assertEqual(self.read("user_simplified.json")["replacements"], {})
 
+    def test_import_simplified(self):
+        # a backup restored (import-memory.json): Simplified mode's memory merged into user_simplified.json, the
+        # higher count kept
+        u = self.user()
+        u.set_simplified(True)
+        u.learn_replacement("軟體", "軟件")
+        u.save()
+        with open(os.path.join(self.tmp.name, "import-memory.json"), "w", encoding="utf-8") as f:
+            json.dump({"simplified": {"format": 1, "phrases": {"ㄧㄥˇ-ㄆㄧㄢˋ": {"影片": 2}},
+                                      "used": {"phrases": {"ㄧㄥˇ-ㄆㄧㄢˋ": {"影片": 20000}}},
+                                      "replacements": {"軟體": {"軟件": 3}, "影片": {"視頻": 2}},
+                                      "replacements_used": {"軟體": {"軟件": 20000}, "影片": {"視頻": 20000}}}},
+                      f, ensure_ascii=False)
+        u.import_memory(1)
+        self.assertTrue(u.simplified)
+        self.assertEqual(u.phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 2)
+        self.assertEqual(u.replacement_count("軟體", "軟件"), 3)
+        self.assertEqual(u.default_term("影片"), "視頻")
+        saved = self.read("user_simplified.json")
+        self.assertEqual(saved["replacements"]["影片"], {"視頻": 2})
+        self.assertEqual(self.user().phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 0)  # (Traditional mode: not there)
+
     def test_settings_defaults_simplified(self):
         self.assertIs(DEFAULTS["simplified"], False)
         self.assertIs(DEFAULTS["simplified_hotkey"], False)

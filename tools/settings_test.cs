@@ -38,6 +38,22 @@ static class SettingsTest {
             Check("遊戲中 Shift 交給遊戲 is on as it comes, game_mode is gone (#31)",
                   (bool)cfg["game_keys"] && !cfg.ContainsKey("game_mode"), json.Serialize(cfg));
 
+            // 簡體輸出 (#32): off, its key off, Ctrl+Shift+F as it comes; a key that is no shortcut is refused
+            Check("簡體輸出 defaults", !(bool)cfg["simplified"] && !(bool)cfg["simplified_hotkey"] &&
+                  (string)cfg["simplified_key"] == "Ctrl+Shift+F", json.Serialize(cfg));
+            Check("HotkeyProblem: Ctrl+Shift+F, Ctrl+F1, Alt+S fine", Backend.HotkeyProblem("Ctrl+Shift+F") == null &&
+                  Backend.HotkeyProblem("Ctrl+F1") == null && Backend.HotkeyProblem("Alt+S") == null, "");
+            Check("HotkeyProblem: F, Shift+F, Alt+Shift, Ctrl+Shift, Win+F, Ctrl+F13 refused",
+                  Backend.HotkeyProblem("F") != null && Backend.HotkeyProblem("Shift+F") != null &&
+                  Backend.HotkeyProblem("Alt+Shift") != null && Backend.HotkeyProblem("Ctrl+Shift") != null &&
+                  Backend.HotkeyProblem("Win+F") != null && Backend.HotkeyProblem("Ctrl+F13") != null, "");
+            bool badKey32 = false;
+            try { call("setConfig", new Dictionary<string, object> { { "key", "simplified_key" }, { "value", "Shift+F" } }); } catch { badKey32 = true; }
+            call("setConfig", new Dictionary<string, object> { { "key", "simplified_key" }, { "value", "Ctrl+F1" } });
+            saved = (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(Path.Combine(dir, "config.json"), Encoding.UTF8));
+            Check("setConfig refuses a bad 簡體輸出 key and keeps a good one", badKey32 && (string)saved["simplified_key"] == "Ctrl+F1",
+                  json.Serialize(saved));
+
             // the candidate list's layout and keys (#23): settings the tool knows, "" = by cand_per_row
             Check("candidate layout defaults", (string)cfg["cand_layout"] == "" && (string)cfg["cand_keys"] == "123456789" &&
                   (int)cfg["cand_columns"] == 0, json.Serialize(cfg));
@@ -141,11 +157,19 @@ static class SettingsTest {
             // 自訂詞彙 taken with Tab: a file of its own too (#13)
             File.WriteAllText(Path.Combine(dir, "custom_picks.json"),
                 "{\"format\": 1, \"picks\": {\"PQC功能\": 2}, \"used\": {\"PQC功能\": 20000}}", new UTF8Encoding(false));
+            File.WriteAllText(Path.Combine(dir, "user_simplified.json"),  // 簡體輸出's own memory (#32)
+                "{\"format\": 1, \"phrases\": {}, \"used\": {\"phrases\": {}}, \"replacements\": {\"軟體\": {\"軟件\": 2}}, " +
+                "\"replacements_used\": {\"軟體\": {\"軟件\": 20000}}}", new UTF8Encoding(false));
             call("setConfig", new Dictionary<string, object> { { "key", "preview" }, { "value", "zhuyin" } });
             call("forgetWords", null);
             string file = Path.Combine(dir, "backup.json");
             b.WriteBackup(file);
             var saved2 = (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+            var simpSaved = ((Dictionary<string, object>)saved2["memory"]).ContainsKey("simplified")
+                ? (Dictionary<string, object>)((Dictionary<string, object>)saved2["memory"])["simplified"] : null;
+            Check("the backup's memory has 簡體輸出's own (#32)", simpSaved != null &&
+                  ((Dictionary<string, object>)simpSaved["replacements"]).ContainsKey("軟體"), json.Serialize(saved2["memory"]));
+            File.Delete(Path.Combine(dir, "user_simplified.json"));
             var savedConfig = (Dictionary<string, object>)saved2["config"];
             Check("backup holds memory, dictionary and settings, not the counters",
                   (string)saved2["app"] == "兩儀輸入法" && ((Dictionary<string, object>)saved2["memory"]).ContainsKey("phrases") &&

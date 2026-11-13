@@ -454,8 +454,33 @@ public class Backend {
         File.Delete(tmp);
     }
 
+    // 簡體輸出's key (#32): what is wrong with it, or null. Ctrl and / or Alt (Shift may join) and one key: A-Z, 0-9,
+    // F1-F12 (the IME reads it so: text_service.cpp parse_hotkey); never Win, nor Ctrl+Shift / Alt+Shift alone
+    public static string HotkeyProblem(string text) {
+        bool ctrl = false, alt = false, win = false;
+        string main = null;
+        foreach (string part in (text ?? "").Split('+')) {
+            if (part == "Ctrl") ctrl = true;
+            else if (part == "Alt") alt = true;
+            else if (part == "Shift") { }
+            else if (part == "Win") win = true;
+            else if (main == null) main = part;
+            else return "請按下包含 Ctrl 或 Alt 的組合鍵";
+        }
+        if (win || (main == null && (ctrl || alt))) return "這組鍵是 Windows 用的，請換一組";
+        bool key = main != null && ((main.Length == 1 && ((main[0] >= 'A' && main[0] <= 'Z') || (main[0] >= '0' && main[0] <= '9'))) ||
+                                    (main.Length >= 2 && main.Length <= 3 && main[0] == 'F' && main.Substring(1).All(char.IsDigit) &&
+                                     int.Parse(main.Substring(1)) >= 1 && int.Parse(main.Substring(1)) <= 12));
+        if (!key || !(ctrl || alt)) return "請按下包含 Ctrl 或 Alt 的組合鍵";
+        return null;
+    }
+
     object SetConfig(string key, object value) {
         if (!Defaults.ContainsKey(key)) throw new Exception("unknown setting " + key);
+        if (key == "simplified_key") {
+            string problem = HotkeyProblem(value as string);
+            if (problem != null) throw new Exception(problem);
+        }
         var c = ReadConfig();
         c[key] = value;
         WriteConfig(c);
@@ -742,6 +767,13 @@ public class Backend {
         if (customPicks != null) {
             if (memory == null) memory = new Dictionary<string, object>();
             memory["custom_picks"] = customPicks;
+        }
+        // 簡體輸出's own memory (user_simplified.json, #32) too; the IME merges it on restore (import_memory)
+        Dictionary<string, object> simplified = null;
+        try { simplified = json.DeserializeObject(File.ReadAllText(Path.Combine(dataDir, "user_simplified.json"), Encoding.UTF8)) as Dictionary<string, object>; } catch { }
+        if (simplified != null) {
+            if (memory == null) memory = new Dictionary<string, object>();
+            memory["simplified"] = simplified;
         }
         var data = new Dictionary<string, object> {
             { "app", Migrate.AppName }, { "format", BackupFormat }, { "created", DateTime.Now.ToString("yyyy-MM-dd HH:mm") },

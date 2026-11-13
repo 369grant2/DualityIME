@@ -1297,6 +1297,37 @@ void UserModel::import_memory_now(int counter) {
     save();
     if (auto* ac = data.get("keys"); ac) corrections.merge(*ac);  // 校正記憶 / 代碼記憶: their own file, the setting on or off
     if (auto* cp = data.get("custom_picks"); cp) custom_picks.merge(*cp);  // 自訂詞彙 taken with Tab: its own file
+    if (auto* simp = data.get("simplified"); simp && simp->is_object()) {
+        // 簡體輸出's own memory (#32): the higher count and the later day, as above (see lexicon.py)
+        const Json* simp_used = simp->get("used");
+        if (simp_used && !simp_used->is_object()) simp_used = nullptr;
+        auto merge = [&](OrderedMap<ustr, OrderedMap<ustr, double>>& counts, OrderedMap<ustr, OrderedMap<ustr, int>>& days,
+                         const Json* theirs, const Json* their_days) {
+            if (!theirs || !theirs->is_object()) return;
+            for (auto& [k, bucket] : theirs->members()) {
+                if (!bucket.is_object()) continue;
+                const Json* kd = their_days && their_days->is_object() ? their_days->get(k) : nullptr;
+                for (auto& [p, n] : bucket.members()) {
+                    if (!n.is_number()) continue;
+                    ustr key = from_utf8(k), phrase = from_utf8(p);
+                    auto& mine = counts[key];
+                    const double* had = mine.find(phrase);
+                    double count = std::max(had ? *had : 0.0, n.as_number());
+                    mine.set(phrase, count);
+                    if (count != 0) {
+                        const Json* d = kd && kd->is_object() ? kd->get(p) : nullptr;
+                        int day = d && d->is_number() ? static_cast<int>(d->as_number()) : today_();
+                        auto& dd = days[key];
+                        const int* old = dd.find(phrase);
+                        dd.set(phrase, std::max(old ? *old : 0, day));
+                    }
+                }
+            }
+        };
+        merge(simp_phrases_, simp_used_, simp->get("phrases"), simp_used ? simp_used->get("phrases") : nullptr);
+        merge(replacements, replacement_used, simp->get("replacements"), simp->get("replacements_used"));
+        save_simplified();
+    }
 }
 
 bool is_zhuyin_text(const ustr& text) {

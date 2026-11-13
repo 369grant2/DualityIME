@@ -27,7 +27,8 @@ const api = (() => {
     preview: "keys_hint", shift_toggle: true, start_mode: "mixed", completion: true, remember_words: true,
     forget_words: 0, forget_emails: 0, lookup: true, lookup_size: "small", game_keys: true,
     cand_font: "Microsoft JhengHei UI", cand_font_size: 18, cand_per_row: 1,
-    cand_layout: "", cand_keys: "123456789", cand_columns: 0, appearance: {}
+    cand_layout: "", cand_keys: "123456789", cand_columns: 0, appearance: {},
+    simplified: false, simplified_hotkey: false, simplified_key: "Ctrl+Shift+F"
   };
   const dict = { words: [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"]], shortcuts: [["addr", "台北市信義區…"]] };
   const images = {};  // 自訂外觀's photos: file -> data: URL

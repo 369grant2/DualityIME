@@ -29,6 +29,9 @@ const Json& Config::defaults() {
         j["cand_keys"] = Json("123456789");  // the candidate keys, one of cand_key_sets()
         j["cand_columns"] = Json(0);         // the grid's columns: 3, 4, 5, or 0 = by the keys
         j["appearance"] = Json::object();    // 自訂外觀 (#22): the IME's colors and photos; {} = the default look
+        j["simplified"] = Json(false);       // 簡體輸出 (#32): shown and sent in Simplified characters
+        j["simplified_hotkey"] = Json(false);  // ...switched with simplified_key too (off: the key goes to the program)
+        j["simplified_key"] = Json("Ctrl+Shift+F");
         return j;
     }();
     return d;

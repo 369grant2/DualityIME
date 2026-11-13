@@ -214,7 +214,8 @@ public class Backend {
         { "lookup_size", "small" }, { "game_keys", true }, { "cand_font", "Microsoft JhengHei UI" },
         { "cand_font_size", 18 }, { "cand_per_row", 1 }, { "cand_layout", "" }, { "cand_keys", "123456789" },
         { "cand_columns", 0 },
-        { "appearance", new Dictionary<string, object>() }  // 自訂外觀 (#22): {} = the default look (never changed in place)
+        { "appearance", new Dictionary<string, object>() },  // 自訂外觀 (#22): {} = the default look (never changed in place)
+        { "simplified", false }, { "simplified_hotkey", false }, { "simplified_key", "Ctrl+Shift+F" }  // 簡體輸出 (#32)
     };
 
     public Backend(SettingsForm form, string data) {

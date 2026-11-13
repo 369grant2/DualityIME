@@ -6536,11 +6536,112 @@ class ScriptTest(unittest.TestCase):
         self.assertTrue(self.script.is_mainland("主板"))
         self.assertFalse(self.script.is_mainland("影片"))
 
-    def test_no_files(self):
+    def test_no_files_converts_nothing(self):
         from engine.script import Script
         empty = Script.load(os.path.join(tempfile.gettempdir(), "no-such-dualityime-dir"))
         self.assertEqual(empty.to_simplified("軟體"), "軟體")
         self.assertEqual(empty.mainland_terms("影片"), [])
+
+
+class SimplifiedMemoryTest(unittest.TestCase):
+    """簡體輸出 (#32): what is learned in Simplified mode goes to user_simplified.json, laid over the shared memory;
+    Traditional mode never reads it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "user.json")
+
+    def user(self):
+        return UserModel(self.path, today=lambda: 20000)
+
+    def read(self, name):
+        with open(os.path.join(self.tmp.name, name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_traditional_ignores_simplified_memory(self):
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        shared = self.read("user.json")["phrases"]
+        u.set_simplified(True)
+        u.learn_phrase("ㄧㄥˇ-ㄆㄧㄢˋ", "影片")
+        u.learn_replacement("影片", "視頻")
+        u.learn_replacement("影片", "視頻")
+        u.save()
+        self.assertEqual(self.read("user.json")["phrases"], shared)
+        t = self.user()
+        self.assertEqual(t.phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 0)
+        self.assertIsNone(t.default_term("影片"))
+        u.set_simplified(False)
+        self.assertEqual(u.phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 0)
+        self.assertIsNone(u.default_term("影片"))
+
+    def test_simplified_reads_both(self):
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        s = self.user()
+        s.set_simplified(True)
+        self.assertEqual(s.phrase_count("ㄋㄧˇ", "妳"), 1)
+        s.forget_phrase("ㄋㄧˇ", "妳")  # (forgotten in Simplified mode only)
+        s.save()
+        again = self.user()
+        again.set_simplified(True)
+        self.assertEqual(again.phrase_count("ㄋㄧˇ", "妳"), 0)
+        self.assertEqual(self.user().phrase_count("ㄋㄧˇ", "妳"), 1)
+
+    def test_words_stay_shared(self):
+        u = self.user()
+        u.set_simplified(True)
+        u.words["python"] = 3
+        u.word_used["python"] = 20000
+        u.save()
+        self.assertEqual(self.read("user.json")["words"], {"python": 3})
+        self.assertNotIn("words", self.read("user_simplified.json"))
+
+    def test_replacement_default_and_back(self):
+        u = self.user()
+        u.set_simplified(True)
+        u.learn_replacement("軟體", "軟件")
+        self.assertIsNone(u.default_term("軟體"))
+        u.learn_replacement("軟體", "軟件")
+        self.assertEqual(u.default_term("軟體"), "軟件")
+        self.assertEqual(u.replacement_count("軟體", "軟件"), 2)
+        u.forget_replacement("軟體")
+        self.assertIsNone(u.default_term("軟體"))
+        self.assertEqual(u.replacement_count("軟體", "軟件"), 0)
+
+    def test_no_simplified_file(self):
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "user_simplified.json")))
+        u.set_simplified(True)
+        self.assertEqual(u.phrase_count("ㄋㄧˇ", "妳"), 1)
+        self.assertIsNone(u.default_term("影片"))
+
+    def test_forget_clears_simplified(self):
+        # 全部清除 in Simplified mode: the shared memory, Simplified mode's and its Mainland words all go
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        u.set_simplified(True)
+        u.learn_phrase("ㄧㄥˇ-ㄆㄧㄢˋ", "影片")
+        u.learn_replacement("影片", "視頻")
+        u.save()
+        u.forget_words(1)
+        self.assertTrue(u.simplified)
+        self.assertEqual(u.phrases, {})
+        self.assertEqual(u.replacement_count("影片", "視頻"), 0)
+        self.assertEqual(self.read("user.json")["phrases"], {})
+        self.assertEqual(self.read("user_simplified.json")["phrases"], {})
+        self.assertEqual(self.read("user_simplified.json")["replacements"], {})
+
+    def test_settings_defaults(self):
+        self.assertIs(DEFAULTS["simplified"], False)
+        self.assertIs(DEFAULTS["simplified_hotkey"], False)
+        self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+Shift+F")
 
 
 if __name__ == "__main__":

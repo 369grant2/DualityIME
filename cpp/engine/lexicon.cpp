@@ -684,10 +684,37 @@ UserModel::UserModel(const std::wstring& path, std::function<int()> today)
         size_t slash = path.find_last_of(L"\\/");
         custom_path_ = (slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1)) + L"dictionary.json";
         quick_fill_path_ = (slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1)) + L"quick_fill.json";
+        simplified_path_ = (slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1)) + L"user_simplified.json";
     }
     reload_custom();
     reload_quick_fill();
     std::string text;
+    // 簡體輸出 (#32): what Simplified mode learned (read even when user.json is not there yet)
+    if (!simplified_path_.empty() && read_file(simplified_path_, text)) {
+        bool sok = false;
+        Json s = Json::parse(text, &sok);
+        if (sok && s.is_object()) {
+            auto read_counts = [](const Json* j, OrderedMap<ustr, OrderedMap<ustr, double>>& out) {
+                if (j && j->is_object())
+                    for (auto& [k, bucket] : j->members())
+                        if (bucket.is_object())
+                            for (auto& [p, n] : bucket.members())
+                                if (n.is_number()) out[from_utf8(k)].set(from_utf8(p), n.as_number());
+            };
+            auto read_days = [](const Json* j, OrderedMap<ustr, OrderedMap<ustr, int>>& out) {
+                if (j && j->is_object())
+                    for (auto& [k, bucket] : j->members())
+                        if (bucket.is_object())
+                            for (auto& [p, d] : bucket.members())
+                                if (d.is_number()) out[from_utf8(k)].set(from_utf8(p), static_cast<int>(d.as_number()));
+            };
+            read_counts(s.get("phrases"), simp_phrases_);
+            if (auto* u = s.get("used"); u && u->is_object()) read_days(u->get("phrases"), simp_used_);
+            read_counts(s.get("replacements"), replacements);
+            read_days(s.get("replacements_used"), replacement_used);
+        }
+    }
+    text.clear();
     if (path.empty() || !read_file(path, text)) return;
     bool ok = false;
     Json data = Json::parse(text, &ok);
@@ -1037,6 +1064,8 @@ void UserModel::learn_word(const std::string& word) {
 
 void UserModel::forget_words(int counter) {
     if (counter > forgot) {
+        bool was_simplified = simplified;
+        set_simplified(false);  // (the shared memory and Simplified mode's both go, #32)
         phrases.clear();
         phrase_used.clear();
         english.clear();
@@ -1044,10 +1073,154 @@ void UserModel::forget_words(int counter) {
         word_used.clear();
         ++words_version_;
         forgot = counter;
+        simp_phrases_.clear();
+        simp_used_.clear();
+        replacements.clear();
+        replacement_used.clear();
         save();
+        long long mtime = 0;
+        if (!simplified_path_.empty() && file_mtime(simplified_path_, mtime)) save_simplified();
+        set_simplified(was_simplified);
         corrections.forget();  // (注音自動校正's habits and 代碼記憶, the setting on or off)
         custom_picks.forget();
     }
+}
+
+void UserModel::set_simplified(bool on) {
+    if (on == simplified) return;
+    if (on) {
+        shared_phrases_ = phrases;
+        shared_used_ = phrase_used;
+        merge_simplified();
+    } else {
+        keep_simplified();
+        phrases = std::move(shared_phrases_);
+        phrase_used = std::move(shared_used_);
+        shared_phrases_.clear();
+        shared_used_.clear();
+    }
+    simplified = on;
+}
+
+void UserModel::merge_simplified() {
+    OrderedMap<ustr, OrderedMap<ustr, double>> merged = shared_phrases_;
+    OrderedMap<ustr, OrderedMap<ustr, int>> used = shared_used_;
+    for (auto& [key, picks] : simp_phrases_)
+        for (auto& [phrase, count] : picks) {
+            if (count != 0) {
+                merged[key].set(phrase, count);
+                if (const auto* b = simp_used_.find(key))
+                    if (const int* day = b->find(phrase)) used[key].set(phrase, *day);
+            } else {
+                if (auto* b = merged.find(key)) b->erase(phrase);
+                if (auto* b = used.find(key)) b->erase(phrase);
+            }
+        }
+    phrases.clear();
+    for (auto& [key, bucket] : merged)
+        if (!bucket.empty()) phrases.set(key, bucket);  // (empty buckets dropped, as lexicon.py)
+    phrase_used = std::move(used);
+}
+
+void UserModel::keep_simplified() {
+    // in a fixed order (lexicon.py's too): the merged copy's, then what only the shared ones have
+    OrderedMap<ustr, OrderedMap<ustr, double>> simp_p;
+    OrderedMap<ustr, OrderedMap<ustr, int>> simp_u;
+    std::vector<ustr> keys;
+    for (auto& [k, _] : phrases) keys.push_back(k);
+    for (auto& [k, _] : shared_phrases_)
+        if (!phrases.contains(k)) keys.push_back(k);
+    static const OrderedMap<ustr, double> kNoCounts;
+    static const OrderedMap<ustr, int> kNoDays;
+    for (const auto& key : keys) {
+        const auto* now = phrases.find(key);
+        const auto* was = shared_phrases_.find(key);
+        const auto& n = now ? *now : kNoCounts;
+        const auto& w = was ? *was : kNoCounts;
+        const auto* nu = phrase_used.find(key);
+        const auto* wu = shared_used_.find(key);
+        std::vector<ustr> names;
+        for (auto& [p, _] : n) names.push_back(p);
+        for (auto& [p, _] : w)
+            if (!n.contains(p)) names.push_back(p);
+        for (const auto& p : names) {
+            const double* c = n.find(p);
+            const double* old = w.find(p);
+            double count = c ? *c : 0.0;
+            const int* day = (nu ? *nu : kNoDays).find(p);
+            const int* old_day = (wu ? *wu : kNoDays).find(p);
+            bool day_differs = (day == nullptr) != (old_day == nullptr) || (day && old_day && *day != *old_day);
+            if (count != (old ? *old : 0.0) || (count != 0 && day_differs)) {
+                simp_p[key].set(p, count);
+                if (count != 0 && day) simp_u[key].set(p, *day);
+            }
+        }
+    }
+    simp_phrases_ = std::move(simp_p);
+    simp_used_ = std::move(simp_u);
+}
+
+double UserModel::replacement_count(const ustr& phrase, const ustr& term) const {
+    const auto* b = replacements.find(phrase);
+    const double* count = b ? b->find(term) : nullptr;
+    if (!count || *count == 0) return 0;
+    const auto* u = replacement_used.find(phrase);
+    return faded(*count, u ? u->find(term) : nullptr);
+}
+
+void UserModel::learn_replacement(const ustr& phrase, const ustr& term) {
+    double count = replacement_count(phrase, term) + 1;
+    replacements[phrase].set(term, count);
+    replacement_used[phrase].set(term, today_());
+}
+
+void UserModel::forget_replacement(const ustr& phrase) {
+    replacements.erase(phrase);
+    replacement_used.erase(phrase);
+}
+
+std::optional<ustr> UserModel::default_term(const ustr& phrase) const {
+    if (!simplified) return std::nullopt;
+    const auto* b = replacements.find(phrase);
+    if (!b) return std::nullopt;
+    std::optional<std::pair<double, ustr>> best;  // (count, term) at its largest, as Python's max
+    for (auto& [term, _] : *b) {
+        std::pair<double, ustr> v{replacement_count(phrase, term), term};
+        if (!best || v > *best) best = v;
+    }
+    if (best && best->first >= REPLACE_MIN_USES) return best->second;
+    return std::nullopt;
+}
+
+void UserModel::save_simplified() {
+    if (simplified_path_.empty() || keep_files_) return;
+    auto counts = [](const OrderedMap<ustr, OrderedMap<ustr, double>>& m) {
+        Json j = Json::object();
+        for (auto& [k, bucket] : m) {
+            Json b = Json::object();
+            for (auto& [p, n] : bucket) b[to_utf8(p)] = Json(n);
+            j[to_utf8(k)] = std::move(b);
+        }
+        return j;
+    };
+    auto days = [](const OrderedMap<ustr, OrderedMap<ustr, int>>& m) {
+        Json j = Json::object();
+        for (auto& [k, bucket] : m) {
+            Json b = Json::object();
+            for (auto& [p, d] : bucket) b[to_utf8(p)] = Json(d);
+            j[to_utf8(k)] = std::move(b);
+        }
+        return j;
+    };
+    Json data = Json::object();
+    data["format"] = Json(1);
+    data["phrases"] = counts(simp_phrases_);
+    Json used = Json::object();
+    used["phrases"] = days(simp_used_);
+    data["used"] = std::move(used);
+    data["replacements"] = counts(replacements);
+    data["replacements_used"] = days(replacement_used);
+    write_file_atomic(simplified_path_, data.dump());
 }
 
 void UserModel::forget_emails(int counter) {
@@ -1063,6 +1236,13 @@ void UserModel::import_memory(int counter) {
     // a pick in both keeps the higher count and the later day: the same backup twice adds nothing
     // (see lexicon.py)
     if (counter <= imported || path_.empty() || keep_files_) return;
+    bool was_simplified = simplified;
+    set_simplified(false);  // (merged into the shared memory, #32)
+    import_memory_now(counter);
+    set_simplified(was_simplified);
+}
+
+void UserModel::import_memory_now(int counter) {
     imported = counter;
     size_t slash = path_.find_last_of(L"\\/");
     std::wstring path = (slash == std::wstring::npos ? std::wstring() : path_.substr(0, slash + 1)) + L"import-memory.json";
@@ -1235,6 +1415,12 @@ void UserModel::prune() {
 
 void UserModel::save() {
     if (path_.empty() || keep_files_) return;
+    bool merged = simplified;  // (user.json gets the shared phrases; Simplified mode's go to their own file, #32)
+    if (merged) {
+        keep_simplified();
+        std::swap(phrases, shared_phrases_);
+        std::swap(phrase_used, shared_used_);
+    }
     prune();
     Json data = Json::object();
     Json& ph = data["phrases"] = Json::object();
@@ -1265,6 +1451,12 @@ void UserModel::save() {
     Json& ue = used["emails"] = Json::object();
     for (auto& [w, d] : email_used) ue[w] = Json(d);
     write_file_atomic(path_, data.dump());
+    if (merged) {  // (pruned: the merged copy made again over them)
+        shared_phrases_ = std::move(phrases);
+        shared_used_ = std::move(phrase_used);
+        merge_simplified();
+        save_simplified();
+    }
 }
 
 }  // namespace sz

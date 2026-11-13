@@ -284,6 +284,7 @@ KEEP_CORRECTIONS = 2000  # key strings 注音自動校正 remembers
 CORRECTION_MIN_USES = 2  # a choice there counts once picked this many times
 KEYS_SECTION = "standard"  # keys.json keeps them under the keyboard's name
 AS_ENGLISH = "en"  # 代碼記憶's choice: the keys are English (mp3), not the zhuyin they spell
+REPLACE_MIN_USES = 2  # 簡體輸出 (#32): a Mainland word picked this many times for a Taiwan one comes by itself
 
 # 快速填入 until quick_fill.json is first saved (#33, as ASUS 快捷文字本 ships them; the same list in
 # cpp/engine/lexicon.cpp, installer/src/Settings.cs and settings/ui/bridge.js: tests.test_engine checks them)
@@ -611,6 +612,23 @@ class UserModel:
         self.quick_fill = []
         self._quick_fill_mtime = _NOT_READ
         self.reload_quick_fill()
+        # 簡體輸出 (#32): what Simplified mode learned, in a file of its own laid over phrases / phrase_used
+        # (set_simplified); replacements: a Taiwan word -> {its Mainland word: count} picked in Simplified mode
+        self.simplified = False
+        self.simplified_path = os.path.join(os.path.dirname(path), "user_simplified.json") if path else None
+        self._simp_phrases, self._simp_used = {}, {}
+        self.replacements, self.replacement_used = {}, {}
+        self._shared = None  # (phrases, phrase_used) while Simplified mode shows the merged ones
+        if self.simplified_path and os.path.exists(self.simplified_path):
+            try:
+                with open(self.simplified_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                self._simp_phrases = data.get("phrases", {})
+                self._simp_used = data.get("used", {}).get("phrases", {})
+                self.replacements = data.get("replacements", {})
+                self.replacement_used = data.get("replacements_used", {})
+            except (OSError, ValueError, AttributeError):
+                pass
         if path and os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -761,6 +779,75 @@ class UserModel:
         if self.phrases.get(reading_key, {}).pop(phrase, None) is not None:
             self.phrase_used.get(reading_key, {}).pop(phrase, None)
 
+    # ---- 簡體輸出 (#32) ------------------------------------------------------------------------------------
+    def set_simplified(self, on):
+        """Simplified mode: phrases / phrase_used become the shared ones with Simplified mode's laid over them
+        (a count of 0 there: forgotten in Simplified mode); learning changes that copy, and what differs from the
+        shared ones is Simplified mode's (_keep_simplified). Back to Traditional: the shared ones as they were."""
+        on = bool(on)
+        if on == self.simplified:
+            return
+        if on:
+            self._shared = (self.phrases, self.phrase_used)
+            self.phrases, self.phrase_used = self._merged()
+        else:
+            self._keep_simplified()
+            self.phrases, self.phrase_used = self._shared
+            self._shared = None
+        self.simplified = on
+
+    def _merged(self):
+        shared_p, shared_u = self._shared
+        phrases = {k: dict(v) for k, v in shared_p.items()}
+        used = {k: dict(v) for k, v in shared_u.items()}
+        for key, picks in self._simp_phrases.items():
+            for phrase, count in picks.items():
+                if count:
+                    phrases.setdefault(key, {})[phrase] = count
+                    day = self._simp_used.get(key, {}).get(phrase)
+                    if day is not None:
+                        used.setdefault(key, {})[phrase] = day
+                else:
+                    phrases.get(key, {}).pop(phrase, None)
+                    used.get(key, {}).pop(phrase, None)
+        return {k: v for k, v in phrases.items() if v}, used
+
+    def _keep_simplified(self):
+        """Simplified mode's own: where the merged copy differs from the shared ones (removed: a count of 0)."""
+        shared_p, shared_u = self._shared
+        simp_p, simp_u = {}, {}
+        # (in a fixed order, the C++ engine's too: the merged copy's, then what only the shared ones have)
+        for key in list(self.phrases) + [k for k in shared_p if k not in self.phrases]:
+            now, was = self.phrases.get(key, {}), shared_p.get(key, {})
+            for phrase in list(now) + [p for p in was if p not in now]:
+                count, day = now.get(phrase, 0), self.phrase_used.get(key, {}).get(phrase)
+                if count != was.get(phrase, 0) or (count and day != shared_u.get(key, {}).get(phrase)):
+                    simp_p.setdefault(key, {})[phrase] = count
+                    if count and day is not None:
+                        simp_u.setdefault(key, {})[phrase] = day
+        self._simp_phrases, self._simp_used = simp_p, simp_u
+
+    def replacement_count(self, phrase, term):
+        count = self.replacements.get(phrase, {}).get(term, 0)
+        return self._faded(count, self.replacement_used.get(phrase, {}).get(term)) if count else 0
+
+    def learn_replacement(self, phrase, term):
+        """term (a Mainland word, Traditional characters) picked for phrase in Simplified mode."""
+        self.replacements.setdefault(phrase, {})[term] = self.replacement_count(phrase, term) + 1
+        self.replacement_used.setdefault(phrase, {})[term] = self.today()
+
+    def forget_replacement(self, phrase):
+        """The Taiwan word picked back: its Mainland words no longer come by themselves."""
+        self.replacements.pop(phrase, None)
+        self.replacement_used.pop(phrase, None)
+
+    def default_term(self, phrase):
+        """The Mainland word Simplified mode writes for phrase by itself (picked REPLACE_MIN_USES times), or None."""
+        if not self.simplified:
+            return None
+        best = max(((self.replacement_count(phrase, t), t) for t in self.replacements.get(phrase, {})), default=None)
+        return best[1] if best and best[0] >= REPLACE_MIN_USES else None
+
     def phrases_changed(self, before):
         """[(reading key, phrase, (count, day used) as it was)] for what differs from before, a
         (phrases, phrase_used) copy: to put back with restore_phrases, and nothing else."""
@@ -796,9 +883,15 @@ class UserModel:
     def forget_words(self, counter):
         """全部清除 (the settings tool bumped counter): every kind of typing memory but the e-mails."""
         if counter > self.forgot:
+            simplified = self.simplified
+            self.set_simplified(False)  # (the shared memory and Simplified mode's both go, #32)
             self.phrases, self.phrase_used, self.english = {}, {}, set()
             self.words, self.word_used, self.forgot = {}, {}, counter
+            self._simp_phrases, self._simp_used, self.replacements, self.replacement_used = {}, {}, {}, {}
             self.save()
+            if self.simplified_path and os.path.exists(self.simplified_path):
+                self._save_simplified()
+            self.set_simplified(simplified)
             self.corrections.forget()  # (注音自動校正's habits and 代碼記憶, the setting on or off)
             self.custom_picks.forget()
 
@@ -814,6 +907,14 @@ class UserModel:
         count and the later day, so restoring the same backup twice adds nothing."""
         if counter <= self.imported or not self.path:
             return
+        simplified = self.simplified
+        self.set_simplified(False)  # (merged into the shared memory, #32)
+        try:
+            self._import_memory(counter)
+        finally:
+            self.set_simplified(simplified)
+
+    def _import_memory(self, counter):
         self.imported = counter
         path = os.path.join(os.path.dirname(self.path), "import-memory.json")
         try:
@@ -908,6 +1009,11 @@ class UserModel:
     def save(self):
         if not self.path:
             return
+        merged = None
+        if self.simplified:  # (user.json gets the shared phrases; Simplified mode's go to their own file)
+            self._keep_simplified()
+            merged = (self.phrases, self.phrase_used)
+            self.phrases, self.phrase_used = self._shared
         self._prune()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
@@ -918,3 +1024,17 @@ class UserModel:
                        "used": {"phrases": self.phrase_used, "words": self.word_used, "emails": self.email_used}},
                       f, ensure_ascii=False)
         os.replace(tmp, self.path)
+        if merged is not None:
+            self._shared = (self.phrases, self.phrase_used)  # (pruned: the merged copy made again over them)
+            self.phrases, self.phrase_used = self._merged()
+            self._save_simplified()
+
+    def _save_simplified(self):
+        if not self.simplified_path:
+            return
+        tmp = self.simplified_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"format": 1, "phrases": self._simp_phrases, "used": {"phrases": self._simp_used},
+                       "replacements": self.replacements, "replacements_used": self.replacement_used},
+                      f, ensure_ascii=False)
+        os.replace(tmp, self.simplified_path)

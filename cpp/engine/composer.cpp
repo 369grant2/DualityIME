@@ -64,6 +64,7 @@ constexpr double RARE_SCORE = -6.0;
 constexpr int MAX_SYL_KEYS = 5;
 constexpr size_t MAX_RAW = 100;  // keys in the buffer before the oldest phrase is sent (the ASUS IME: about 100)
 constexpr double USER_PHRASE_SCORE = -6.0;
+constexpr double MAINLAND_BONUS = 0.5;  // 簡體輸出 (#32): a Mainland word (OpenCC TWPhrases) in Simplified mode; tuned by measuring
 constexpr int SPAN_MAX = 4;  // characters from the first to the last pick learned as one word (Composer::learn_spans)
 // what learn_spans, learn_beside_words and learn_what_learning_changed learn starts with one of these: the
 // common family names (and the first character of the two-character ones). A name is what they are for; in
@@ -1236,8 +1237,12 @@ std::vector<Scored> phrase_candidates(const std::vector<ustr>& readings, const L
     if (names)
         if (auto* v = lexicon.names_find(key))
             for (auto& [p, s] : *v) scored.setdefault(p, s);
+    bool simplified = user && user->simplified;
+    if (simplified)  // 簡體輸出 (#32): the Mainland words the dictionary lacks, Simplified mode only
+        for (auto& p : lexicon.script().mainland_for_reading(key)) scored.setdefault(p, USER_PHRASE_SCORE);
     if (user)
-        for (auto& [p, s] : scored) s = s + user->bonus(key, p);
+        for (auto& [p, s] : scored)
+            s = s + user->bonus(key, p) + (simplified && lexicon.script().is_mainland(p) ? MAINLAND_BONUS : 0.0);
     std::vector<Scored> out(scored.begin(), scored.end());
     std::stable_sort(out.begin(), out.end(), [](const Scored& a, const Scored& b) { return -a.second < -b.second; });
     return out;

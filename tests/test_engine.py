@@ -6638,10 +6638,62 @@ class SimplifiedMemoryTest(unittest.TestCase):
         self.assertEqual(self.read("user_simplified.json")["phrases"], {})
         self.assertEqual(self.read("user_simplified.json")["replacements"], {})
 
-    def test_settings_defaults(self):
+    def test_settings_defaults_simplified(self):
         self.assertIs(DEFAULTS["simplified"], False)
         self.assertIs(DEFAULTS["simplified_hotkey"], False)
         self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+Shift+F")
+
+
+class SimplifiedTypingTest(unittest.TestCase):
+    """簡體輸出 (#32): typing in Simplified mode; Traditional mode as it always was."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def composer(self, simplified):
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS)
+        if simplified:
+            c.user.set_simplified(True)
+        return c
+
+    def type(self, c, readings, *specials):
+        from engine.zhuyin import reading_to_keys
+        for k in "".join(reading_to_keys(r) for r in readings.split()):
+            c.key(k)
+        for s in specials:
+            c.key(special=s)
+        return c.composition
+
+    def send(self, c, readings):
+        self.type(c, readings, "ENTER")
+        return c.commit
+
+    def test_mainland_word_typed(self):
+        # 光驅 (a Mainland word the dictionary lacks; Traditional mode types 光區): Simplified mode only
+        self.assertEqual(self.send(self.composer(True), "ㄍㄨㄤ ㄑㄩ"), "光驅")
+
+    def test_traditional_never_mainland(self):
+        c = self.composer(False)
+        self.assertEqual(self.send(c, "ㄍㄨㄤ ㄑㄩ"), "光區")
+        self.type(c, "ㄍㄨㄤ ㄑㄩ", "LEFT", "LEFT", "DOWN")
+        self.assertNotIn("光驅", c.candidates)
+
+    def test_dictionary_mainland_word_preferred(self):
+        # 導出 is in the dictionary, but Traditional mode types 倒出: Simplified mode gives it the bonus (how much is
+        # measured: Task 8 of the plan); 倒出 keeps its score
+        scores = []
+        for simplified in (False, True):
+            c = self.composer(simplified)
+            scores.append(dict(composer.phrase_candidates(["ㄉㄠˇ", "ㄔㄨ"], c.lexicon, c.user)))
+        self.assertAlmostEqual(scores[1]["導出"] - scores[0]["導出"], composer.MAINLAND_BONUS)
+        self.assertEqual(scores[1]["倒出"], scores[0]["倒出"])
+
+    def test_taiwan_sentence_in_simplified(self):
+        r = "ㄨㄛˇ ㄇㄣ˙ ㄐㄧㄣ ㄊㄧㄢ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ"
+        self.assertEqual(self.send(self.composer(False), r), "我們今天去看電影")
+        self.assertEqual(self.send(self.composer(True), r), "我們今天去看電影")
 
 
 if __name__ == "__main__":

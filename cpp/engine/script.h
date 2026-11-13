@@ -21,6 +21,7 @@ public:
     bool is_mainland(const ustr& word) const { return mainland_.count(word) > 0; }
     // Mainland words (Traditional characters) the dictionary lacks -> reading key (主板 -> ㄓㄨˇ-ㄅㄢˇ)
     const std::unordered_map<ustr, ustr>& mainland_words() const { return words_; }
+    const std::vector<ustr>& mainland_for_reading(const ustr& reading_key) const;  // ㄍㄨㄤ-ㄑㄩ -> {光驅}
 
 private:
     struct Step {
@@ -30,6 +31,7 @@ private:
     std::vector<Step> steps_;
     std::unordered_map<ustr, std::vector<ustr>> rev_;
     std::unordered_map<ustr, ustr> words_;
+    std::unordered_map<ustr, std::vector<ustr>> by_reading_;
     std::unordered_set<ustr> mainland_;
 };
 

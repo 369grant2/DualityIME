@@ -938,9 +938,18 @@ def phrase_candidates(readings, lexicon, user=None, names=False):
     if names:  # (after the user's words: a name learned or in 個人詞庫 keeps USER_PHRASE_SCORE - review 2026-11-09)
         for p, s in lexicon.names.get(reading_key, ()):
             scored.setdefault(p, s)
+    simplified = bool(user) and user.simplified
+    if simplified:  # 簡體輸出 (#32): the Mainland words the dictionary lacks, Simplified mode only
+        for p in lexicon.script.mainland_for_reading(reading_key):
+            scored.setdefault(p, USER_PHRASE_SCORE)
     if user:
-        scored = {p: s + user.bonus(reading_key, p) for p, s in scored.items()}
+        scored = {p: s + user.bonus(reading_key, p) +
+                  (MAINLAND_BONUS if simplified and lexicon.script.is_mainland(p) else 0.0)
+                  for p, s in scored.items()}
     return sorted(scored.items(), key=lambda x: -x[1])
+
+
+MAINLAND_BONUS = 0.5  # 簡體輸出 (#32): a Mainland word (OpenCC TWPhrases) in Simplified mode; tuned by measuring
 
 
 BIGRAM_WEIGHT = 0.6     # how much the previous phrase matters vs. plain frequency

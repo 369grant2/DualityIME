@@ -8,9 +8,9 @@ namespace sz {
 
 namespace {
 
-// {key: values} of an OpenCC table ("key<TAB>value value", # comments); {} without the file
-std::unordered_map<ustr, std::vector<ustr>> read_table(const std::wstring& path) {
-    std::unordered_map<ustr, std::vector<ustr>> table;
+// (key, values) of an OpenCC table in the file's order ("key<TAB>value value", # comments); none without the file
+std::vector<std::pair<ustr, std::vector<ustr>>> read_table(const std::wstring& path) {
+    std::vector<std::pair<ustr, std::vector<ustr>>> table;
     std::string text;
     if (!read_file(path, text)) return table;
     size_t pos = 0;
@@ -32,7 +32,7 @@ std::unordered_map<ustr, std::vector<ustr>> read_table(const std::wstring& path)
             if (sp == std::string_view::npos) break;
             rest.remove_prefix(sp + 1);
         }
-        if (!values.empty()) table.emplace(from_utf8(line.substr(0, tab)), std::move(values));
+        if (!values.empty()) table.emplace_back(from_utf8(line.substr(0, tab)), std::move(values));
     }
     return table;
 }
@@ -54,17 +54,30 @@ void Script::load(const std::wstring& data_dir) {
             std::unordered_map<ustr, ustr> t;
             for (auto& [k, v] : read_table(folder + name)) {
                 step.longest = std::max(step.longest, k.size());
-                t.emplace(k, v[0]);
+                t[k] = v[0];  // (a key twice: the last, as a dict)
             }
             step.tables.push_back(std::move(t));
         }
         steps_.push_back(std::move(step));
     }
-    rev_ = read_table(folder + L"TWPhrasesRev.txt");
+    rev_.clear();
+    for (auto& [k, v] : read_table(folder + L"TWPhrasesRev.txt")) rev_[k] = v;  // (a key twice: the last, as a dict)
     words_.clear();
-    for (auto& [k, v] : read_table(folder + L"mainland_words.txt")) words_.emplace(k, v[0]);
+    by_reading_.clear();
+    std::vector<ustr> order;  // first appearance, its last reading: as a dict in engine/script.py
+    for (auto& [k, v] : read_table(folder + L"mainland_words.txt")) {
+        if (!words_.count(k)) order.push_back(k);
+        words_[k] = v[0];
+    }
+    for (auto& k : order) by_reading_[words_[k]].push_back(k);
     mainland_.clear();
     for (auto& [k, v] : read_table(folder + L"TWPhrases.txt")) mainland_.insert(k);
+}
+
+const std::vector<ustr>& Script::mainland_for_reading(const ustr& reading_key) const {
+    static const std::vector<ustr> kNone;
+    auto it = by_reading_.find(reading_key);
+    return it == by_reading_.end() ? kNone : it->second;
 }
 
 ustr Script::to_simplified(const ustr& in) const {

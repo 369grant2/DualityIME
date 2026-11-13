@@ -33,6 +33,9 @@ class Script:
         self._rev = rev
         self.mainland_words = mainland_words  # Mainland word (Traditional characters) the dictionary lacks -> reading
         self._mainland = mainland_keys
+        self._by_reading = {}  # reading key -> those words, the file's order
+        for word, reading in mainland_words.items():
+            self._by_reading.setdefault(reading, []).append(word)
 
     @classmethod
     def load(cls, data_dir):
@@ -66,6 +69,10 @@ class Script:
     def mainland_terms(self, phrase):
         """The Mainland words for a Taiwan one, Traditional characters, the table's order (影片 -> [視頻])."""
         return list(self._rev.get(phrase, ()))
+
+    def mainland_for_reading(self, reading_key):
+        """The Mainland words the dictionary lacks that read so (ㄍㄨㄤ-ㄑㄩ -> [光驅])."""
+        return self._by_reading.get(reading_key, ())
 
     def is_mainland(self, word):
         """word is one of the Mainland words of the tables (視頻, 主板)."""

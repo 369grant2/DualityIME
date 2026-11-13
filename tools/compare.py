@@ -25,6 +25,12 @@ from engine.zhuyin import reading_to_keys  # noqa: E402
 EXE = os.path.join(ROOT, "cpp", "build", "x64-Release", "sz_trace.exe")
 
 CASES = [
+    # 簡體輸出 (#32; every setting types them, the last one in Simplified mode): 軟體's Mainland word picked twice
+    # (then by itself), picked back; 位元組 shown as the shorter 字節, the caret over it and a key taken back;
+    # 光驅 (a Mainland word the dictionary lacks), 導出, 影片
+    "bj03wu3{DOWN}1{ENTER}bj03wu3{DOWN}1{ENTER}bj03wu3{ENTER}bj03wu3{DOWN}2{ENTER}bj03wu3{ENTER}",
+    "jo4m06yj3{DOWN}1{LEFT}{RIGHT}{BACK}{ENTER}jo4m06yj3{DOWN}1{ENTER}",
+    "ej; fm {ENTER}2l3tj {ENTER}u/3qu04{ENTER}",
     # (before any pick of 試: with one, 試試 comes without the model too)
     "ji3y94u h4g4g4{ENTER}",  # 我再一次試試: 試試 only with 長句選字加強 (逝世 without)
     # (first: the presses counted are those of a list nothing has reordered yet)
@@ -304,6 +310,7 @@ CONFIGS = [
     {"long_sentence": False},  # 長句選字加強 off ({} above: on, the default)
     {"cand_keys": "1234qweras", "cand_layout": "grid",  # other candidate keys, a grid (#23)
      "no_quick_fill": True},  # (not a setting: no quick_fill.json, so 快速填入 lists its samples, #33)
+    {"simplified": True},  # 簡體輸出 (#32): shown and sent in Simplified characters, its memory in user_simplified.json
 ]
 DICTIONARY = {
     "words": [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"], ["史芸", "ㄕˇㄩㄣˊ"], ["好", "ㄏㄠˇ"], ["ㄎㄎ", ""], ["Kazuma", ""],
@@ -343,7 +350,7 @@ def compare(cases, config, tmp):
         f.write("\n".join(cases) + "\n")
     for side in ("py", "cpp"):  # each its own files: 全形 on/off is saved in config.json
         os.makedirs(os.path.join(tmp, side), exist_ok=True)
-        for name in ("user.json", "keys.json", "custom_picks.json"):
+        for name in ("user.json", "keys.json", "custom_picks.json", "user_simplified.json"):
             if os.path.exists(os.path.join(tmp, side, name)):
                 os.remove(os.path.join(tmp, side, name))
         settings = {k: v for k, v in config.items() if k != "no_quick_fill"}
@@ -401,6 +408,16 @@ def compare(cases, config, tmp):
             picks.append(None)
     if picks[0] != picks[1]:
         sys.exit(f"DIFFERENT custom_picks.json with {config}")
+    simp = []  # 簡體輸出's own memory (#32)
+    for side in ("py", "cpp"):
+        path = os.path.join(tmp, side, "user_simplified.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                simp.append(json.load(f))
+        else:
+            simp.append(None)
+    if simp[0] != simp[1]:
+        sys.exit(f"DIFFERENT user_simplified.json with {config}")
     return keys
 
 

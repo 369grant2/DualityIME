@@ -1872,6 +1872,7 @@ Composer::Composer(SyllableTable& table, const Lexicon& lexicon, const English& 
     table_.set_custom(user.custom_order);  // (the readings of 個人詞庫 are syllables too)
     user.corrections.enable(true);  // (代碼記憶 counts with the setting off too)
     user.import_memory(config.number("import_memory"));  // a backup restored while the engine was off
+    user.set_simplified(config.flag("simplified"));  // 簡體輸出 (#32)
     reset();
 }
 
@@ -1886,6 +1887,7 @@ void Composer::reset() {
 void Composer::clear_input() {
     raw.clear();
     overrides_.clear();
+    term_picks_.clear();
     replaced_.clear();
     forced_.clear();
     chinese_.clear();
@@ -1919,6 +1921,10 @@ void Composer::settings_changed() {
     user.forget_words(config.number("forget_words"));
     user.forget_emails(config.number("forget_emails"));
     user.import_memory(config.number("import_memory"));
+    if (user.simplified != config.flag("simplified")) {  // 簡體輸出 switched in the settings (#32)
+        user.set_simplified(config.flag("simplified"));
+        refresh();
+    }
     if (table_.autocorrect != (config.flag("autocorrect")) || lm_on_ != config.flag("long_sentence")) {
         table_.autocorrect = config.flag("autocorrect");
         refresh();
@@ -2008,7 +2014,24 @@ void Composer::refresh() {
     put_back();
     drop_orphans();
     segments_ = convert_all();
+    // (a Mainland word picked for a phrase no longer there: gone with it, #32)
+    for (auto it = term_picks_.begin(); it != term_picks_.end();) {
+        bool here = false;
+        for (auto& seg : segments_)
+            if (seg.start == it->first.first && seg.length == it->first.second) here = seg.phrase == it->second.first;
+        it = here ? std::next(it) : term_picks_.erase(it);
+    }
     render();
+}
+
+ustr Composer::shown_phrase(int s, int l, const ustr& p) const {
+    // 簡體輸出 (#32): in Simplified mode the Mainland word picked for it here, or the one it takes by itself
+    if (!user.simplified) return p;
+    auto it = term_picks_.find({s, l});
+    ustr t = p;
+    if (it != term_picks_.end()) t = it->second.second;
+    else if (auto d = user.default_term(p)) t = *d;
+    return lexicon_.script().to_simplified(t);
 }
 
 std::vector<Segment> Composer::convert_all(const Overrides* instead) {
@@ -2051,16 +2074,24 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
 
 void Composer::render() {
     std::map<int, ustr> chars;
-    for (auto& seg : segments_)
+    plain_chars_.clear();
+    for (auto& seg : segments_) {
         for (int k = 0; k < seg.length; ++k)
-            chars[seg.start + k] = static_cast<int>(seg.phrase.size()) == seg.length ? ustr(1, seg.phrase[k])
-                                   : k == 0 ? seg.phrase : ustr();
+            plain_chars_[seg.start + k] = static_cast<int>(seg.phrase.size()) == seg.length ? ustr(1, seg.phrase[k])
+                                          : k == 0 ? seg.phrase : ustr();
+        ustr p = shown_phrase(seg.start, seg.length, seg.phrase);
+        for (int k = 0; k < seg.length; ++k)
+            chars[seg.start + k] = static_cast<int>(p.size()) == seg.length ? ustr(1, p[k]) : k == 0 ? p : ustr();
+    }
     ustr text;
     int idx = 0;
     bool zhuyin_preview = config.text("preview") == "zhuyin";
     wide_.clear();
+    plain_by_start_.clear();
     for (auto& t : tokens) {
         if (t.kind == Kind::Zh) {
+            auto plain = plain_chars_.find(idx);
+            plain_by_start_[t.start] = (plain == plain_chars_.end() ? ustr(U"?") : plain->second).substr(0, 1);
             auto it = chars.find(idx);
             const ustr shown = it == chars.end() ? ustr(U"?") : it->second;
             text += shown;
@@ -2080,6 +2111,8 @@ void Composer::render() {
     composition = text;
     cursor = caret_ ? tok_offset(*caret_) : static_cast<int>(composition.size());
     suggest();
+    if (user.simplified)  // (shown in Simplified characters; what Tab takes is in sugg_actions_, #32)
+        for (auto& s : suggestions) s = lexicon_.script().to_simplified(s);
     replacements.clear();
     repl_actions_.clear();
     if (caret_ && candidates.empty() && !symbol_page && !fill_ && !simulating_) replacement_bar(replacements, repl_actions_);
@@ -2116,6 +2149,8 @@ std::vector<int> Composer::stops() const {
     std::vector<int> out;
     for (auto& t : tokens) {
         if (t.kind == Kind::Zh || t.kind == Kind::Fix) {
+            auto w = wide_.find(t.start);
+            if (t.kind == Kind::Zh && w != wide_.end() && w->second == 0) continue;  // (位元組 shown 字节, #32)
             out.push_back(t.start);
         } else {
             for (int k = 0; k < static_cast<int>(t.raw.size()); ++k) out.push_back(t.start + k);
@@ -2341,8 +2376,9 @@ std::vector<Composer::Action> Composer::next_char_now() {
     // (個人詞庫's words come whole before this: custom_completion)
     for (int k = std::min(4, b - a); k > 0; --k) {
         int s = b - k;
-        int off = syl_offset(s);
-        ustr typed = composition.substr(off, k);
+        ustr typed;  // (as chosen: Traditional, #32)
+        for (int i = s; i < b; ++i)
+            if (auto it = plain_chars_.find(i); it != plain_chars_.end()) typed += it->second;
         std::vector<std::pair<std::pair<ustr, ustr>, double>> wv;  // (char, reading) -> summed probability
         std::vector<std::pair<double, const Completion*>> likeliest;  // wv's order: its likeliest phrase
         std::vector<ustr> part(readings.begin() + s, readings.begin() + b);
@@ -2474,8 +2510,9 @@ bool Composer::shown_as(int s, const std::vector<CustomUnit>& units, const std::
                     tok = &t;
                     break;
                 }
-            int at = tok ? tok_offset(pos) : -1;
-            if (!tok || at >= static_cast<int>(composition.size()) || composition[at] != units[i].ch) return false;
+            // (the character as chosen, Traditional: what the word writes, #32)
+            auto plain = tok ? plain_by_start_.find(pos) : plain_by_start_.end();
+            if (!tok || plain == plain_by_start_.end() || plain->second != ustr(1, units[i].ch)) return false;
         }
         pos += static_cast<int>(keys[i].size());
     }
@@ -2617,7 +2654,8 @@ std::optional<Composer::Action> Composer::name_completion() {
         const auto& starts = lexicon_.name_starts(rds);
         if (starts.empty()) continue;
         ustr typed;
-        for (int i = s; i < b; ++i) typed.push_back(composition[syl_offset(i)]);
+        for (int i = s; i < b; ++i)  // (Traditional, #32)
+            if (auto it = plain_chars_.find(i); it != plain_chars_.end()) typed += it->second.substr(0, 1);
         bool word = false;
         for (auto& [p, score] : lexicon_.lookup(rds))
             if (p == typed && score > NAME_SCORE) word = true;
@@ -2761,7 +2799,10 @@ void Composer::take_suggestion() {
         int s = action.s;
         int b = static_cast<int>(readings.size());
         std::vector<ustr> shown;
-        for (int i = s; i < b; ++i) shown.push_back(ustr(1, composition[syl_offset(i)]));
+        for (int i = s; i < b; ++i) {  // (as chosen: Traditional, #32)
+            auto it = plain_chars_.find(i);
+            shown.push_back(it == plain_chars_.end() ? ustr() : it->second.substr(0, 1));
+        }
         for (auto& r : action.readings) raw += table_.reading_to_keys(r);
         // Tab accepts what is on screen as well as the new character(s): pin them all
         std::vector<ustr> rds(readings.begin() + s, readings.begin() + b);
@@ -2859,6 +2900,66 @@ void Composer::pin(int start, const std::vector<ustr>& rds, const std::vector<us
 // ---- candidates ------------------------------------------------------------------------
 
 bool Composer::open_candidates() {
+    if (!open_list()) return false;
+    if (user.simplified) simplified_list();
+    return true;
+}
+
+void Composer::simplified_list() {
+    // 簡體輸出 (#32): the Mainland words of the phrase where the list is (the one the caret is in, the last at
+    // the end) first, then the Taiwan phrase, then the rest; every label in Simplified characters
+    int n = static_cast<int>(readings.size());
+    int at = n ? std::min(caret_index(), n - 1) : -1;
+    const Segment* seg = nullptr;
+    for (auto& sg : segments_)
+        if (sg.start <= at && at < sg.start + sg.length) {
+            seg = &sg;
+            break;
+        }
+    bool phrases = false;
+    for (auto& a : cand_actions_)
+        if (a.type == "phrase") phrases = true;
+    if (seg && phrases) {
+        auto terms = lexicon_.script().mainland_terms(seg->phrase);
+        if (!terms.empty()) {
+            std::vector<ustr> labels;
+            std::vector<Action> actions;
+            for (auto& t : terms) {
+                Action a;
+                a.type = "term";
+                a.s = seg->start;
+                a.l = seg->length;
+                a.text = seg->phrase;
+                a.term = t;
+                labels.push_back(t);
+                actions.push_back(a);
+            }
+            Action back;
+            back.type = "phrase";
+            back.s = seg->start;
+            back.l = seg->length;
+            back.text = seg->phrase;
+            labels.push_back(seg->phrase);
+            actions.push_back(back);
+            candidates.insert(candidates.begin(), labels.begin(), labels.end());
+            cand_actions_.insert(cand_actions_.begin(), actions.begin(), actions.end());
+        }
+    }
+    std::vector<ustr> out;
+    std::vector<Action> actions;
+    std::set<ustr> seen;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        ustr shown = lexicon_.script().to_simplified(candidates[i]);
+        if (!seen.insert(shown).second) continue;  // (two Traditional words written the same: the first)
+        out.push_back(shown);
+        actions.push_back(cand_actions_[i]);
+    }
+    candidates = std::move(out);
+    cand_actions_ = std::move(actions);
+    cand_index = 0;
+}
+
+bool Composer::open_list() {
     cand_expanded = false;
     cand_first = 0;
     std::vector<ustr> labels;
@@ -3878,7 +3979,14 @@ bool Composer::key_fill(std::optional<char32_t> ch, const std::string& special) 
 }
 
 void Composer::pick(int i, bool from_bar) {
-    const Action action = cand_actions_[i];
+    Action action = cand_actions_[i];
+    std::optional<ustr> term;  // 簡體輸出 (#32): what is shown for the phrase picked
+    if (action.type == "term") {
+        term = action.term;
+        action.type = "phrase";
+    } else if (action.type == "phrase" && user.simplified) {
+        term = action.text;  // (the Taiwan phrase itself: shown so, its Mainland word forgotten once sent)
+    }
     std::optional<std::pair<int, int>> picked;  // (first syllable, count) of a phrase picked from the list
     const std::vector<Segment> shown_then = segments_;  // when the user picked: what comes before stays (keep_before)
     if (action.type == "phrase") {
@@ -3891,8 +3999,12 @@ void Composer::pick(int i, bool from_bar) {
         for (int k = s; k < s + l; ++k)
             if (auto it = shown.find(k); it != shown.end()) there += it->second;
         const ustr* written = lexicon_.name_written(action.text);
-        // (what is there already: nothing to do - but a character's name shown without its ·, #14)
-        if (there != action.text || written) {
+        // (what is there already: nothing to do - but a character's name shown without its ·, #14; a Mainland
+        // word picked: the phrase made one piece, whatever is there, so the word has a place, #32)
+        bool piece = false;
+        for (auto& seg : segments_)
+            if (seg.start == s && seg.length == l && seg.phrase == action.text) piece = true;
+        if (there != action.text || written || (term && *term != action.text && !piece)) {
             Overrides kept;  // drop overrides overlapped by the new pick, and what an earlier pick there kept
             for (auto& [sp, v] : overrides_)
                 if ((sp.first + sp.second <= s || sp.first >= s + l) &&
@@ -3907,6 +4019,10 @@ void Composer::pick(int i, bool from_bar) {
             if (written && overrides_.count({s, l})) dot_name(s, l, *written);
         }
         picked = {s, l};
+        if (term) {
+            term_picks_[{s, l}] = {action.text, *term};
+            render();
+        }
     } else if (action.type == "chinese") {
         chinese_.insert(action.start);
         for (int x : action.unchinese) chinese_.erase(x);
@@ -4017,7 +4133,9 @@ void Composer::pick(int i, bool from_bar) {
             before = commit;
         }
         last_commit_.reset();
-        commit = before + action.text;
+        ustr sent = action.text;
+        if (action.type == "shortcut" && user.simplified) sent = lexicon_.script().to_simplified(sent);  // (#32)
+        commit = before + sent;
         return;
     } else if (action.type == "raw" || action.type == "typed") {
         // (typed: an unfinished syllable shown as zhuyin put back as its keys, this once - su learned
@@ -4654,6 +4772,7 @@ void Composer::do_commit() {
     undo.exact = exact_;
     undo.taken = taken_;
     undo.pending = pending_;
+    undo.term_picks = term_picks_;
     if (!overrides_.empty()) {
         auto old_phrases = user.phrases;
         auto old_used = user.phrase_used;
@@ -4685,9 +4804,33 @@ void Composer::do_commit() {
     if (last && last->kind == Kind::Zh && !segments_.empty()) context_word_ = segments_.back().phrase;
     else context_word_.reset();
     undo.corrected = learn_corrections(static_cast<int>(raw.size()));
+    undo.terms = learn_terms();
     clear_input();
     commit = text;
     last_commit_ = std::make_pair(text, undo);
+}
+
+std::vector<Composer::TermChange> Composer::learn_terms() {
+    // 簡體輸出 (#32): each Mainland word picked here is learned for its Taiwan phrase; the Taiwan phrase picked
+    // where its Mainland word came by itself forgets it (see engine/composer.py _learn_terms)
+    std::vector<TermChange> changed;
+    if (!user.simplified || term_picks_.empty()) return changed;
+    for (auto& [span, v] : term_picks_) {
+        auto& [p, t] = v;
+        bool here = false;
+        for (auto& seg : segments_)
+            if (seg.start == span.first && seg.length == span.second) here = seg.phrase == p;
+        if (!here || (t == p && !user.default_term(p))) continue;
+        std::optional<OrderedMap<ustr, double>> counts;
+        std::optional<OrderedMap<ustr, int>> days;
+        if (auto* c = user.replacements.find(p)) counts = *c;
+        if (auto* d = user.replacement_used.find(p)) days = *d;
+        changed.emplace_back(p, counts, days);
+        if (t != p) user.learn_replacement(p, t);
+        else user.forget_replacement(p);
+    }
+    if (!changed.empty()) user.save();
+    return changed;
 }
 
 void Composer::note_as_typed(int start, int end) {
@@ -4927,8 +5070,19 @@ ustr Composer::undo_commit() {
     digits_as_zhuyin_ = undo.digits_as_zhuyin;
     context_word_ = undo.context_word;
     after_english_ = undo.after_english;
+    term_picks_ = undo.term_picks;
     if (!undo.learned.empty()) {  // picked by mistake: nothing of it learned or forgotten after all
         user.restore_phrases(undo.learned);
+        user.save();
+    }
+    if (!undo.terms.empty()) {  // (the Mainland words of 簡體輸出 the same, #32)
+        for (auto it = undo.terms.rbegin(); it != undo.terms.rend(); ++it) {
+            auto& [p, counts, days] = *it;
+            if (counts) user.replacements.set(p, *counts);
+            else user.replacements.erase(p);
+            if (days) user.replacement_used.set(p, *days);
+            else user.replacement_used.erase(p);
+        }
         user.save();
     }
     if (!undo.corrected.empty()) user.corrections.restore(undo.corrected);  // (校正記憶 the same)

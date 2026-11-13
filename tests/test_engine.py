@@ -6672,7 +6672,7 @@ class SimplifiedTypingTest(unittest.TestCase):
 
     def test_mainland_word_typed(self):
         # 光驅 (a Mainland word the dictionary lacks; Traditional mode types 光區): Simplified mode only
-        self.assertEqual(self.send(self.composer(True), "ㄍㄨㄤ ㄑㄩ"), "光驅")
+        self.assertEqual(self.send(self.composer(True), "ㄍㄨㄤ ㄑㄩ"), "光驱")
 
     def test_traditional_never_mainland(self):
         c = self.composer(False)
@@ -6693,7 +6693,111 @@ class SimplifiedTypingTest(unittest.TestCase):
     def test_taiwan_sentence_in_simplified(self):
         r = "ㄨㄛˇ ㄇㄣ˙ ㄐㄧㄣ ㄊㄧㄢ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ"
         self.assertEqual(self.send(self.composer(False), r), "我們今天去看電影")
-        self.assertEqual(self.send(self.composer(True), r), "我們今天去看電影")
+        self.assertEqual(self.send(self.composer(True), r), "我们今天去看电影")
+
+    def pick(self, c, label):
+        """↓ is open: pick the candidate shown so (its candidate key)."""
+        i = c.candidates.index(label)
+        while i >= c.page_size():
+            c.key(special="PGDN")
+            i -= c.page_size()
+        c.key(c.config.cand_keys[i])
+
+    def test_taiwan_word_kept(self):
+        self.assertEqual(self.send(self.composer(True), "ㄧㄥˇ ㄆㄧㄢˋ"), "影片")
+        self.assertEqual(self.send(self.composer(True), "ㄖㄨㄢˇ ㄊㄧˇ"), "软体")
+
+    def test_mainland_first_in_candidates(self):
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.assertEqual(c.candidates[0], "软件")
+        self.pick(c, "软件")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "软件")
+
+    def test_two_picks_make_default(self):
+        c = self.composer(True)
+        for _ in range(2):
+            self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+            self.pick(c, "软件")
+            c.key(special="ENTER")
+        self.assertEqual(self.send(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "软件")
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软体")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "软体")
+        self.assertEqual(self.send(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "软体")
+
+    def test_caret_over_shorter_term(self):
+        # 位元組 -> 字節: three syllables shown as two characters; the caret never stops where nothing shows
+        c = self.composer(True)
+        self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ", "DOWN")
+        self.pick(c, "字节")
+        self.assertEqual((c.composition, c.cursor), ("字节", 2))
+        c.key(special="LEFT")
+        self.assertEqual(c.cursor, 0)
+        c.key(special="RIGHT")
+        c.key(special="BACK")
+        self.assertEqual(len(c.composition), 2)
+        self.assertNotIn("节", c.composition)
+
+    def test_undo_reverts_replacement(self):
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软件")
+        c.key(special="ENTER")
+        self.assertEqual(c.user.replacement_count("軟體", "軟件"), 1)
+        c.undo_commit()
+        self.assertEqual(c.user.replacement_count("軟體", "軟件"), 0)
+
+    def write(self, name, data):
+        with open(os.path.join(self.tmp.name, name), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def test_quick_fill_not_converted(self):
+        self.write("quick_fill.json", {"format": 1, "items": [["臺灣大學", "tw"]]})
+        c = self.composer(True)
+        for k in ("`", " "):
+            c.key(k)
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "臺灣大學")
+
+    def test_custom_word_converted(self):
+        self.write("dictionary.json", {"words": [["華碩電腦", "ㄏㄨㄚˊ ㄕㄨㄛˋ ㄉㄧㄢˋ ㄋㄠˇ"]], "shortcuts": []})
+        self.assertEqual(self.send(self.composer(True), "ㄏㄨㄚˊ ㄕㄨㄛˋ ㄉㄧㄢˋ ㄋㄠˇ"), "华硕电脑")
+
+    def test_shortcut_converted(self):
+        self.write("dictionary.json", {"words": [], "shortcuts": [["addr", "台北市信義區"]]})
+        c = self.composer(True)
+        for k in "addr":
+            c.key(k)
+        c.key(special="DOWN")
+        self.pick(c, "台北市信义区")  # (a 映射詞彙 picked is sent at once)
+        self.assertEqual(c.commit, "台北市信义区")
+
+    def test_replacement_bar_converted(self):
+        # the bar shown with the caret inside the text: Simplified characters too
+        bars = []
+        for simplified in (False, True):
+            c = self.composer(simplified)
+            self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ ㄏㄣˇ ㄏㄠˇ", "LEFT", "LEFT", "LEFT", "LEFT")
+            bars.append(list(c.replacements))
+        self.assertTrue(bars[0])
+        script = Lexicon().script
+        self.assertEqual(bars[1], list(dict.fromkeys(script.to_simplified(b) for b in bars[0])) or bars[1])
+        self.assertTrue(all(script.to_simplified(b) == b for b in bars[1]))
+
+    def test_tab_hint_converted(self):
+        c = self.composer(True)
+        self.type(c, "ㄐㄧˋ ㄙㄨㄢˋ")
+        traditional = self.composer(False)
+        self.type(traditional, "ㄐㄧˋ ㄙㄨㄢˋ")
+        self.assertTrue(traditional.suggestions)
+        self.assertEqual(c.suggestions, [c.lexicon.script.to_simplified(s) for s in traditional.suggestions])
+        self.assertNotEqual(c.suggestions, traditional.suggestions)
+        c.key(special="TAB")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, c.lexicon.script.to_simplified("計算" + traditional.suggestions[0]))
 
 
 if __name__ == "__main__":

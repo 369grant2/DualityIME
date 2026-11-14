@@ -33,6 +33,11 @@ CASES = [
     "ej; fm {ENTER}2l3tj {ENTER}u/3qu04{ENTER}",
     # ...switched while typing and with the list open, and back (the setting is saved: every case ends as it began)
     "bj03wu3{SC}{DOWN}{SC}{ENTER}{ENTER}bj03wu3{SC}{ENTER}{SC}",
+    # (review 2026-11-14) 光驅 picked, then switched while typing: no pick of it left, nothing of it learned;
+    # ↑ at the end of 字節 (位元組); a sentence long enough to send its older part, 軟件 picked in it and after it
+    "ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1{SC}{ENTER}{SC}ej; fm {ENTER}",
+    "jo4m06yj3{DOWN}1{UP}{ESC}{ENTER}",
+    "bj03wu3{DOWN}1" + "cp3cl3" * 6 + "bj03wu3{DOWN}1" + "cp3cl3" * 12 + "{ENTER}",
     # (before any pick of 試: with one, 試試 comes without the model too)
     "ji3y94u h4g4g4{ENTER}",  # 我再一次試試: 試試 only with 長句選字加強 (逝世 without)
     # (first: the presses counted are those of a list nothing has reordered yet)

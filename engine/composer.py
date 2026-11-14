@@ -1552,6 +1552,8 @@ class Composer:
         being typed and an open list turn at once."""
         self.config.save(simplified=not self.config.simplified)
         self.user.set_simplified(self.config.simplified)
+        if not self.config.simplified:
+            self._drop_mainland_picks()
         listed, index = bool(self.candidates), self.cand_index
         self._refresh()
         if listed and self._open_candidates():
@@ -1565,6 +1567,8 @@ class Composer:
         self.user.import_memory(self.config.import_memory)
         if self.user.simplified != bool(self.config.simplified):  # 簡體輸出 switched in the settings (#32)
             self.user.set_simplified(self.config.simplified)
+            if not self.config.simplified:
+                self._drop_mainland_picks()
             self._refresh()
         if self.table.autocorrect != (self.config.autocorrect) or self._lm_on != self.config.long_sentence:
             self.table.autocorrect = self.config.autocorrect
@@ -1612,6 +1616,13 @@ class Composer:
         here = {(s, l): p for s, l, p in self.segments}
         self.term_picks = {sp: v for sp, v in self.term_picks.items() if here.get(sp) == v[0]}
         self._render()
+
+    def _drop_mainland_picks(self):
+        """Back to Traditional mode: a pick of a Mainland word the dictionary lacks (光驅, Simplified mode's only)
+        goes - Traditional mode has no such word: the text would turn to zhuyin and it would be learned there."""
+        words = self.lexicon.script.mainland_words
+        self.overrides = {sp: v for sp, v in self.overrides.items() if v[1] not in words}
+        self._drop_orphans()
 
     def _shown_phrase(self, s, l, p):
         """簡體輸出 (#32): a phrase as it is shown and sent: in Simplified mode the Mainland word picked for it
@@ -1693,6 +1704,10 @@ class Composer:
         self._suggest()
         if self.user.simplified:  # (shown in Simplified characters; what Tab takes is in _sugg_actions)
             self.suggestions = [self.lexicon.script.to_simplified(s) for s in self.suggestions]
+            last = self.segments[-1] if self.segments else None
+            if last and self._shown_phrase(*last) != self.lexicon.script.to_simplified(last[2]):
+                # (the last phrase shown as a Mainland word: a hint from its Taiwan characters would not fit it)
+                self.suggestions, self._sugg_actions, self.sugg_index = [], [], 0
         if (self.caret is None or self.candidates or self.symbol_page is not None or self.fill is not None
                 or self._simulating):
             self.replacements, self._repl_actions = [], []
@@ -2627,7 +2642,10 @@ class Composer:
         """At the end, ↑ is the bar for the last character (吧 -> 187), if it has one."""
         if not self.tokens or self.tokens[-1].kind not in ("zh", "fix"):
             return False
-        self.caret = self.tokens[-1].start
+        last = self.tokens[-1]
+        if last.kind == "zh" and self._wide.get(last.start) == 0:  # (inside a shorter Mainland word: its first, #32)
+            last = next((t for t in reversed(self.tokens) if t.kind == "zh" and self._wide.get(t.start) != 0), last)
+        self.caret = last.start
         self._render()
         if self.replacements:
             return True
@@ -3787,6 +3805,11 @@ class Composer:
             self._learn_overrides()
             self.user.save()
             self.overrides = saved
+        # 簡體輸出 (#32): the Mainland words picked in what is sent are learned; the others move with their phrases
+        saved_terms = self.term_picks
+        self.term_picks = {sp: v for sp, v in saved_terms.items() if sp[0] + sp[1] <= b}
+        self._learn_terms()
+        self.term_picks = {(s - b, l): v for (s, l), v in saved_terms.items() if s >= b}
         self.overrides = {(s - b, l): v if len(v) == 2 or v[3] == BAR else v[:3] + ((v[3][0] - b, v[3][1]),)
                           for (s, l), v in self.overrides.items() if s >= b}
         self.replaced = {}

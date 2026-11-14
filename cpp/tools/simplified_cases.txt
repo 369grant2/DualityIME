@@ -10,3 +10,7 @@ bj03wu3{ENTER} => 软体
 # Ctrl+Shift+F (the key, ticked in this config) to Traditional and back
 {^F}bj03wu3{ENTER}{^F} => 軟體
 bj03wu3{ENTER} => 软体
+# (review 2026-11-14) 光驅 picked, then to Traditional while typing: Traditional characters, no zhuyin; ↑ at the end
+# of 字节 (位元組) opens no bar for its hidden syllable
+ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1{^F}{ENTER}{^F} => 光區很好
+jo4m06yj3{DOWN}1{UP}{ESC}{ENTER} => 字节

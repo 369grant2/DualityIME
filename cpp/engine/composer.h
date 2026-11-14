@@ -280,6 +280,7 @@ private:
     void keep_as_shown(int a, const ustr& q, const std::vector<int>& where, std::pair<int, int> by);
     void keep_before_bar(int start);  // a pick from the bar: what is shown before those keys stays
     void drop_orphans();           // kept characters go with the pick that kept them
+    void drop_mainland_picks();    // back to Traditional: picks of Simplified mode's only words go (#32)
     void learn_group(const std::vector<std::tuple<int, std::vector<ustr>, ustr>>& group);
     void learn_pairs(const std::vector<Segment>& before);  // 繪 picked after 重 (no word): half of 重繪
     void forget_english_at(int c);

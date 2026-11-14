@@ -6507,6 +6507,17 @@ class OpenCCDataTest(unittest.TestCase):
             self.assertEqual(len(reading.split("-")), len(word), word)
         self.assertTrue(os.path.exists(os.path.join(os.path.dirname(self.DIR), "LICENSE-OpenCC.txt")))
 
+    def test_installer_ships_them(self):
+        # the payload (installer/build.ps1) and the install folder (installer/install.ps1) both carry every table and
+        # the licence: without them the installed IME's Simplified mode converts nothing (review 2026-11-14)
+        root = os.path.dirname(os.path.dirname(self.DIR))
+        wanted = ["opencc\\" + n for n in sorted(os.listdir(self.DIR))] + ["LICENSE-OpenCC.txt"]
+        for script in ("installer/build.ps1", "installer/install.ps1"):
+            with open(os.path.join(root, script), encoding="utf-8-sig") as f:
+                text = f.read()
+            for name in wanted:
+                self.assertIn(name, text, f"{script}: {name}")
+
 
 class ScriptTest(unittest.TestCase):
     """簡體輸出 (#32): Traditional (Taiwan) to Simplified, and Taiwan words to their Mainland ones (engine/script.py)."""
@@ -6675,7 +6686,7 @@ class SimplifiedTypingTest(unittest.TestCase):
 
     def composer(self, simplified):
         c = create_composer(os.path.join(self.tmp.name, "user.json"))
-        c.config.values = dict(DEFAULTS)
+        c.config.values = dict(DEFAULTS, simplified=simplified)
         if simplified:
             c.user.set_simplified(True)
         return c
@@ -6816,6 +6827,55 @@ class SimplifiedTypingTest(unittest.TestCase):
         c.key(special="ENTER")
         c.key(special="ENTER")
         self.assertEqual(c.commit, c.lexicon.script.to_simplified(c.commit))
+
+    def test_back_to_traditional_drops_mainland_picks(self):
+        # 光驅 (a Mainland word the dictionary lacks) picked, then back to Traditional while typing: not kept as a
+        # pick (the text would turn to zhuyin) and never learned into the shared memory (review 2026-11-14)
+        c = self.composer(True)
+        self.type(c, "ㄍㄨㄤ ㄑㄩ ㄏㄣˇ ㄏㄠˇ", "HOME", "DOWN")
+        c.key("3")  # (another character first: the reviewer's way, keys ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1)
+        c.key(special="HOME")
+        c.key(special="DOWN")
+        c.key("1")
+        self.assertIn("光驱", c.composition)
+        c.toggle_simplified()
+        self.assertNotIn("ㄍ", c.composition)
+        self.assertNotIn("光驅", c.composition)
+        c.key(special="ENTER")
+        c.user.save()
+        with open(os.path.join(self.tmp.name, "user.json"), encoding="utf-8") as f:
+            self.assertNotIn("光驅", json.dumps(json.load(f), ensure_ascii=False))
+        self.assertNotEqual(self.send(c, "ㄍㄨㄤ ㄑㄩ"), "光驅")
+
+    def test_head_commit_learns_and_moves_terms(self):
+        # a sentence too long sends its older part: a Mainland word picked there is learned, one picked later stays
+        # on its own phrase (review 2026-11-14)
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软件")
+        self.type(c, " ".join(["ㄏㄣˇ ㄏㄠˇ"] * 6) + " ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软件")
+        from engine.zhuyin import reading_to_keys
+        sent = ""
+        while not sent:  # (one key at a time: what a key sends is cleared by the next)
+            for k in "".join(reading_to_keys(r) for r in ("ㄏㄣˇ", "ㄏㄠˇ")):
+                c.key(k)
+                sent += c.commit
+        self.assertTrue(sent.startswith("软件"), sent)
+        self.assertEqual(c.user.replacement_count("軟體", "軟件"), 1)
+        self.assertIn("软件", c.composition)
+
+    def test_up_at_end_skips_hidden_syllable(self):
+        # 位元組 shown as 字节: ↑ at the end opens the bar for a syllable that shows, never the hidden 組; no Tab
+        # hint worked out from what is hidden (review 2026-11-14)
+        c = self.composer(True)
+        self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ", "DOWN")
+        self.pick(c, "字节")
+        self.assertEqual(c.suggestions, [])
+        c.key(special="UP")
+        self.assertNotIn("ㄗㄨˇ", c.replacements)
+        c.key(special="ESC")
+        self.assertIn("字节", c.composition)
 
     def test_replacement_bar_converted(self):
         # the bar shown with the caret inside the text: Simplified characters too

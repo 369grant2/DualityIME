@@ -1917,10 +1917,20 @@ bool Composer::toggle_full_width() {
     return config.flag("full_width");
 }
 
+void Composer::drop_mainland_picks() {
+    // back to Traditional mode: a pick of a Mainland word the dictionary lacks (光驅) goes - Traditional mode has no
+    // such word: the text would turn to zhuyin and it would be learned there (see engine/composer.py)
+    const auto& words = lexicon_.script().mainland_words();
+    for (auto it = overrides_.begin(); it != overrides_.end();)
+        it = words.count(it->second.second) ? overrides_.erase(it) : std::next(it);
+    drop_orphans();
+}
+
 bool Composer::toggle_simplified() {
     // 簡體輸出 (#32): what is being typed and an open list turn at once (see engine/composer.py)
     config.save("simplified", Json(!config.flag("simplified")));
     user.set_simplified(config.flag("simplified"));
+    if (!config.flag("simplified")) drop_mainland_picks();
     bool listed = !candidates.empty();
     int index = cand_index;
     refresh();
@@ -1934,6 +1944,7 @@ void Composer::settings_changed() {
     user.import_memory(config.number("import_memory"));
     if (user.simplified != config.flag("simplified")) {  // 簡體輸出 switched in the settings (#32)
         user.set_simplified(config.flag("simplified"));
+        if (!config.flag("simplified")) drop_mainland_picks();
         refresh();
     }
     if (table_.autocorrect != (config.flag("autocorrect")) || lm_on_ != config.flag("long_sentence")) {
@@ -2122,8 +2133,18 @@ void Composer::render() {
     composition = text;
     cursor = caret_ ? tok_offset(*caret_) : static_cast<int>(composition.size());
     suggest();
-    if (user.simplified)  // (shown in Simplified characters; what Tab takes is in sugg_actions_, #32)
+    if (user.simplified) {  // (shown in Simplified characters; what Tab takes is in sugg_actions_, #32)
         for (auto& s : suggestions) s = lexicon_.script().to_simplified(s);
+        if (!segments_.empty()) {
+            const Segment& last = segments_.back();
+            if (shown_phrase(last.start, last.length, last.phrase) != lexicon_.script().to_simplified(last.phrase)) {
+                // (the last phrase shown as a Mainland word: a hint from its Taiwan characters would not fit it)
+                suggestions.clear();
+                sugg_actions_.clear();
+                sugg_index = 0;
+            }
+        }
+    }
     replacements.clear();
     repl_actions_.clear();
     if (caret_ && candidates.empty() && !symbol_page && !fill_ && !simulating_) replacement_bar(replacements, repl_actions_);
@@ -3857,7 +3878,18 @@ bool Composer::key_bar(std::optional<char32_t> ch, const std::string& special) {
 bool Composer::bar_at_last() {
     // at the end, ↑ is the bar for the last character (吧 -> 187), if it has one
     if (tokens.empty() || (tokens.back().kind != Kind::Zh && tokens.back().kind != Kind::Fix)) return false;
-    caret_ = tokens.back().start;
+    const Token* last = &tokens.back();
+    auto hidden = [&](const Token& t) {
+        auto w = wide_.find(t.start);
+        return w != wide_.end() && w->second == 0;
+    };
+    if (last->kind == Kind::Zh && hidden(*last))  // (inside a shorter Mainland word: its first, #32)
+        for (auto it = tokens.rbegin(); it != tokens.rend(); ++it)
+            if (it->kind == Kind::Zh && !hidden(*it)) {
+                last = &*it;
+                break;
+            }
+    caret_ = last->start;
     render();
     if (!replacements.empty()) return true;
     caret_.reset();
@@ -5173,6 +5205,16 @@ void Composer::commit_head() {
         learn_overrides();
         user.save();
         overrides_ = saved;
+    }
+    {  // 簡體輸出 (#32): the Mainland words picked in what is sent are learned; the others move with their phrases
+        TermPicks saved_terms = term_picks_, head_terms, moved_terms;
+        for (auto& [sp, v] : saved_terms) {
+            if (sp.first + sp.second <= b) head_terms[sp] = v;
+            if (sp.first >= b) moved_terms[{sp.first - b, sp.second}] = v;
+        }
+        term_picks_ = std::move(head_terms);
+        learn_terms();
+        term_picks_ = std::move(moved_terms);
     }
     Overrides moved;
     for (auto& [sp, v] : overrides_)

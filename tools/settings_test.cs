@@ -38,6 +38,28 @@ static class SettingsTest {
             Check("遊戲中 Shift 交給遊戲 is on as it comes, game_mode is gone (#31)",
                   (bool)cfg["game_keys"] && !cfg.ContainsKey("game_mode"), json.Serialize(cfg));
 
+            // 簡體輸出 (#32): off, its key off, Ctrl+F1 as it comes; a key that is no shortcut is refused
+            Check("簡體輸出 defaults", !(bool)cfg["simplified"] && !(bool)cfg["simplified_hotkey"] &&
+                  (string)cfg["simplified_key"] == "Ctrl+F1", json.Serialize(cfg));
+            Check("HotkeyProblem: Ctrl+Shift+F, Ctrl+F1, Alt+S fine", Backend.HotkeyProblem("Ctrl+Shift+F") == null &&
+                  Backend.HotkeyProblem("Ctrl+F1") == null && Backend.HotkeyProblem("Alt+S") == null, "");
+            Check("HotkeyProblem: F, Shift+F, Alt+Shift, Ctrl+Shift, Win+F, Ctrl+F13 refused",
+                  Backend.HotkeyProblem("F") != null && Backend.HotkeyProblem("Shift+F") != null &&
+                  Backend.HotkeyProblem("Alt+Shift") != null && Backend.HotkeyProblem("Ctrl+Shift") != null &&
+                  Backend.HotkeyProblem("Win+F") != null && Backend.HotkeyProblem("Ctrl+F13") != null, "");
+            Check("HotkeyProblem: Alt+F4 refused, Windows closes windows with it (the user's call 2026-11-14)",
+                  Backend.HotkeyProblem("Alt+F4") == "這組鍵是 Windows 用的，請換一組" && Backend.HotkeyProblem("Ctrl+F4") == null, "");
+            Check("HotkeyProblem: Ctrl+C/V/X/Z/Y/A/S refused, Ctrl+Shift+S and Ctrl+Alt+C fine (review 2026-11-14)",
+                  "CVXZYAS".All(c => Backend.HotkeyProblem("Ctrl+" + c) == "這組鍵是複製、貼上這類常用的鍵，請換一組") &&
+                  Backend.HotkeyProblem("Ctrl+Shift+S") == null && Backend.HotkeyProblem("Ctrl+Alt+C") == null &&
+                  Backend.HotkeyProblem("Ctrl+B") == null, "");
+            bool badKey32 = false;
+            try { call("setConfig", new Dictionary<string, object> { { "key", "simplified_key" }, { "value", "Shift+F" } }); } catch { badKey32 = true; }
+            call("setConfig", new Dictionary<string, object> { { "key", "simplified_key" }, { "value", "Ctrl+F1" } });
+            saved = (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(Path.Combine(dir, "config.json"), Encoding.UTF8));
+            Check("setConfig refuses a bad 簡體輸出 key and keeps a good one", badKey32 && (string)saved["simplified_key"] == "Ctrl+F1",
+                  json.Serialize(saved));
+
             // the candidate list's layout and keys (#23): settings the tool knows, "" = by cand_per_row
             Check("candidate layout defaults", (string)cfg["cand_layout"] == "" && (string)cfg["cand_keys"] == "123456789" &&
                   (int)cfg["cand_columns"] == 0, json.Serialize(cfg));
@@ -89,11 +111,19 @@ static class SettingsTest {
                 "{\"format\": 1, \"standard\": {\"picks\": {\"817\": {\"\": 2}, \"mp3\": {\"en\": 2}}, \"used\": {}}}", new UTF8Encoding(false));
             state = (Dictionary<string, object>)call("state", null);
             Check("remembered counts", (int)state["remembered"] == 3 + 1 + 1 + 2 && (int)state["rememberedEmails"] == 2, json.Serialize(state));
+            Check("no user_simplified.json: no Simplified count", state["rememberedSimplified"] == null, json.Serialize(state));
+            // 簡體輸出 (#32): Simplified mode's own picks (a forgetting, count 0, not) and its Mainland words, apart
+            File.WriteAllText(Path.Combine(dir, "user_simplified.json"),
+                "{\"format\": 1, \"phrases\": {\"ㄧㄥˇ-ㄆㄧㄢˋ\": {\"影片\": 2, \"映片\": 0}, \"ㄋㄧˇ\": {\"妳\": 1}}, \"used\": {}, " +
+                "\"replacements\": {\"影片\": {\"視頻\": 2}}, \"replacements_used\": {}}", new UTF8Encoding(false));
+            state = (Dictionary<string, object>)call("state", null);
+            Check("Simplified mode's memory counted apart", (int)state["remembered"] == 3 + 1 + 1 + 2 &&
+                  state["rememberedSimplified"] != null && (int)state["rememberedSimplified"] == 3, json.Serialize(state));
             // 全部清除: the engine clears at its next key; until then the count is already what it will leave
             call("forgetWords", new Dictionary<string, object> { { "emails", false } });
             state = (Dictionary<string, object>)call("state", null);
             Check("after 全部清除 the typing habits count 0, the e-mails stay", (int)state["remembered"] == 0 &&
-                  (int)state["rememberedEmails"] == 2, json.Serialize(state));
+                  (int)state["rememberedEmails"] == 2 && (int)state["rememberedSimplified"] == 0, json.Serialize(state));
             call("forgetWords", new Dictionary<string, object> { { "emails", true } });
             state = (Dictionary<string, object>)call("state", null);
             Check("after 全部清除 with the e-mails both count 0", (int)state["remembered"] == 0 &&
@@ -108,6 +138,7 @@ static class SettingsTest {
                   (int)state["rememberedEmails"] == 1, json.Serialize(state));
             File.Delete(Path.Combine(dir, "user.json"));
             File.Delete(Path.Combine(dir, "keys.json"));
+            File.Delete(Path.Combine(dir, "user_simplified.json"));
 
             call("saveDictionary", new Dictionary<string, object> {
                 { "kind", "words" }, { "rows", new object[] { new object[] { "華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ" } } } });
@@ -141,11 +172,19 @@ static class SettingsTest {
             // 自訂詞彙 taken with Tab: a file of its own too (#13)
             File.WriteAllText(Path.Combine(dir, "custom_picks.json"),
                 "{\"format\": 1, \"picks\": {\"PQC功能\": 2}, \"used\": {\"PQC功能\": 20000}}", new UTF8Encoding(false));
+            File.WriteAllText(Path.Combine(dir, "user_simplified.json"),  // 簡體輸出's own memory (#32)
+                "{\"format\": 1, \"phrases\": {}, \"used\": {\"phrases\": {}}, \"replacements\": {\"軟體\": {\"軟件\": 2}}, " +
+                "\"replacements_used\": {\"軟體\": {\"軟件\": 20000}}}", new UTF8Encoding(false));
             call("setConfig", new Dictionary<string, object> { { "key", "preview" }, { "value", "zhuyin" } });
             call("forgetWords", null);
             string file = Path.Combine(dir, "backup.json");
             b.WriteBackup(file);
             var saved2 = (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+            var simpSaved = ((Dictionary<string, object>)saved2["memory"]).ContainsKey("simplified")
+                ? (Dictionary<string, object>)((Dictionary<string, object>)saved2["memory"])["simplified"] : null;
+            Check("the backup's memory has 簡體輸出's own (#32)", simpSaved != null &&
+                  ((Dictionary<string, object>)simpSaved["replacements"]).ContainsKey("軟體"), json.Serialize(saved2["memory"]));
+            File.Delete(Path.Combine(dir, "user_simplified.json"));
             var savedConfig = (Dictionary<string, object>)saved2["config"];
             Check("backup holds memory, dictionary and settings, not the counters",
                   (string)saved2["app"] == "兩儀輸入法" && ((Dictionary<string, object>)saved2["memory"]).ContainsKey("phrases") &&
@@ -194,6 +233,21 @@ static class SettingsTest {
             bad = (Dictionary<string, object>)b.ReadBackup(file);
             Check("a file of another app is refused with the message", (string)bad["error"] == "這不是兩儀輸入法匯出的檔案", json.Serialize(bad));
 
+            // 快速填入 (#33): never saved (no quick_fill.json): the 13 samples, as the engines list them; nothing written
+            var samples = (List<object>)call("quickFill", null);
+            Check("no quick_fill.json: the 13 samples", !File.Exists(Path.Combine(dir, "quick_fill.json")) && samples.Count == 13 &&
+                  (string)((object[])samples[0])[0] == "sample@example.com" && (string)((object[])samples[12])[1] == "em4" &&
+                  (string)((object[])samples[12])[0] == "∑( ° Δ °)", json.Serialize(samples));
+            // ...not in a backup: the samples are not the user's (they would join another computer's list on restore)
+            b.WriteBackup(file);
+            var noFill = (Dictionary<string, object>)json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+            Check("never saved: the backup has no 快速填入", !noFill.ContainsKey("quick_fill") &&
+                  (int)((Dictionary<string, object>)b.ReadBackup(file))["quickFill"] == 0, json.Serialize(noFill));
+            // ...and every row deleted and saved: an empty file, no samples again
+            call("saveQuickFill", new Dictionary<string, object> { { "rows", new object[0] } });
+            Check("an emptied quick_fill.json stays empty", ((List<object>)call("quickFill", null)).Count == 0 &&
+                  File.Exists(Path.Combine(dir, "quick_fill.json")), "");
+
             // 快速填入 (#21): written to quick_fill.json, checked, in the backup, merged on restore
             call("saveQuickFill", new Dictionary<string, object> { { "rows", new object[] {
                 new object[] { "sample@example.com", "email" }, new object[] { "王小明", "name1" } } } });
@@ -216,6 +270,26 @@ static class SettingsTest {
             var after = (List<object>)call("quickFill", null);
             Check("restore merges 快速填入 (a 捷徑 here kept as it is)", (int)fillInfo["quickFill"] == 2 && after.Count == 2 &&
                   (string)((object[])after[0])[0] == "另一個" && (string)((object[])after[1])[1] == "name1", json.Serialize(after));
+            // ...restored where none was ever saved (a new computer): the backup's rows, not the samples kept over them (#33)
+            call("saveQuickFill", new Dictionary<string, object> { { "rows", new object[] {
+                new object[] { "mine@example.com", "email" }, new object[] { "0987000111", "phone" } } } });
+            string fillFile = file + ".fill.json";
+            b.WriteBackup(fillFile);
+            File.Delete(Path.Combine(dir, "quick_fill.json"));
+            b.ReadBackup(fillFile);
+            call("restoreBackup", new Dictionary<string, object> { { "quickFill", true } });
+            after = (List<object>)call("quickFill", null);
+            Check("restore with no quick_fill.json takes the backup's rows, no samples", after.Count == 2 &&
+                  (string)((object[])after[0])[0] == "mine@example.com" && (string)((object[])after[1])[0] == "0987000111",
+                  json.Serialize(after));
+            // ...and with nothing it can take (a hand-edited backup, every row bad): nothing written, the samples stay
+            File.WriteAllText(fillFile, "{\"app\": \"" + Migrate.AppName + "\", \"format\": 1, \"quick_fill\": [[\"x\", \"a b\"]]}",
+                              new UTF8Encoding(false));
+            File.Delete(Path.Combine(dir, "quick_fill.json"));
+            b.ReadBackup(fillFile);
+            call("restoreBackup", new Dictionary<string, object> { { "quickFill", true } });
+            Check("restore taking no row writes no quick_fill.json", !File.Exists(Path.Combine(dir, "quick_fill.json")) &&
+                  ((List<object>)call("quickFill", null)).Count == 13, "");
 
             // a backup of before #23 (cand_per_row only) over a grid here: its row again, the keys 1-9 (review 2026-11-13)
             call("setConfig", new Dictionary<string, object> { { "key", "cand_layout" }, { "value", "grid" } });

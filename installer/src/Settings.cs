@@ -214,7 +214,8 @@ public class Backend {
         { "lookup_size", "small" }, { "game_keys", true }, { "cand_font", "Microsoft JhengHei UI" },
         { "cand_font_size", 18 }, { "cand_per_row", 1 }, { "cand_layout", "" }, { "cand_keys", "123456789" },
         { "cand_columns", 0 },
-        { "appearance", new Dictionary<string, object>() }  // 自訂外觀 (#22): {} = the default look (never changed in place)
+        { "appearance", new Dictionary<string, object>() },  // 自訂外觀 (#22): {} = the default look (never changed in place)
+        { "simplified", false }, { "simplified_hotkey", false }, { "simplified_key", "Ctrl+F1" }  // 簡體輸出 (#32)
     };
 
     public Backend(SettingsForm form, string data) {
@@ -343,6 +344,7 @@ public class Backend {
             { "dataDir", dataDir },
             { "remembered", remembered[0] },
             { "rememberedEmails", remembered[1] },
+            { "rememberedSimplified", remembered[2] < 0 ? null : (object)remembered[2] },
             { "words", ((List<object>)dict["words"]).Count },
             { "shortcuts", ((List<object>)dict["shortcuts"]).Count },
             { "quickFill", ReadQuickFill().Count },
@@ -366,9 +368,11 @@ public class Backend {
         }
     }
 
-    // 已記憶項目: { N, M }. N = the typing habits 全部清除 clears: phrase picks (each reading and
+    // 已記憶項目: { N, M, S }. N = the typing habits 全部清除 clears: phrase picks (each reading and
     // phrase), keys learned as English (one letter or digit is not: the engine ignores it), English words, and
-    // the key strings in 校正記憶 / 代碼記憶 (keys.json). M = the remembered e-mail addresses.
+    // the key strings in 校正記憶 / 代碼記憶 (keys.json). M = the remembered e-mail addresses. S = what Simplified
+    // mode learned of its own (user_simplified.json: its picks, a forgetting not, and its Mainland words), -1 without
+    // the file (簡體輸出 never used: the page shows N and M as before, #32).
     // 全部清除 asked and the engine not there yet (it clears at its next key: config.json's forget_words
     // above the forgot it noted in user.json, the same test as the engine's): N counts 0, and M too
     // for forget_emails, so the page shows at once what the engine is about to leave.
@@ -377,11 +381,19 @@ public class Backend {
         Dictionary<string, object> user = null, keys = null;
         try { user = json.DeserializeObject(File.ReadAllText(Path.Combine(dataDir, "user.json"), Encoding.UTF8)) as Dictionary<string, object>; } catch { }
         try { keys = json.DeserializeObject(File.ReadAllText(Path.Combine(dataDir, "keys.json"), Encoding.UTF8)) as Dictionary<string, object>; } catch { }
+        Dictionary<string, object> simp = null;
+        int simplified = -1;
+        string simpPath = Path.Combine(dataDir, "user_simplified.json");
+        if (File.Exists(simpPath)) {
+            simplified = 0;
+            try { simp = json.DeserializeObject(File.ReadAllText(simpPath, Encoding.UTF8)) as Dictionary<string, object>; } catch { }
+        }
         var config = ReadConfig();
         bool clearHabits = Long(config, "forget_words") > Long(user, "forgot");
         bool clearEmails = Long(config, "forget_emails") > Long(user, "forgot_emails");
         if (clearHabits) {
             keys = null;
+            simp = null;
             if (user != null) { user.Remove("phrases"); user.Remove("english"); user.Remove("words"); }
         }
         if (clearEmails && user != null) user.Remove("emails");
@@ -406,7 +418,20 @@ public class Backend {
         var part = keys != null && keys.ContainsKey("standard") ? keys["standard"] as Dictionary<string, object> : null;
         var picks = part != null && part.ContainsKey("picks") ? part["picks"] as Dictionary<string, object> : null;
         if (picks != null) habits += picks.Count;
-        return new[] { habits, emails };
+        foreach (string name in new[] { "phrases", "replacements" }) {
+            var table = simp != null && simp.ContainsKey(name) ? simp[name] as Dictionary<string, object> : null;
+            if (table == null) continue;
+            foreach (object bucket in table.Values) {
+                var b = bucket as Dictionary<string, object>;
+                if (b == null) continue;
+                foreach (object count in b.Values) {
+                    double n;
+                    try { n = Convert.ToDouble(count); } catch { continue; }
+                    if (n > 0) simplified++;
+                }
+            }
+        }
+        return new[] { habits, emails, simplified };
     }
 
     // a counter in config.json or user.json (0 when missing or not a number)
@@ -453,8 +478,37 @@ public class Backend {
         File.Delete(tmp);
     }
 
+    // 簡體輸出's key (#32): what is wrong with it, or null. Ctrl and / or Alt (Shift may join) and one key: A-Z, 0-9,
+    // F1-F12 (the IME reads it so: text_service.cpp parse_hotkey); never Win, nor Ctrl+Shift / Alt+Shift alone
+    public static string HotkeyProblem(string text) {
+        bool ctrl = false, alt = false, shift = false, win = false;
+        string main = null;
+        foreach (string part in (text ?? "").Split('+')) {
+            if (part == "Ctrl") ctrl = true;
+            else if (part == "Alt") alt = true;
+            else if (part == "Shift") shift = true;
+            else if (part == "Win") win = true;
+            else if (main == null) main = part;
+            else return "請按下包含 Ctrl 或 Alt 的組合鍵";
+        }
+        bool closes = alt && !ctrl && main == "F4";  // (Alt+F4 closes the window: never the IME's, the user's call 2026-11-14)
+        if (win || closes || (main == null && (ctrl || alt))) return "這組鍵是 Windows 用的，請換一組";
+        // (copy, paste, cut, undo, redo, select all, save: every program's, review 2026-11-14)
+        if (ctrl && !alt && !shift && main != null && main.Length == 1 && "CVXZYAS".IndexOf(main[0]) >= 0)
+            return "這組鍵是複製、貼上這類常用的鍵，請換一組";
+        bool key = main != null && ((main.Length == 1 && ((main[0] >= 'A' && main[0] <= 'Z') || (main[0] >= '0' && main[0] <= '9'))) ||
+                                    (main.Length >= 2 && main.Length <= 3 && main[0] == 'F' && main.Substring(1).All(char.IsDigit) &&
+                                     int.Parse(main.Substring(1)) >= 1 && int.Parse(main.Substring(1)) <= 12));
+        if (!key || !(ctrl || alt)) return "請按下包含 Ctrl 或 Alt 的組合鍵";
+        return null;
+    }
+
     object SetConfig(string key, object value) {
         if (!Defaults.ContainsKey(key)) throw new Exception("unknown setting " + key);
+        if (key == "simplified_key") {
+            string problem = HotkeyProblem(value as string);
+            if (problem != null) throw new Exception(problem);
+        }
         var c = ReadConfig();
         c[key] = value;
         WriteConfig(c);
@@ -611,7 +665,22 @@ public class Backend {
     // ---- 快速填入 (#21): quick_fill.json {"format": 1, "items": [["內容", "捷徑"]...]} -----------------------
     string QuickFillPath { get { return Path.Combine(dataDir, "quick_fill.json"); } }
 
-    List<object> ReadQuickFill() { return QuickFillRows(ReadJson(QuickFillPath)); }
+    // what the page shows: no file yet (never saved) the samples, as the engines list them; a file, even empty,
+    // what it holds (#33)
+    List<object> ReadQuickFill() {
+        return SavedQuickFill() ?? QuickFillSamples.Select(p => (object)new object[] { p[0], p[1] }).ToList();
+    }
+
+    // what the user saved, or null when never: the backup and restore go by this, never by the samples
+    List<object> SavedQuickFill() { return File.Exists(QuickFillPath) ? QuickFillRows(ReadJson(QuickFillPath)) : null; }
+
+    // 快速填入 until quick_fill.json is first saved (engine/lexicon.py QUICK_FILL_SAMPLES, cpp/engine/lexicon.cpp)
+    public static readonly string[][] QuickFillSamples = {
+        new[] { "sample@example.com", "email" }, new[] { "王小明", "name1" }, new[] { "John", "name2" },
+        new[] { "Xiaoming Wang", "name3" }, new[] { "0912345678", "phone" }, new[] { "A123456789", "id" },
+        new[] { "西元_年_月_日", "birth" }, new[] { "_市_區_路_巷_號_樓", "addr" }, new[] { "感謝您的幫忙", "tks" },
+        new[] { "(*'∀')~♥", "em1" }, new[] { "( ˙ 3 ˙ )", "em2" }, new[] { "(\"∀\")", "em3" }, new[] { "∑( ° Δ °)", "em4" },
+    };
 
     Dictionary<string, object> ReadJson(string path) {
         try { return json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>; } catch { return null; }
@@ -727,12 +796,22 @@ public class Backend {
             if (memory == null) memory = new Dictionary<string, object>();
             memory["custom_picks"] = customPicks;
         }
+        // 簡體輸出's own memory (user_simplified.json, #32) too; the IME merges it on restore (import_memory)
+        Dictionary<string, object> simplified = null;
+        try { simplified = json.DeserializeObject(File.ReadAllText(Path.Combine(dataDir, "user_simplified.json"), Encoding.UTF8)) as Dictionary<string, object>; } catch { }
+        if (simplified != null) {
+            if (memory == null) memory = new Dictionary<string, object>();
+            memory["simplified"] = simplified;
+        }
         var data = new Dictionary<string, object> {
             { "app", Migrate.AppName }, { "format", BackupFormat }, { "created", DateTime.Now.ToString("yyyy-MM-dd HH:mm") },
             { "memory", memory ?? new Dictionary<string, object>() }, { "dictionary", ReadDictionary() }, { "config", config },
-            { "quick_fill", ReadQuickFill() },  // (快速填入, #21: an older version reading the backup leaves it)
             { "appearance_images", BackupImages() }  // (自訂外觀's photos, #22: {file: base64}; restored with 設定)
         };
+        // 快速填入 (#21: an older version reading the backup leaves it), only once saved: the samples shown before
+        // that are not the user's and would join another computer's list on restore (#33)
+        var savedFill = SavedQuickFill();
+        if (savedFill != null) data["quick_fill"] = savedFill;
         File.WriteAllText(path, json.Serialize(data), new UTF8Encoding(false));
         return true;
     }
@@ -844,7 +923,10 @@ public class Backend {
         }
         int addedQuickFill = 0;
         if (quickFill) {  // 快速填入: a 捷徑 already here is kept as it is
-            var mine = ReadQuickFill();
+            // (what the file holds: never saved, nothing here; the samples ReadQuickFill shows then would keep the
+            // backup's own email, phone ... out, #33)
+            var saved = SavedQuickFill();
+            var mine = saved ?? new List<object>();
             foreach (object r in BackupQuickFill()) {
                 object[] pair = (object[])r;
                 string text = "" + pair[0], shortcut = "" + pair[1];
@@ -853,9 +935,11 @@ public class Backend {
                 mine.Add(new object[] { text, shortcut });
                 addedQuickFill++;
             }
-            Directory.CreateDirectory(dataDir);
-            File.WriteAllText(QuickFillPath, json.Serialize(new Dictionary<string, object> { { "format", 1 }, { "items", mine } }),
-                              new UTF8Encoding(false));
+            if (saved != null || addedQuickFill > 0) {  // (never saved and nothing taken: the samples stay)
+                Directory.CreateDirectory(dataDir);
+                File.WriteAllText(QuickFillPath, json.Serialize(new Dictionary<string, object> { { "format", 1 }, { "items", mine } }),
+                                  new UTF8Encoding(false));
+            }
         }
         var theirMemory = backup.ContainsKey("memory") ? backup["memory"] as Dictionary<string, object> : null;
         if (memory && theirMemory != null) {

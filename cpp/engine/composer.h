@@ -113,6 +113,7 @@ public:
     bool type_full_punct(char32_t ch);
     void reset();
     bool toggle_full_width();
+    bool toggle_simplified();  // 簡體輸出 (#32): Traditional <-> Simplified, remembered in the settings
     void settings_changed();
     ustr undo_commit();
     std::pair<std::vector<ustr>, int> page_candidates() const;
@@ -174,7 +175,12 @@ private:
         std::string word;  // "word" suggestions (ASCII)
         ustr reading;      // a candidate's reading (the "next" suggestion: readings, one a character of text)
         std::vector<CustomUnit> units;  // "name": the name's units from syllable s (#14)
+        ustr term;  // "term" (簡體輸出, #32): the Mainland word shown for the phrase `text`
     };
+    // 簡體輸出 (#32): a Mainland word picked for a phrase: span -> (Taiwan phrase, what is shown for it)
+    using TermPicks = std::map<std::pair<int, int>, std::pair<ustr, ustr>>;
+    // what sending learned of the Mainland words: (phrase, its counts and days as they were) for undo_commit
+    using TermChange = std::tuple<ustr, std::optional<OrderedMap<ustr, double>>, std::optional<OrderedMap<ustr, int>>>;
     struct Undo {
         std::string raw;
         std::set<int> forced, chinese, literal, caps;
@@ -189,6 +195,9 @@ private:
         Fixed taken;
         std::map<int, std::pair<std::string, ustr>> pending;
         std::vector<CorrectionMemory::Change> corrected;  // what 校正記憶 learned with this commit, as it was
+        TermPicks term_picks;
+        std::vector<TermChange> terms;  // what 簡體輸出 learned of the Mainland words (#32)
+        std::vector<UserModel::SimpDrop> dropped;  // what a pick in Traditional mode took of Simplified mode's memory
     };
 
     void clear_input();
@@ -223,6 +232,10 @@ private:
     PinWay pin_way(const std::vector<ustr>& rds, const std::vector<ustr>& chars) const;
     void pin(int start, const std::vector<ustr>& rds, const std::vector<ustr>& chars);
     bool open_candidates();
+    bool open_list();
+    void simplified_list();  // 簡體輸出 (#32): Mainland words first, labels in Simplified characters
+    ustr shown_phrase(int s, int l, const ustr& p) const;  // a phrase as shown and sent (#32)
+    std::vector<TermChange> learn_terms(bool save = true, std::optional<int> end = std::nullopt);
     void shortcut_candidates(std::vector<ustr>& labels, std::vector<Action>& actions);
     void chinese_shortcuts(std::vector<ustr>& labels, std::vector<Action>& actions) const;
     void chinese_alternatives(std::vector<ustr>& labels, std::vector<Action>& actions);
@@ -268,6 +281,7 @@ private:
     void keep_as_shown(int a, const ustr& q, const std::vector<int>& where, std::pair<int, int> by);
     void keep_before_bar(int start);  // a pick from the bar: what is shown before those keys stays
     void drop_orphans();           // kept characters go with the pick that kept them
+    void drop_mainland_picks();    // back to Traditional: picks of Simplified mode's only words go (#32)
     void learn_group(const std::vector<std::tuple<int, std::vector<ustr>, ustr>>& group);
     void learn_pairs(const std::vector<Segment>& before);  // 繪 picked after 重 (no word): half of 重繪
     void forget_english_at(int c);
@@ -339,6 +353,10 @@ private:
     Fixed fixed_;
     std::vector<Segment> segments_;
     std::map<int, int> wide_;  // token start -> characters shown, where a syllable is not one (width)
+    std::set<int> term_hidden_;  // zh token starts a shorter Mainland word leaves with nothing shown (#32)
+    TermPicks term_picks_;
+    std::map<int, ustr> plain_chars_;  // syllable -> its character as chosen, Traditional (suggest)
+    std::map<int, ustr> plain_by_start_;  // zh token start -> its character as chosen (Traditional)
     std::vector<std::pair<int, int>> runs_;
 };
 

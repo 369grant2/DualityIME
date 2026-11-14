@@ -1,6 +1,8 @@
 ﻿# Runs sz_tsftest against a fresh engine whose learned words go to a temporary
 # folder (yours in %APPDATA% are not touched); everything is deleted afterwards and
-# the installed engine is started again.
+# the engine next to the DLL Windows loads is started again.
+# When what goes into the DLL changed since origin/develop (the last release), the DLL
+# Windows loads must be the one just built (cpp\deploy.cmd, or a setup of this tree).
 #   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 [script] [--tsf]
 # The engine just built is used if there is one (the protocol is the same), else the
 # installed one. If that engine is not running when the keys go out, the test stops:
@@ -20,6 +22,32 @@ $build = Join-Path $PSScriptRoot "..\build"
 $installed = Join-Path $env:ProgramFiles "DualityIME\DualityIMEEngine.exe"
 $built = Join-Path $build "x64-Release\DualityIMEEngine.exe"
 $engine = if (Test-Path $built) { $built } else { $installed }
+# The DLL Windows loads: the path registered for the CLSID (the installed one, or cpp\build\stage after
+# register.cmd). A change to what goes into it (cpp\tip, cpp\common, the engine files it includes) is
+# tested only with the DLL just built: 2026-11-03 a change to cpp\tip was tested with the old installed DLL.
+# (An engine-only change runs with any DLL; an installed version older than origin/develop is caught by
+# tools\e2e_all.ps1 before a release, which compares the DLL with bin\'s.)
+$clsid = "HKLM:\SOFTWARE\Classes\CLSID\{7F9854C9-F3D8-42DB-BB12-9F4DD03A6090}\InprocServer32"
+$loaded = (Get-ItemProperty -LiteralPath $clsid -ErrorAction SilentlyContinue).'(default)'
+if (-not $loaded -or -not (Test-Path -LiteralPath $loaded)) {
+    "STOPPED: the input method is not registered: install it (or cpp\register.cmd) first"; exit 1
+}
+$dllSources = @("cpp/tip", "cpp/common", "cpp/engine/json.cpp", "cpp/engine/json.h", "cpp/engine/symbols.cpp",
+                "cpp/engine/symbols.h", "cpp/engine/util.cpp", "cpp/engine/util.h")
+& git -C $root diff --quiet origin/develop -- @dllSources
+if ($LASTEXITCODE -ne 0) {  # (1: changed; anything else: git could not tell, so checked as changed)
+    $builtDll = Join-Path $build "x64-Release\DualityIME64.dll"
+    $same = (Test-Path -LiteralPath $builtDll) -and
+            ((Get-FileHash -LiteralPath $loaded).Hash -eq (Get-FileHash -LiteralPath $builtDll).Hash)
+    if (-not $same) {
+        "STOPPED: what goes into the input method's DLL changed since origin/develop, but Windows loads another DLL:"
+        "         $loaded"
+        "         put the one just built in place first: cpp\deploy.cmd (cpp\register.cmd once, as administrator),"
+        "         or install a setup built from this tree (cpp\publish.cmd, then installer\build.ps1 -Release)"
+        exit 1
+    }
+}
+$loadedDir = Split-Path $loaded -Parent
 # No other engine may hold the pipe when the test engine starts (it would leave at once, "already
 # running"): the everyday one a run before started through explorer.exe may show up late, and an
 # input method that gets the focus back starts one. Stopped until none is left half a second on.
@@ -86,9 +114,17 @@ try {
     Get-Process DualityIMEEngine -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 300
     Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-    # the one for everyday typing again, through explorer.exe like the installer: started from an
-    # administrator window it would run as administrator too, and apps could not reach it
-    if (Test-Path $installed) { Start-Process "$env:SystemRoot\explorer.exe" "`"$installed`"" }
+    # the one for everyday typing again: the engine next to the DLL Windows loads, the one that DLL starts
+    # (2026-11-13 the installed engine was started next to a staged DLL: old and new mixed). Through
+    # explorer.exe like the installer: started from an administrator window it would run as administrator
+    # too, and apps could not reach it. Without data\ next to it (a stage from before deploy.cmd linked
+    # it): started with the repository's, and it starts itself again without administrator rights.
+    $everyday = Join-Path $loadedDir "DualityIMEEngine.exe"
+    if (Test-Path -LiteralPath $everyday) {
+        # (judged by the dictionary in it: a link to a folder that is gone still "exists")
+        if (Test-Path -LiteralPath (Join-Path $loadedDir "data\lexicon.txt")) { Start-Process "$env:SystemRoot\explorer.exe" "`"$everyday`"" }
+        else { Start-Process $everyday -ArgumentList "--data-dir", "`"$(Join-Path $root 'data')`"" }
+    }
     if ($caps -and -not [Console]::CapsLock) { Press-CapsLock }
 }
 exit $code

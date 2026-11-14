@@ -25,6 +25,24 @@ from engine.zhuyin import reading_to_keys  # noqa: E402
 EXE = os.path.join(ROOT, "cpp", "build", "x64-Release", "sz_trace.exe")
 
 CASES = [
+    # 簡體輸出 (#32; every setting types them, the last one in Simplified mode): 軟體's Mainland word picked twice
+    # (then by itself), picked back; 位元組 shown as the shorter 字節, the caret over it and a key taken back;
+    # 光驅 (a Mainland word the dictionary lacks), 導出, 影片
+    "bj03wu3{DOWN}1{ENTER}bj03wu3{DOWN}1{ENTER}bj03wu3{ENTER}bj03wu3{DOWN}2{ENTER}bj03wu3{ENTER}",
+    "jo4m06yj3{DOWN}1{LEFT}{RIGHT}{BACK}{ENTER}jo4m06yj3{DOWN}1{ENTER}",
+    "ej; fm {ENTER}2l3tj {ENTER}u/3qu04{ENTER}",
+    # ...switched while typing and with the list open, and back (the setting is saved: every case ends as it began)
+    "bj03wu3{SC}{DOWN}{SC}{ENTER}{ENTER}bj03wu3{SC}{ENTER}{SC}",
+    # (review 2026-11-14) 光驅 picked, then switched while typing: no pick of it left, nothing of it learned;
+    # ↑ at the end of 字節 (位元組); a sentence long enough to send its older part, 軟件 picked in it and after it
+    "ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1{SC}{ENTER}{SC}ej; fm {ENTER}",
+    "jo4m06yj3{DOWN}1{UP}{ESC}{ENTER}",
+    # (review 2026-11-14) another 好 picked in one mode, a third in the other, back: the Traditional pick is the
+    # latest (Simplified mode's own entry for it goes)
+    "cp3{DOWN}2{ENTER}{SC}cp3{DOWN}3{ENTER}{SC}cp3{ENTER}",
+    # ...picked twice in one mode, once in the other and taken back at once: nothing of either taken after all
+    "cp3{DOWN}3{ENTER}cp3{DOWN}3{ENTER}{SC}cp3{DOWN}3{ENTER}{UNDO}{ESC}{ESC}{SC}cp3{ENTER}",
+    "bj03wu3{DOWN}1" + "cp3cl3" * 6 + "bj03wu3{DOWN}1" + "cp3cl3" * 12 + "{ENTER}",
     # (before any pick of 試: with one, 試試 comes without the model too)
     "ji3y94u h4g4g4{ENTER}",  # 我再一次試試: 試試 only with 長句選字加強 (逝世 without)
     # (first: the presses counted are those of a list nothing has reordered yet)
@@ -302,7 +320,9 @@ CONFIGS = [
     {"import_memory": 1},  # a backup restored (備份與還原): IMPORTED is merged before typing
     {"autocorrect": True},  # 注音自動校正
     {"long_sentence": False},  # 長句選字加強 off ({} above: on, the default)
-    {"cand_keys": "1234qweras", "cand_layout": "grid"},  # other candidate keys, a grid (#23)
+    {"cand_keys": "1234qweras", "cand_layout": "grid",  # other candidate keys, a grid (#23)
+     "no_quick_fill": True},  # (not a setting: no quick_fill.json, so 快速填入 lists its samples, #33)
+    {"simplified": True},  # 簡體輸出 (#32): shown and sent in Simplified characters, its memory in user_simplified.json
 ]
 DICTIONARY = {
     "words": [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"], ["史芸", "ㄕˇㄩㄣˊ"], ["好", "ㄏㄠˇ"], ["ㄎㄎ", ""], ["Kazuma", ""],
@@ -329,7 +349,11 @@ AUTOCORRECT = {"format": 1, "standard": {"picks": {"si3": {"ㄋㄧˇ": 3}, "817"
 # (字 and 像 written for good: repick may not put them into 自由, 現象 - variant_is_written, VARIANT_PAIR)
 IMPORTED = {"phrases": {"ㄊㄞˊ-ㄨㄢ": {"臺灣": 30}, "ㄋㄧˇ-ㄏㄠˇ": {"妳好": 12}, "ㄗˋ": {"字": 7}, "ㄒㄧㄤˋ": {"像": 8}},
             "english": ["up", "t"],
-            "words": {"python": 5}, "emails": {"kazumasan@example.com": 3}}
+            "words": {"python": 5}, "emails": {"kazumasan@example.com": 3},
+            # 簡體輸出's own memory (#32): merged into user_simplified.json (compared below)
+            "simplified": {"format": 1, "phrases": {"ㄖㄨㄢˇ-ㄊㄧˇ": {"軟體": 2}},
+                           "used": {"phrases": {"ㄖㄨㄢˇ-ㄊㄧˇ": {"軟體": 20000}}},
+                           "replacements": {"影片": {"視頻": 3}}, "replacements_used": {"影片": {"視頻": 20000}}}}
 
 
 def run(cmd):
@@ -342,10 +366,16 @@ def compare(cases, config, tmp):
         f.write("\n".join(cases) + "\n")
     for side in ("py", "cpp"):  # each its own files: 全形 on/off is saved in config.json
         os.makedirs(os.path.join(tmp, side), exist_ok=True)
-        for name in ("user.json", "keys.json", "custom_picks.json"):
+        for name in ("user.json", "keys.json", "custom_picks.json", "user_simplified.json"):
             if os.path.exists(os.path.join(tmp, side, name)):
                 os.remove(os.path.join(tmp, side, name))
-        files = [("config.json", config), ("dictionary.json", DICTIONARY), ("quick_fill.json", QUICK_FILL)]
+        settings = {k: v for k, v in config.items() if k != "no_quick_fill"}
+        files = [("config.json", settings), ("dictionary.json", DICTIONARY)]
+        if config.get("no_quick_fill"):
+            if os.path.exists(os.path.join(tmp, side, "quick_fill.json")):  # (an earlier setting's)
+                os.remove(os.path.join(tmp, side, "quick_fill.json"))
+        else:
+            files.append(("quick_fill.json", QUICK_FILL))
         if config.get("import_memory"):
             files.append(("import-memory.json", IMPORTED))
         files.append(("keys.json", AUTOCORRECT))
@@ -394,6 +424,16 @@ def compare(cases, config, tmp):
             picks.append(None)
     if picks[0] != picks[1]:
         sys.exit(f"DIFFERENT custom_picks.json with {config}")
+    simp = []  # 簡體輸出's own memory (#32)
+    for side in ("py", "cpp"):
+        path = os.path.join(tmp, side, "user_simplified.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                simp.append(json.load(f))
+        else:
+            simp.append(None)
+    if simp[0] != simp[1]:
+        sys.exit(f"DIFFERENT user_simplified.json with {config}")
     return keys
 
 

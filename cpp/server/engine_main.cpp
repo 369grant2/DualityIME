@@ -106,7 +106,8 @@ Json cfg_json(const Config& c) {
     // what the IME needs to know of the settings; 自訂外觀 (#22) with the folder its photos are in
     Json o = Json::object();
     for (const char* k : {"shift_toggle", "start_mode", "lookup", "game_keys", "space", "full_width", "ctrl_full_punct",
-                          "cand_font", "cand_font_size", "theme", "appearance"})  // (the layout comes in cand_per_line, cand_labels)
+                          "cand_font", "cand_font_size", "theme", "appearance", "simplified", "simplified_hotkey",
+                          "simplified_key"})  // (the layout comes in cand_per_line, cand_labels)
         if (auto* v = c.values().get(k)) o[k] = *v;
     o["appearance_dir"] = Json(wide_utf8(g->dir + L"appearance"));
     return o;
@@ -249,6 +250,9 @@ Json handle(Session& s, const Json& req) {
     } else if (op == "close_symbols") {  // (the symbol keyboard, or 快速填入 opened from it)
         c.close_symbols();
         c.close_fill();
+    } else if (op == "simplified") {  // 簡體輸出's key (#32)
+        c.toggle_simplified();
+        ++g->cfg_gen;  // (saved by the engine, as full_width)
     } else if (op == "full_width") {
         c.toggle_full_width();
         ++g->cfg_gen;  // (saved by the engine: config_gen does not see it - review 2026-11-13)

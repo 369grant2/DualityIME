@@ -2550,6 +2550,54 @@ class QuickFillTest(unittest.TestCase):
             c.key(k)
         self.assertEqual(c.commit, "`")
 
+    SAMPLES = ["email", "name1", "name2", "name3", "phone", "id", "birth", "addr", "tks", "em1", "em2", "em3", "em4"]
+
+    def test_no_file_samples(self):
+        # never saved (a new install, or 3.2.5 with nothing set): the 13 samples (#33)
+        os.remove(os.path.join(self.tmp.name, "quick_fill.json"))
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS)
+        self.press_on(c, "`", " ")
+        typed, items, index = c.fill_shown()
+        self.assertEqual([s for _, s in items], self.SAMPLES)
+        self.assertEqual(items[-1], ("∑( ° Δ °)", "em4"))
+        self.press_on(c, "ENTER")
+        self.assertEqual(c.commit, "sample@example.com")
+
+    def test_emptied_stays_empty(self):
+        # every row deleted and saved: no samples again
+        self.write([])
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS)
+        self.press_on(c, "`", " ")
+        self.assertEqual(c.fill_shown(), ("", [], 0))
+
+    def test_file_removed_samples_again(self):
+        # the file taken away while running: as never saved
+        os.remove(os.path.join(self.tmp.name, "quick_fill.json"))
+        self.press("`", " ")
+        self.assertEqual([s for _, s in self.c.fill_shown()[1]], self.SAMPLES)
+
+    def test_samples_same_everywhere(self):
+        # the four copies (the C++ engine, the settings tool, the settings page's preview data) are this list
+        import re
+        from engine.lexicon import QUICK_FILL_SAMPLES
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        strings = re.compile(r'"((?:[^"\\]|\\.)*)"')
+        for path, start, end in (("cpp/engine/lexicon.cpp", "kQuickFillSamples = {", "};"),
+                                 ("installer/src/Settings.cs", "QuickFillSamples = {", "};"),
+                                 ("settings/ui/bridge.js", "let quickFill = [", "];")):
+            with open(os.path.join(root, path), encoding="utf-8") as f:
+                text = f.read()
+            block = text[text.index(start) + len(start):]
+            block = block[:block.index(end)]
+            found = [json.loads('"' + s + '"') for s in strings.findall(block)]
+            self.assertEqual(list(zip(found[0::2], found[1::2])), list(QUICK_FILL_SAMPLES), path)
+
+    def test_no_folder_no_samples(self):
+        # no memory folder at all (UserModel(None), the tests'): nothing listed
+        self.assertEqual(UserModel(None).quick_fill, [])
+
 
 class CandKeysTest(unittest.TestCase):
     """The candidate list with other keys and layouts (#23): a page as many as the keys, a key picks its place on
@@ -6437,6 +6485,530 @@ class OrderDigitsWithModelTest(Base):
         finally:
             composer.convert = saved
         self.assertEqual([(t.kind, t.raw) for t in out], [("zh", "ji3"), ("en", "817")])
+
+
+class OpenCCDataTest(unittest.TestCase):
+    """簡體輸出 (#32): OpenCC's tables in data/opencc (tools/build_opencc.py writes them)."""
+
+    DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "opencc")
+
+    def rows(self, name):
+        with open(os.path.join(self.DIR, name), encoding="utf-8") as f:
+            return [line.rstrip("\n").split("\t") for line in f if line.strip() and not line.startswith("#")]
+
+    def test_files(self):
+        for name in ("TSPhrases.txt", "TSCharacters.txt", "TWVariantsRev.txt", "TWVariantsRevPhrases.txt",
+                     "TWPhrasesRev.txt", "TWPhrases.txt", "mainland_words.txt"):
+            self.assertTrue(self.rows(name), name)
+        rev = {k: v.split() for k, v in self.rows("TWPhrasesRev.txt")}
+        self.assertEqual(rev["影片"], ["視頻"])
+        self.assertEqual(rev["軟體"], ["軟件"])
+        for word, reading in self.rows("mainland_words.txt"):
+            self.assertEqual(len(reading.split("-")), len(word), word)
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(self.DIR), "LICENSE-OpenCC.txt")))
+
+    def test_installer_ships_them(self):
+        # the payload (installer/build.ps1) and the install folder (installer/install.ps1) both carry every table and
+        # the licence: without them the installed IME's Simplified mode converts nothing (review 2026-11-14)
+        root = os.path.dirname(os.path.dirname(self.DIR))
+        wanted = ["opencc\\" + n for n in sorted(os.listdir(self.DIR))] + ["LICENSE-OpenCC.txt"]
+        for script in ("installer/build.ps1", "installer/install.ps1"):
+            with open(os.path.join(root, script), encoding="utf-8-sig") as f:
+                text = f.read()
+            for name in wanted:
+                self.assertIn(name, text, f"{script}: {name}")
+
+
+class ScriptTest(unittest.TestCase):
+    """簡體輸出 (#32): Traditional (Taiwan) to Simplified, and Taiwan words to their Mainland ones (engine/script.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = Lexicon().script
+
+    def test_to_simplified(self):
+        s = self.script.to_simplified
+        self.assertEqual(s("軟體"), "软体")  # (the characters only: 軟件 is a choice, not a conversion)
+        self.assertEqual(s("影片"), "影片")
+        self.assertEqual(s("裡面"), "里面")
+        self.assertEqual(s("頭髮與發展"), "头发与发展")
+        self.assertEqual(s("hello 你好"), "hello 你好")
+        self.assertEqual(s(""), "")
+
+    def test_mainland_terms(self):
+        m = self.script.mainland_terms
+        self.assertEqual(m("影片"), ["視頻"])
+        self.assertEqual(m("乙太網路"), ["以太網", "以太網絡", "以太網路"])
+        self.assertEqual(m("你好"), [])
+
+    def test_mainland_words(self):
+        self.assertEqual(self.script.mainland_words.get("主板"), "ㄓㄨˇ-ㄅㄢˇ")  # (not in the dictionary)
+        self.assertTrue(self.script.is_mainland("視頻"))
+        self.assertTrue(self.script.is_mainland("主板"))
+        self.assertFalse(self.script.is_mainland("影片"))
+
+    def test_no_files_converts_nothing(self):
+        from engine.script import Script
+        empty = Script.load(os.path.join(tempfile.gettempdir(), "no-such-dualityime-dir"))
+        self.assertEqual(empty.to_simplified("軟體"), "軟體")
+        self.assertEqual(empty.mainland_terms("影片"), [])
+
+
+class SimplifiedMemoryTest(unittest.TestCase):
+    """簡體輸出 (#32): what is learned in Simplified mode goes to user_simplified.json, laid over the shared memory;
+    Traditional mode never reads it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "user.json")
+
+    def user(self):
+        return UserModel(self.path, today=lambda: 20000)
+
+    def read(self, name):
+        with open(os.path.join(self.tmp.name, name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_traditional_ignores_simplified_memory(self):
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        shared = self.read("user.json")["phrases"]
+        u.set_simplified(True)
+        u.learn_phrase("ㄧㄥˇ-ㄆㄧㄢˋ", "影片")
+        u.learn_replacement("影片", "視頻")
+        u.learn_replacement("影片", "視頻")
+        u.save()
+        self.assertEqual(self.read("user.json")["phrases"], shared)
+        t = self.user()
+        self.assertEqual(t.phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 0)
+        self.assertIsNone(t.default_term("影片"))
+        u.set_simplified(False)
+        self.assertEqual(u.phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 0)
+        self.assertIsNone(u.default_term("影片"))
+
+    def test_simplified_reads_both(self):
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        s = self.user()
+        s.set_simplified(True)
+        self.assertEqual(s.phrase_count("ㄋㄧˇ", "妳"), 1)
+        s.forget_phrase("ㄋㄧˇ", "妳")  # (forgotten in Simplified mode only)
+        s.save()
+        again = self.user()
+        again.set_simplified(True)
+        self.assertEqual(again.phrase_count("ㄋㄧˇ", "妳"), 0)
+        self.assertEqual(self.user().phrase_count("ㄋㄧˇ", "妳"), 1)
+
+    def test_words_stay_shared(self):
+        u = self.user()
+        u.set_simplified(True)
+        u.words["python"] = 3
+        u.word_used["python"] = 20000
+        u.save()
+        self.assertEqual(self.read("user.json")["words"], {"python": 3})
+        self.assertNotIn("words", self.read("user_simplified.json"))
+
+    def test_replacement_default_and_back(self):
+        u = self.user()
+        u.set_simplified(True)
+        u.learn_replacement("軟體", "軟件")
+        self.assertIsNone(u.default_term("軟體"))
+        u.learn_replacement("軟體", "軟件")
+        self.assertEqual(u.default_term("軟體"), "軟件")
+        self.assertEqual(u.replacement_count("軟體", "軟件"), 2)
+        u.forget_replacement("軟體")
+        self.assertIsNone(u.default_term("軟體"))
+        self.assertEqual(u.replacement_count("軟體", "軟件"), 0)
+
+    def test_no_simplified_file(self):
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "user_simplified.json")))
+        u.set_simplified(True)
+        self.assertEqual(u.phrase_count("ㄋㄧˇ", "妳"), 1)
+        self.assertIsNone(u.default_term("影片"))
+
+    def test_forget_clears_simplified(self):
+        # 全部清除 in Simplified mode: the shared memory, Simplified mode's and its Mainland words all go
+        u = self.user()
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        u.set_simplified(True)
+        u.learn_phrase("ㄧㄥˇ-ㄆㄧㄢˋ", "影片")
+        u.learn_replacement("影片", "視頻")
+        u.save()
+        u.forget_words(1)
+        self.assertTrue(u.simplified)
+        self.assertEqual(u.phrases, {})
+        self.assertEqual(u.replacement_count("影片", "視頻"), 0)
+        self.assertEqual(self.read("user.json")["phrases"], {})
+        self.assertEqual(self.read("user_simplified.json")["phrases"], {})
+        self.assertEqual(self.read("user_simplified.json")["replacements"], {})
+
+    def test_traditional_pick_wins_over_simplified(self):
+        # (review 2026-11-14 #4, the user's choice B) the latest pick wins: 軟體 forgotten in Simplified mode, then
+        # picked in Traditional mode: Simplified mode reads the shared count again
+        u = self.user()
+        u.learn_phrase("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體")
+        u.set_simplified(True)
+        u.forget_phrase("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體")
+        u.set_simplified(False)
+        for _ in range(3):
+            u.learn_phrase("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體")
+        u.save()
+        u.set_simplified(True)
+        self.assertEqual(u.phrase_count("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體"), 4)
+
+    def test_simplified_memory_pruned(self):
+        # (review 2026-11-14 #5) Simplified mode's own memory fades and is cut as the shared one is
+        day = [20000]
+        u = UserModel(self.path, today=lambda: day[0])
+        u.set_simplified(True)
+        u.learn_phrase("ㄧㄥˇ-ㄆㄧㄢˋ", "影片")
+        u.learn_replacement("影片", "視頻")
+        u.save()
+        day[0] = 20000 + 20 * 8  # (eight halvings: far below one pick)
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        saved = self.read("user_simplified.json")
+        self.assertNotIn("ㄧㄥˇ-ㄆㄧㄢˋ", saved["phrases"])
+        self.assertNotIn("影片", saved["replacements"])
+        self.assertIn("ㄋㄧˇ", saved["phrases"])
+
+    def test_import_simplified(self):
+        # a backup restored (import-memory.json): Simplified mode's memory merged into user_simplified.json, the
+        # higher count kept
+        u = self.user()
+        u.set_simplified(True)
+        u.learn_replacement("軟體", "軟件")
+        u.save()
+        with open(os.path.join(self.tmp.name, "import-memory.json"), "w", encoding="utf-8") as f:
+            json.dump({"simplified": {"format": 1, "phrases": {"ㄧㄥˇ-ㄆㄧㄢˋ": {"影片": 2}},
+                                      "used": {"phrases": {"ㄧㄥˇ-ㄆㄧㄢˋ": {"影片": 20000}}},
+                                      "replacements": {"軟體": {"軟件": 3}, "影片": {"視頻": 2}},
+                                      "replacements_used": {"軟體": {"軟件": 20000}, "影片": {"視頻": 20000}}}},
+                      f, ensure_ascii=False)
+        u.import_memory(1)
+        self.assertTrue(u.simplified)
+        self.assertEqual(u.phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 2)
+        self.assertEqual(u.replacement_count("軟體", "軟件"), 3)
+        self.assertEqual(u.default_term("影片"), "視頻")
+        saved = self.read("user_simplified.json")
+        self.assertEqual(saved["replacements"]["影片"], {"視頻": 2})
+        self.assertEqual(self.user().phrase_count("ㄧㄥˇ-ㄆㄧㄢˋ", "影片"), 0)  # (Traditional mode: not there)
+
+    def test_settings_defaults_simplified(self):
+        self.assertIs(DEFAULTS["simplified"], False)
+        self.assertIs(DEFAULTS["simplified_hotkey"], False)
+        self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+F1")
+
+
+class SimplifiedTypingTest(unittest.TestCase):
+    """簡體輸出 (#32): typing in Simplified mode; Traditional mode as it always was."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def composer(self, simplified):
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS, simplified=simplified)
+        if simplified:
+            c.user.set_simplified(True)
+        return c
+
+    def type(self, c, readings, *specials):
+        from engine.zhuyin import reading_to_keys
+        for k in "".join(reading_to_keys(r) for r in readings.split()):
+            c.key(k)
+        for s in specials:
+            c.key(special=s)
+        return c.composition
+
+    def send(self, c, readings):
+        self.type(c, readings, "ENTER")
+        return c.commit
+
+    def test_mainland_word_typed(self):
+        # 光驅 (a Mainland word the dictionary lacks; Traditional mode types 光區): Simplified mode only
+        self.assertEqual(self.send(self.composer(True), "ㄍㄨㄤ ㄑㄩ"), "光驱")
+
+    def test_traditional_never_mainland(self):
+        c = self.composer(False)
+        self.assertEqual(self.send(c, "ㄍㄨㄤ ㄑㄩ"), "光區")
+        self.type(c, "ㄍㄨㄤ ㄑㄩ", "LEFT", "LEFT", "DOWN")
+        self.assertNotIn("光驅", c.candidates)
+
+    def test_dictionary_mainland_word_preferred(self):
+        # 導出 is in the dictionary, but Traditional mode types 倒出: Simplified mode gives it the bonus (how much is
+        # measured: Task 8 of the plan); 倒出 keeps its score
+        scores = []
+        for simplified in (False, True):
+            c = self.composer(simplified)
+            scores.append(dict(composer.phrase_candidates(["ㄉㄠˇ", "ㄔㄨ"], c.lexicon, c.user)))
+        self.assertAlmostEqual(scores[1]["導出"] - scores[0]["導出"], composer.MAINLAND_BONUS)
+        self.assertEqual(scores[1]["倒出"], scores[0]["倒出"])
+
+    def test_taiwan_sentence_in_simplified(self):
+        r = "ㄨㄛˇ ㄇㄣ˙ ㄐㄧㄣ ㄊㄧㄢ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ"
+        self.assertEqual(self.send(self.composer(False), r), "我們今天去看電影")
+        self.assertEqual(self.send(self.composer(True), r), "我们今天去看电影")
+
+    def pick(self, c, label):
+        """↓ is open: pick the candidate shown so (its candidate key)."""
+        i = c.candidates.index(label)
+        while i >= c.page_size():
+            c.key(special="PGDN")
+            i -= c.page_size()
+        c.key(c.config.cand_keys[i])
+
+    def test_taiwan_word_kept(self):
+        self.assertEqual(self.send(self.composer(True), "ㄧㄥˇ ㄆㄧㄢˋ"), "影片")
+        self.assertEqual(self.send(self.composer(True), "ㄖㄨㄢˇ ㄊㄧˇ"), "软体")
+
+    def test_mainland_first_in_candidates(self):
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.assertEqual(c.candidates[0], "软件")
+        self.pick(c, "软件")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "软件")
+
+    def test_two_picks_make_default(self):
+        c = self.composer(True)
+        for _ in range(2):
+            self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+            self.pick(c, "软件")
+            c.key(special="ENTER")
+        self.assertEqual(self.send(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "软件")
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软体")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "软体")
+        self.assertEqual(self.send(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "软体")
+
+    def test_caret_over_shorter_term(self):
+        # 位元組 -> 字節: three syllables shown as two characters; the caret never stops where nothing shows
+        c = self.composer(True)
+        self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ", "DOWN")
+        self.pick(c, "字节")
+        self.assertEqual((c.composition, c.cursor), ("字节", 2))
+        c.key(special="LEFT")
+        self.assertEqual(c.cursor, 0)
+        c.key(special="RIGHT")
+        c.key(special="BACK")
+        self.assertEqual(len(c.composition), 2)
+        self.assertNotIn("节", c.composition)
+
+    def test_undo_reverts_replacement(self):
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软件")
+        c.key(special="ENTER")
+        self.assertEqual(c.user.replacement_count("軟體", "軟件"), 1)
+        c.undo_commit()
+        self.assertEqual(c.user.replacement_count("軟體", "軟件"), 0)
+
+    def write(self, name, data):
+        with open(os.path.join(self.tmp.name, name), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def test_quick_fill_not_converted(self):
+        self.write("quick_fill.json", {"format": 1, "items": [["臺灣大學", "tw"]]})
+        c = self.composer(True)
+        for k in ("`", " "):
+            c.key(k)
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "臺灣大學")
+
+    def test_custom_word_converted(self):
+        self.write("dictionary.json", {"words": [["華碩電腦", "ㄏㄨㄚˊ ㄕㄨㄛˋ ㄉㄧㄢˋ ㄋㄠˇ"]], "shortcuts": []})
+        self.assertEqual(self.send(self.composer(True), "ㄏㄨㄚˊ ㄕㄨㄛˋ ㄉㄧㄢˋ ㄋㄠˇ"), "华硕电脑")
+
+    def test_shortcut_converted(self):
+        self.write("dictionary.json", {"words": [], "shortcuts": [["addr", "台北市信義區"]]})
+        c = self.composer(True)
+        for k in "addr":
+            c.key(k)
+        c.key(special="DOWN")
+        self.pick(c, "台北市信义区")  # (a 映射詞彙 picked is sent at once)
+        self.assertEqual(c.commit, "台北市信义区")
+
+    def test_toggle_converts_composition(self):
+        c = self.composer(False)
+        self.assertEqual(self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "軟體")
+        self.assertTrue(c.toggle_simplified())
+        self.assertEqual((c.composition, c.config.simplified, c.user.simplified), ("软体", True, True))
+        self.assertFalse(c.toggle_simplified())
+        self.assertEqual(c.composition, "軟體")
+
+    def test_toggle_while_candidates_open(self):
+        c = self.composer(False)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "LEFT", "LEFT", "DOWN")
+        self.assertIn("軟體", c.candidates)
+        c.toggle_simplified()
+        self.assertTrue(c.candidates)
+        self.assertNotIn("軟體", c.candidates)
+        self.assertIn("软体", c.candidates)
+        c.key(special="ENTER")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, c.lexicon.script.to_simplified(c.commit))
+
+    def test_back_to_traditional_drops_mainland_picks(self):
+        # 光驅 (a Mainland word the dictionary lacks) picked, then back to Traditional while typing: not kept as a
+        # pick (the text would turn to zhuyin) and never learned into the shared memory (review 2026-11-14)
+        c = self.composer(True)
+        self.type(c, "ㄍㄨㄤ ㄑㄩ ㄏㄣˇ ㄏㄠˇ", "HOME", "DOWN")
+        c.key("3")  # (another character first: the reviewer's way, keys ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1)
+        c.key(special="HOME")
+        c.key(special="DOWN")
+        c.key("1")
+        self.assertIn("光驱", c.composition)
+        c.toggle_simplified()
+        self.assertNotIn("ㄍ", c.composition)
+        self.assertNotIn("光驅", c.composition)
+        c.key(special="ENTER")
+        c.user.save()
+        with open(os.path.join(self.tmp.name, "user.json"), encoding="utf-8") as f:
+            self.assertNotIn("光驅", json.dumps(json.load(f), ensure_ascii=False))
+        self.assertNotEqual(self.send(c, "ㄍㄨㄤ ㄑㄩ"), "光驅")
+
+    def test_head_commit_learns_and_moves_terms(self):
+        # a sentence too long sends its older part: a Mainland word picked there is learned, one picked later stays
+        # on its own phrase (review 2026-11-14)
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软件")
+        self.type(c, " ".join(["ㄏㄣˇ ㄏㄠˇ"] * 6) + " ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+        self.pick(c, "软件")
+        from engine.zhuyin import reading_to_keys
+        sent = ""
+        while not sent:  # (one key at a time: what a key sends is cleared by the next)
+            for k in "".join(reading_to_keys(r) for r in ("ㄏㄣˇ", "ㄏㄠˇ")):
+                c.key(k)
+                sent += c.commit
+        self.assertTrue(sent.startswith("软件"), sent)
+        self.assertEqual(c.user.replacement_count("軟體", "軟件"), 1)
+        self.assertIn("软件", c.composition)
+
+    def test_up_at_end_skips_hidden_syllable(self):
+        # 位元組 shown as 字节: ↑ at the end opens the bar for a syllable that shows, never the hidden 組; no Tab
+        # hint worked out from what is hidden (review 2026-11-14)
+        c = self.composer(True)
+        self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ", "DOWN")
+        self.pick(c, "字节")
+        self.assertEqual(c.suggestions, [])
+        c.key(special="UP")
+        self.assertNotIn("ㄗㄨˇ", c.replacements)
+        c.key(special="ESC")
+        self.assertIn("字节", c.composition)
+
+    def test_default_term_kept_while_used(self):
+        # (review 2026-11-14 #1) a Mainland word that comes by itself, sent day after day without the list, does
+        # not fade back to the Taiwan word
+        day = [20000]
+        c = self.composer(True)
+        c.user.today = lambda: day[0]
+        for _ in range(2):
+            self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+            self.pick(c, "软件")
+            c.key(special="ENTER")
+        for d in range(20005, 20100, 15):
+            day[0] = d
+            self.assertEqual(self.send(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "软件", d)
+
+    def test_toggle_with_caret_in_hidden_word(self):
+        # (review 2026-11-14 #2) 位元組 written 字節 by itself; caret before 元 in Traditional mode, then back to
+        # Simplified: the caret is never left on the hidden syllable, ← works
+        c = self.composer(True)
+        for _ in range(2):
+            self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ", "DOWN")
+            self.pick(c, "字节")
+            c.key(special="ENTER")
+        self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ")
+        self.assertEqual(c.composition, "字节")
+        c.toggle_simplified()
+        c.key(special="HOME")
+        c.key(special="RIGHT")
+        c.toggle_simplified()
+        self.assertEqual(c.composition, "字节")
+        self.assertIn(c.cursor, (0, 2))
+        c.key(special="LEFT")
+        self.assertEqual(c.cursor, 0)
+
+    def test_insert_before_moves_no_term(self):
+        # (review 2026-11-14 #8) 軟件 picked for the first 軟體 of 軟體軟體; 軟體 typed at the start: the new one
+        # does not take the pick
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ ㄖㄨㄢˇ ㄊㄧˇ", "HOME", "DOWN")
+        self.pick(c, "软件")
+        self.assertEqual(c.composition, "软件软体")
+        c.key(special="HOME")
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ")
+        self.assertFalse(c.composition.startswith("软件"), c.composition)
+
+    def test_undo_puts_back_simplified_memory(self):
+        # (code-reviewer 2026-11-14) 詪 picked twice in Simplified mode, then in Traditional mode and taken back at
+        # once (Shift+Backspace): Simplified mode's own picks of it are there again, in the file too
+        c = self.composer(True)
+        for _ in range(2):
+            self.type(c, "ㄏㄣˇ", "DOWN")
+            c.key(c.config.cand_keys[c.candidates.index("𬣳")])  # (詪 in Simplified characters)
+            c.key(special="ENTER")
+        before = copy.deepcopy(c.user._simp_phrases)
+        self.assertEqual(before.get("ㄏㄣˇ"), {"詪": 2})
+        c.toggle_simplified()
+        self.type(c, "ㄏㄣˇ", "DOWN")
+        c.key(c.config.cand_keys[c.candidates.index("詪")])
+        c.key(special="ENTER")
+        self.assertNotIn("詪", c.user._simp_phrases.get("ㄏㄣˇ", {}))
+        self.assertTrue(c.undo_commit())
+        self.assertEqual(c.user._simp_phrases, before)
+        with open(os.path.join(self.tmp.name, "user_simplified.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["phrases"], before)
+
+    def test_one_save_per_commit(self):
+        # (review 2026-11-14 #10) a sentence with a pick and a Mainland word picked saves the memory once
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ ㄏㄣˇ ㄏㄠˇ", "DOWN")
+        c.key(c.config.cand_keys[2])  # (another character for 好: a pick of its own)
+        c.key(special="HOME")
+        c.key(special="DOWN")
+        self.pick(c, "软件")
+        self.assertTrue(c.overrides and c.term_picks)
+        saves = []
+        real = c.user.save
+        c.user.save = lambda: (saves.append(1), real())
+        c.key(special="ENTER")
+        self.assertEqual(len(saves), 1)
+
+    def test_replacement_bar_converted(self):
+        # the bar shown with the caret inside the text: Simplified characters too
+        bars = []
+        for simplified in (False, True):
+            c = self.composer(simplified)
+            self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ ㄏㄣˇ ㄏㄠˇ", "LEFT", "LEFT", "LEFT", "LEFT")
+            bars.append(list(c.replacements))
+        self.assertTrue(bars[0])
+        script = Lexicon().script
+        self.assertEqual(bars[1], list(dict.fromkeys(script.to_simplified(b) for b in bars[0])) or bars[1])
+        self.assertTrue(all(script.to_simplified(b) == b for b in bars[1]))
+
+    def test_tab_hint_converted(self):
+        c = self.composer(True)
+        self.type(c, "ㄐㄧˋ ㄙㄨㄢˋ")
+        traditional = self.composer(False)
+        self.type(traditional, "ㄐㄧˋ ㄙㄨㄢˋ")
+        self.assertTrue(traditional.suggestions)
+        self.assertEqual(c.suggestions, [c.lexicon.script.to_simplified(s) for s in traditional.suggestions])
+        self.assertNotEqual(c.suggestions, traditional.suggestions)
+        c.key(special="TAB")
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, c.lexicon.script.to_simplified("計算" + traditional.suggestions[0]))
 
 
 if __name__ == "__main__":

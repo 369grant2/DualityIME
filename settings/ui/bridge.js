@@ -27,18 +27,22 @@ const api = (() => {
     preview: "keys_hint", shift_toggle: true, start_mode: "mixed", completion: true, remember_words: true,
     forget_words: 0, forget_emails: 0, lookup: true, lookup_size: "small", game_keys: true,
     cand_font: "Microsoft JhengHei UI", cand_font_size: 18, cand_per_row: 1,
-    cand_layout: "", cand_keys: "123456789", cand_columns: 0, appearance: {}
+    cand_layout: "", cand_keys: "123456789", cand_columns: 0, appearance: {},
+    simplified: false, simplified_hotkey: false, simplified_key: "Ctrl+F1"
   };
   const dict = { words: [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"]], shortcuts: [["addr", "台北市信義區…"]] };
   const images = {};  // 自訂外觀's photos: file -> data: URL
-  let quickFill = [["sample@example.com", "email"], ["王小明", "name1"], ["0912345678", "phone"], ["西元_年_月_日", "birth"]];
+  // (the samples a new install starts with, #33: Settings.cs QuickFillSamples)
+  let quickFill = [["sample@example.com", "email"], ["王小明", "name1"], ["John", "name2"], ["Xiaoming Wang", "name3"],
+    ["0912345678", "phone"], ["A123456789", "id"], ["西元_年_月_日", "birth"], ["_市_區_路_巷_號_樓", "addr"],
+    ["感謝您的幫忙", "tks"], ["(*'∀')~♥", "em1"], ["( ˙ 3 ˙ )", "em2"], ["(\"∀\")", "em3"], ["∑( ° Δ °)", "em4"]];
   const sys = { ok: true, default_ime: true, language_hk: false };
   const wait = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms));
   const demo = new URLSearchParams(location.search).get("update") || "";
   return async (op, args = {}) => {
     switch (op) {
       case "state": return { config, version: "2.1.0", dataDir: "C:\\Users\\you\\AppData\\Roaming\\DualityIME",
-        remembered: 12, rememberedEmails: 2, words: dict.words.length, shortcuts: dict.shortcuts.length, quickFill: quickFill.length, beta: false, canUpdate: true, hasPime: false, dark: false };
+        remembered: 12, rememberedEmails: 2, rememberedSimplified: null, words: dict.words.length, shortcuts: dict.shortcuts.length, quickFill: quickFill.length, beta: false, canUpdate: true, hasPime: false, dark: false };
       case "setConfig": config[args.key] = args.value; return config;
       case "forgetWords": return 0;
       case "system": return wait(400, sys);

@@ -68,7 +68,12 @@ $files = [ordered]@{
 }
 foreach ($dll in $webview) { $files[$dll] = "third_party\webview2\$dll" }
 # the engine's data: only what it reads (not the corpus the bigram is built from)
-foreach ($f in @("lexicon.txt", "names.txt", "bigram.bin", "lm.bin", "english.txt", "english_tech.txt", "LICENSE-McBopomofo.txt")) { $files["data\$f"] = "data\$f" }
+foreach ($f in @("lexicon.txt", "names.txt", "bigram.bin", "lm.bin", "english.txt", "english_tech.txt", "LICENSE-McBopomofo.txt",
+                  # 簡體輸出 (#32): OpenCC's tables (tools/build_opencc.py) and their licence
+                  "opencc\TSPhrases.txt", "opencc\TSCharacters.txt", "opencc\TWVariantsRev.txt", "opencc\TWVariantsRevPhrases.txt",
+                  "opencc\TWPhrasesRev.txt", "opencc\TWPhrases.txt", "opencc\mainland_words.txt", "LICENSE-OpenCC.txt")) {
+    $files["data\$f"] = "data\$f"
+}
 foreach ($f in Get-ChildItem (Join-Path $root "settings\ui") -File) { $files["ui\$($f.Name)"] = "settings\ui\$($f.Name)" }
 
 foreach ($k in $files.Keys) {

@@ -115,6 +115,10 @@ private:
         bool ctrl_punct = true;  // Ctrl + a punctuation key types its full-width mark (the setting ctrl_full_punct)
         std::wstring cand_font = L"Microsoft JhengHei UI";
         int cand_font_size = 18;
+        bool simplified = false;         // 簡體輸出 (#32): shown and sent in Simplified characters
+        bool simplified_hotkey = false;  // ...switched with the key below (off: the key is the app's)
+        UINT script_vk = 0;              // simplified_key: the key and its modifiers (parse_hotkey)
+        bool script_ctrl = false, script_alt = false, script_shift = false;
     };
 
     bool test_key_down(ITfContext* ctx, WPARAM vk, LPARAM lp);
@@ -125,6 +129,7 @@ private:
     void key_up(WPARAM vk);
     bool wants_undo(WPARAM vk) const;
     bool is_width_key(WPARAM vk) const;
+    bool is_script_key(WPARAM vk) const;  // 簡體輸出's key (#32), when the user turned it on
     bool other_modifier() const;
     bool direct(ITfContext* ctx);   // 遊戲中 Shift 交給遊戲: in a game, not in a text box (nor typing there)
     bool tsf_text_box(ITfContext* ctx);  // the focus is a text box of an app that talks TSF itself

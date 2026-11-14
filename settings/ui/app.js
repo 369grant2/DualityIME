@@ -45,6 +45,39 @@ let S = null;          // what settings.exe told us (config, counts, version...)
 let SYS = null;        // Windows' side: {default_ime, language_hk}, once known
 const BUSY = new Set();
 
+// 簡體輸出 (#32): 繁體 / 簡體, and its key (off as it comes: the key is then the program's)
+function scriptRows() {
+  const keyBox = h("button", { class: "text-input key-box", type: "button", "aria-label": "繁簡切換的組合鍵" },
+    S.config.simplified_key);
+  let listening = false;
+  const stop = () => { listening = false; keyBox.textContent = S.config.simplified_key; };
+  keyBox.addEventListener("click", () => { listening = true; keyBox.textContent = "請按下組合鍵…"; });
+  keyBox.addEventListener("blur", stop);
+  keyBox.addEventListener("keydown", async (e) => {
+    if (!listening) return;
+    e.preventDefault();
+    if (e.key === "Escape") return stop();
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;  // (a modifier alone: wait for the key)
+    // (by the key's place, e.code: Shift+1 gives e.key "!", review 2026-11-14)
+    const code = /^Key([A-Z])$/.exec(e.code) || /^Digit([0-9])$/.exec(e.code) || /^(F(?:[1-9]|1[0-2]))$/.exec(e.code);
+    const k = code ? code[1] : null;
+    const parts = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Win", k || e.key].filter(Boolean);
+    try {
+      S.config = await api("setConfig", { key: "simplified_key", value: parts.join("+") });
+      toast("設定已儲存並自動套用");
+    } catch (err) {
+      toast(err && err.message ? err.message : "儲存失敗，請再試一次");
+    }
+    stop();
+  });
+  return [
+    row("繁體／簡體輸出", "注音照打，選擇送出繁體字或簡體字。簡體時候選字第一個是大陸用詞，選過兩次就會記住。",
+      cfgSegments("simplified", [[false, "繁體"], [true, "簡體"]], "繁體／簡體輸出")),
+    row("繁簡切換快捷鍵", "打字時按這組鍵切換繁體與簡體。開啟後，程式中相同組合的快捷鍵會失效。",
+      cfgToggle("simplified_hotkey", "快捷鍵"), keyBox)
+  ];
+}
+
 async function setConfig(key, value) {
   try {
     S.config = await api("setConfig", { key, value });
@@ -350,6 +383,7 @@ function pageTyping() {
     card(
       row("標點符號字元寬度", "", width),
       row("全形英數模式", "英數、標點與空白皆輸出為全形（如 ＡＢＣ１２３）。", cfgToggle("full_width", "全形英數模式")),
+      ...scriptRows(),
       row("Ctrl + 標點打全形", "按住 Ctrl 再按標點鍵即輸出全形標點。開啟後，程式中相同組合的快捷鍵在中英混打時會失效", cfgToggle("ctrl_full_punct", "Ctrl + 標點打全形")),
       row("注音自動校正",
         h("span", {}, "按到旁邊的鍵、注音順序打錯、同一個鍵按兩次或漏打聲調時，看整句自動改成最可能的字。可透過 ↓ 選回原本打的。",
@@ -431,7 +465,9 @@ function pageComplete() {
     card(
       row("Tab 智慧補字", "輸入時於游標後方提示最可能的下一個字", cfgToggle("completion", "Tab 智慧補字")),
       row("自動記憶常用英文與 Email", "自動記憶輸入滿 2 次的英文單字，以及輸入過 1 次的 Email。", cfgToggle("remember_words", "自動記憶常用英文與 Email")),
-      row("已記憶項目", `目前已記住 ${S.remembered} 筆打字習慣、${S.rememberedEmails} 個 Email`,
+      row("已記憶項目", S.rememberedSimplified == null  // (簡體輸出 never used: as before, #32)
+        ? `目前已記住 ${S.remembered} 筆打字習慣、${S.rememberedEmails} 個 Email`
+        : `目前已記住 繁體 ${S.remembered} 筆、簡體 ${S.rememberedSimplified} 筆打字習慣，${S.rememberedEmails} 個 Email`,
         h("button", { class: "btn", onclick: forgetMemory }, "全部清除")))
   ];
 }

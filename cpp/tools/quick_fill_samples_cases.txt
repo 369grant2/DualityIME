@@ -1,0 +1,6 @@
+# 快速填入 samples (#33): no quick_fill.json in the test folder (never saved), so ` then Space lists the
+# 13 samples a new install starts with
+`{SPACE}{ENTER} => sample@example.com
+`{SPACE}{DOWN}{DOWN}{ENTER} => John
+` tks{ENTER} => 感謝您的幫忙
+` em4{ENTER} => ∑( ° Δ °)

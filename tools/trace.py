@@ -46,6 +46,8 @@ def main(user_path, script_path, config_path=None):
                     extra = "undo:" + c.undo_commit()
                 elif name == "FW":
                     extra = "fw:" + ("1" if c.toggle_full_width() else "0")
+                elif name == "SC":  # 簡體輸出 on/off (#32)
+                    extra = "sc:" + ("1" if c.toggle_simplified() else "0")
                 elif name == "RESET":
                     c.reset()
                 elif name == "LB":

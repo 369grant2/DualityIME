@@ -112,7 +112,11 @@ try {
     $files = @("DualityIME64.dll", "DualityIME32.dll", "DualityIMEEngine.exe", "lookup.exe", "settings.exe",
                "Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll", "WebView2Loader.dll",
                "uninstall.exe", "icon.ico", "settings-system.ps1", "language.ps1", "uninstall.ps1", "user.ps1", "remove-pime.ps1",
-               "data\lexicon.txt", "data\names.txt", "data\bigram.bin", "data\lm.bin", "data\english.txt", "data\english_tech.txt", "data\LICENSE-McBopomofo.txt")
+               "data\lexicon.txt", "data\names.txt", "data\bigram.bin", "data\lm.bin", "data\english.txt", "data\english_tech.txt", "data\LICENSE-McBopomofo.txt",
+               # 簡體輸出 (#32): OpenCC's tables and their licence
+               "data\opencc\TSPhrases.txt", "data\opencc\TSCharacters.txt", "data\opencc\TWVariantsRev.txt",
+               "data\opencc\TWVariantsRevPhrases.txt", "data\opencc\TWPhrasesRev.txt", "data\opencc\TWPhrases.txt",
+               "data\opencc\mainland_words.txt", "data\LICENSE-OpenCC.txt")
     $files += @(Get-ChildItem (Join-Path $Payload "ui") -File | ForEach-Object { "ui\$($_.Name)" })
     foreach ($f in $files + @("ui\index.html")) {
         if (-not (Test-Path (Join-Path $Payload $f))) { throw "安裝內容不完整，缺少 $f，請重新下載安裝檔。" }

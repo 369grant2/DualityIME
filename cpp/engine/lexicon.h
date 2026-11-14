@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "script.h"
 #include "util.h"
 
 namespace sz {
@@ -45,6 +46,7 @@ class Lexicon {
 public:
     explicit Lexicon(const std::wstring& path);
     bool ok() const { return ok_; }
+    const Script& script() const { return script_; }  // 簡體輸出 (#32): OpenCC's tables
 
     const std::vector<Scored>& lookup(const std::vector<ustr>& readings) const;
     const std::vector<Scored>* find(const ustr& reading_key) const;
@@ -81,6 +83,7 @@ public:
 
 private:
     bool ok_ = false;
+    Script script_;
     std::unordered_map<ustr, std::vector<Scored>> entries_;
     std::unordered_map<ustr, std::vector<Scored>> names_;
     std::unordered_map<ustr, ustr> name_written_;
@@ -114,6 +117,7 @@ constexpr double CUSTOM_BONUS = 4.0;
 constexpr size_t KEEP_CORRECTIONS = 2000;   // key strings 注音自動校正 remembers
 constexpr double CORRECTION_MIN_USES = 2;   // a choice there counts once picked this many times
 inline const ustr AS_ENGLISH = U"en";        // 代碼記憶's choice: the keys are English (mp3), not the zhuyin they spell
+constexpr double REPLACE_MIN_USES = 2;  // 簡體輸出 (#32): a Mainland word picked this many times for a Taiwan one comes by itself
 // a code for 代碼記憶: letters and digits only, both, 2-16 of them (mp3, win10, rtx4090; ji3 too)
 bool is_code(const std::string& keys);
 
@@ -231,6 +235,20 @@ public:
     std::vector<std::string> words_starting(const std::string& prefix, size_t limit = 3) const;
     void learn_english(const std::string& raw, bool wanted);
     void save();
+    // 簡體輸出 (#32): see engine/lexicon.py set_simplified. Simplified mode: phrases / phrase_used are the shared
+    // ones with user_simplified.json's laid over them; what differs from the shared ones is Simplified mode's.
+    bool simplified = false;
+    void set_simplified(bool on);
+    double replacement_count(const ustr& phrase, const ustr& term) const;
+    void touch_replacement(const ustr& phrase, const ustr& term);  // came by itself and sent: from today
+    void learn_replacement(const ustr& phrase, const ustr& term);  // a Mainland word picked for a Taiwan one
+    struct SimpDrop { ustr key, phrase; double count; std::optional<int> day; };
+    std::vector<SimpDrop> simp_dropped;  // what drop_simplified took: for undo (Composer)
+    void restore_simplified(const std::vector<SimpDrop>& dropped);  // put back: the pick was taken back
+    void forget_replacement(const ustr& phrase);                   // the Taiwan word picked back
+    std::optional<ustr> default_term(const ustr& phrase) const;    // picked REPLACE_MIN_USES times: comes by itself
+    OrderedMap<ustr, OrderedMap<ustr, double>> replacements;      // Taiwan word -> {Mainland word: count}
+    OrderedMap<ustr, OrderedMap<ustr, int>> replacement_used;     // ...the day each was last picked
     // From now on read only: user.json and keys.json are never written and import-memory.json is left
     // for the next start; what is learned stays in memory (the server, while settings.exe may still be
     // moving 2.x data into the folder). No Python counterpart: a server start condition, not engine behaviour.
@@ -265,8 +283,17 @@ public:
 private:
     double faded(double count, const int* day) const;
     void prune();
-    std::wstring path_, custom_path_, quick_fill_path_;
-    bool quick_fill_exists_ = false;
+    void merge_simplified();  // phrases / phrase_used = shared_* with simp_* laid over them
+    void keep_simplified();   // simp_* = where phrases / phrase_used differ from shared_*
+    void save_simplified();
+    void drop_simplified(const ustr& key, const ustr& phrase);  // a pick in Traditional mode: the latest
+    void prune_simplified();
+    bool simp_dirty_ = false;  // changed in Traditional mode: saved with user.json
+    void import_memory_now(int counter);
+    std::wstring path_, custom_path_, quick_fill_path_, simplified_path_;
+    OrderedMap<ustr, OrderedMap<ustr, double>> simp_phrases_, shared_phrases_;
+    OrderedMap<ustr, OrderedMap<ustr, int>> simp_used_, shared_used_;
+    int quick_fill_state_ = -1;  // -1 not looked at yet, 0 no file, 1 a file (the first look always reads)
     long long quick_fill_mtime_ = 0;
     std::function<int()> today_;
     bool keep_files_ = false;

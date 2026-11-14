@@ -519,6 +519,41 @@ bool TextService::other_modifier() const {
     return down(VK_CONTROL) || down(VK_MENU) || down(VK_LWIN) || down(VK_RWIN);
 }
 
+// "Ctrl+Shift+F", "Ctrl+F1", "Alt+Shift+S": the key (A-Z, 0-9, F1-F12) and its modifiers; false if it is none of those
+static bool parse_hotkey(const std::string& text, UINT& vk, bool& ctrl, bool& alt, bool& shift) {
+    vk = 0;
+    ctrl = alt = shift = false;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t plus = text.find('+', pos);
+        std::string part = text.substr(pos, plus == std::string::npos ? std::string::npos : plus - pos);
+        pos = plus == std::string::npos ? text.size() + 1 : plus + 1;
+        if (part == "Ctrl") ctrl = true;
+        else if (part == "Alt") alt = true;
+        else if (part == "Shift") shift = true;
+        else if (vk) return false;  // (two keys)
+        else if (part.size() == 1 && ((part[0] >= 'A' && part[0] <= 'Z') || (part[0] >= '0' && part[0] <= '9')))
+            vk = static_cast<UINT>(part[0]);
+        else if (part.size() >= 2 && part.size() <= 3 && part[0] == 'F') {
+            int n = std::atoi(part.c_str() + 1);
+            if (n < 1 || n > 12) return false;
+            vk = VK_F1 + n - 1;
+        } else {
+            return false;
+        }
+    }
+    if (alt && !ctrl && vk == VK_F4) return false;  // (Alt+F4 closes the window: never ours, as Settings.cs HotkeyProblem)
+    if (ctrl && !alt && !shift && std::string("CVXZYAS").find(static_cast<char>(vk)) != std::string::npos)
+        return false;  // (copy, paste, cut, undo, redo, select all, save: every program's, as HotkeyProblem)
+    return vk != 0 && (ctrl || alt);
+}
+
+bool TextService::is_script_key(WPARAM vk) const {
+    // 簡體輸出 (#32): only when the user ticked 快捷鍵, the key with exactly its modifiers
+    return cfg_.simplified_hotkey && cfg_.script_vk && vk == cfg_.script_vk && down(VK_CONTROL) == cfg_.script_ctrl &&
+           down(VK_MENU) == cfg_.script_alt && down(VK_SHIFT) == cfg_.script_shift && !down(VK_LWIN) && !down(VK_RWIN);
+}
+
 bool TextService::is_width_key(WPARAM vk) const {
     // Shift+Space switches 全形／半形
     return vk == VK_SPACE && down(VK_SHIFT) && !other_modifier();
@@ -747,6 +782,7 @@ bool TextService::test_key_down(ITfContext* ctx, WPARAM vk, LPARAM lp) {
     } else {
         shift_alone_ = false;
     }
+    if (is_script_key(vk)) return true;  // 簡體輸出's key (#32), in 中 and 英 modes
     if (down(VK_CONTROL) || down(VK_MENU)) {
         // Ctrl + , . ; ' [ ] ...: their full-width marks, if that setting is on (not in 英 mode, nor
         // where nothing can be typed); every other combination is the app's shortcut (Ctrl+C, Alt+Tab...)
@@ -804,6 +840,14 @@ bool TextService::key_down(ITfContext* ctx, WPARAM vk, LPARAM lp) {
     // ` held down: Windows repeats it; with the symbol keyboard up a second ` would type a ` (` then Space,
     // held or not, opens 快速填入 - #21)
     if (vk == VK_OEM_3 && (lp & 0x40000000) && state_.symbol_page >= 0) return true;
+    if (is_script_key(vk)) {  // 簡體輸出 (#32): Traditional <-> Simplified, in 中 and 英 modes
+        if (lp & 0x40000000) return true;  // (held down: once)
+        Json req = Json::object();
+        req["op"] = Json("simplified");
+        call(ctx, req);
+        show_mode(cfg_.simplified ? L"簡" : L"繁");
+        return true;
+    }
     if (ctrl_punct_key(ctx, vk, lp)) {
         Json req = Json::object();
         req["op"] = Json("ctrl_punct");
@@ -957,6 +1001,11 @@ void TextService::read_reply(const Json& r) {
         cfg_.cand_font = wide(text("cand_font", "Microsoft JhengHei UI"));
         cfg_.cand_font_size = number("cand_font_size", 18);
         cfg_.game_keys = flag("game_keys", true);
+        cfg_.simplified = flag("simplified", false);
+        cfg_.simplified_hotkey = flag("simplified_hotkey", false);
+        if (!parse_hotkey(text("simplified_key", "Ctrl+F1"), cfg_.script_vk, cfg_.script_ctrl, cfg_.script_alt,
+                          cfg_.script_shift))
+            cfg_.script_vk = 0;  // (not a key: no key at all)
         set_appearance_from(c->get("appearance"), wide(text("appearance_dir", "")));
     }
 }

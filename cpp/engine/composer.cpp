@@ -54,6 +54,7 @@ constexpr double COST_ADJACENT = 1.5;  // a syllable read with one key swapped f
 constexpr double COST_NO_TONE = 1.0;  // a syllable typed without its tone key, another one right after it (5k1u0 = 這邊)
 constexpr double SWAP_GAIN_NO_WORD = 3.5;  // log10: how much better the sentence must read to swap a syllable that
                                            // spells something, but makes no word, for its neighbour's (老嗎 -> 好嗎)
+constexpr double SWAP_GAIN_NASAL = 2.0;  // ...and ㄣ/ㄥ or ㄢ/ㄤ the other way round (因該 -> 應該, #38)
 constexpr double SWAP_GAIN_WORD = 3.0;     // ...and one that makes a word of the dictionary (你老嗎 -> 你好嗎)
 constexpr size_t ORIG_FIRST = 3;  // 注音自動校正 swapped a syllable: this many of what the keys typed spell come second in ↓
 constexpr int SWAP_WINDOW = 3;             // syllables on each side of it that count (run_score)
@@ -1104,19 +1105,30 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
             if (!apart_score(rds, k, *lexicon)) continue;  // (a syllable on its own: nothing to make a word with)
             // of the syllables keys next to the ones typed make, those that make a word around it
             // (most syllables have none: no sentence to score), the one the sentence reads best with
-            std::optional<ustr> best_alt;
-            double best = 0;
-            for (auto& alt : table.adjacent_parses(t.raw)) {
-                auto trial = rds;
-                trial[k] = alt;
-                if (!word_score(trial, k, *lexicon, user)) continue;
-                double score = in_sentence(rds, k, alt);
-                if (!best_alt || score > best) {
-                    best_alt = alt;
-                    best = score;
+            // (and the syllable with ㄣ/ㄥ or ㄢ/ㄤ the other way round: 因該 -> 應該, #38) - each kind against its
+            // own gain: one kind's best failing its gain does not keep the other's from passing
+            auto near = table.adjacent_parses(t.raw);
+            std::vector<ustr> nasal;
+            for (auto& a : table.nasal_swaps(t.value))
+                if (std::find(near.begin(), near.end(), a) == near.end()) nasal.push_back(a);
+            struct Found { double score; ustr alt; bool nasal; };
+            std::vector<Found> found;  // each kind's best that makes a word around it
+            for (int kind = 0; kind < 2; ++kind) {
+                std::optional<ustr> best_alt;
+                double best = 0;
+                for (auto& alt : kind == 0 ? near : nasal) {
+                    auto trial = rds;
+                    trial[k] = alt;
+                    if (!word_score(trial, k, *lexicon, user)) continue;
+                    double score = in_sentence(rds, k, alt);
+                    if (!best_alt || score > best) {
+                        best_alt = alt;
+                        best = score;
+                    }
                 }
+                if (best_alt) found.push_back(Found{best, *best_alt, kind == 1});
             }
-            if (!best_alt) {
+            if (found.empty()) {
                 swapped = false;
                 continue;
             }
@@ -1125,11 +1137,20 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
             // the dictionary): they read as well as that word does, else 上述 (a for l) always wins
             if (auto variant = other_tones_reading(rds, k, *lexicon))
                 typed = std::max(typed, in_sentence(*variant, k, (*variant)[k]));
-            double gain = word_score(rds, k, *lexicon, nullptr) ? SWAP_GAIN_WORD : SWAP_GAIN_NO_WORD;
+            bool typed_word = word_score(rds, k, *lexicon, nullptr).has_value();
+            std::optional<ustr> best_alt;
+            double best = 0;
+            for (auto& f : found) {  // (the best of those passing their gain; the first of equals, as Python's max)
+                double gain = typed_word ? SWAP_GAIN_WORD : f.nasal ? SWAP_GAIN_NASAL : SWAP_GAIN_NO_WORD;
+                if (f.score - typed > gain && (!best_alt || f.score > best)) {
+                    best_alt = f.alt;
+                    best = f.score;
+                }
+            }
             // ...and where the tones differ in another syllable (匹配 for ㄆㄧ ㄆㄟˋ: ㄆㄟˋ as there),
             // this one is no slip at all: left alone (not 批判, o next to 0); a pick makes it the
             // word (learn_tone_variant_words)
-            if (best - typed > gain && !makes_other_tones_word(rds, k, *lexicon)) {
+            if (best_alt && !makes_other_tones_word(rds, k, *lexicon)) {
                 t.orig = t.value;
                 t.value = *best_alt;
                 t.corrected = "valid";
@@ -2005,6 +2026,7 @@ void Composer::refresh() {
                 if (std::find(forms.begin(), forms.end(), want) != forms.end()) t.value = want;
             } else if (t.corrected.empty()) {
                 auto alts = table_.adjacent_parses(t.raw);
+                for (auto& a : table_.nasal_swaps(t.value)) alts.push_back(a);  // (ㄣ/ㄥ too, #38)
                 if (std::find(alts.begin(), alts.end(), want) != alts.end()) {
                     t.orig = t.value;
                     t.value = want;

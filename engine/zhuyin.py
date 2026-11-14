@@ -45,6 +45,8 @@ ADJACENT = _adjacent()
 INITIALS = set("ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙ")
 MEDIALS = set("ㄧㄨㄩ")
 FINALS = set("ㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ")
+# front and back nasals mixed up (因該 for 應該): a slip of the ear, not the finger (注音自動校正, #38)
+NASAL_SWAPS = {"ㄣ": "ㄥ", "ㄥ": "ㄣ", "ㄢ": "ㄤ", "ㄤ": "ㄢ"}
 
 
 def reading_to_keys(reading):
@@ -242,6 +244,16 @@ class SyllableTable:
                 if parsed and parsed[1] and (not own or parsed[0] != own[0]):
                     out.add(parsed[0])
         return sorted(out)
+
+    def nasal_swaps(self, reading):
+        """The syllable with its final ㄣ/ㄥ or ㄢ/ㄤ the other way round, the tone kept (ㄧㄣ for ㄧㄥ: #38),
+        if there is such a syllable; [] else."""
+        tone = reading[-1] if reading and reading[-1] in TONE_MARKS else ""
+        body = reading[:-1] if tone else reading
+        if not body or body[-1] not in NASAL_SWAPS:
+            return []
+        alt = body[:-1] + NASAL_SWAPS[body[-1]] + tone
+        return [alt] if alt in self.toned else []
 
     def bare(self, keys):
         """The zhuyin the keys stand for as typed, whatever they spell (注音文: 1j8 is ㄅㄨㄚ,

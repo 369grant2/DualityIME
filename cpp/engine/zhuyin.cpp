@@ -57,6 +57,22 @@ const std::unordered_map<char, std::string>& adjacent_keys() {
 
 bool is_tone_mark(char32_t c) { return c == U'ˊ' || c == U'ˇ' || c == U'ˋ' || c == U'˙'; }
 
+std::vector<ustr> SyllableTable::nasal_swaps(const ustr& reading) const {
+    // front and back nasals mixed up (因該 for 應該): a slip of the ear, not the finger
+    bool toned = !reading.empty() && is_tone_mark(reading.back());
+    ustr body = toned ? reading.substr(0, reading.size() - 1) : reading;
+    if (body.empty()) return {};
+    char32_t last = body.back(), other;
+    if (last == U'ㄣ') other = U'ㄥ';
+    else if (last == U'ㄥ') other = U'ㄣ';
+    else if (last == U'ㄢ') other = U'ㄤ';
+    else if (last == U'ㄤ') other = U'ㄢ';
+    else return {};
+    ustr alt = body.substr(0, body.size() - 1) + other + (toned ? ustr(1, reading.back()) : ustr());
+    if (!toned_.count(alt)) return {};
+    return {alt};
+}
+
 static int rank(char32_t sym) {
     static const ustr initials = U"ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙ";
     static const ustr medials = U"ㄧㄨㄩ";

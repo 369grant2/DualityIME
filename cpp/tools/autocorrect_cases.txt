@@ -44,3 +44,9 @@ qu qo4{ENTER} => 匹配
 # tone (有 at 遊行: 有形, not 有行)
 5k1u0 {HOME}{DOWN}4{ENTER} => 哲邊
 u.vu/6{HOME}{DOWN}2{ENTER} => 有形
+# ㄣ and ㄥ mixed up (#38): 因該 -> 應該, 星情 -> 心情; 因為 typed right stays
+up e9 {ENTER} => 應該
+vu/ fu/6{ENTER} => 心情
+up jo4{ENTER} => 因為
+# ...英 picked on the swapped one, then ㄅㄢˋ typed (the sentence no longer swaps it): the pick stays
+up e9 {HOME}{DOWN}6{END}104{ENTER} => 英該辦

@@ -62,6 +62,9 @@ public:
     // the syllables the keys spell with each tone there is, typed in order and no tone key
     // (5k: ㄓㄜ ㄓㄜˊ ㄓㄜˇ ㄓㄜˋ ㄓㄜ˙ as far as they exist); sorted. Empty if they spell none
     std::vector<ustr> toned_forms(std::string_view keys) const;
+    // the syllable with its final ㄣ/ㄥ or ㄢ/ㄤ the other way round, the tone kept (ㄧㄣ for ㄧㄥ: 注音自動校正, #38),
+    // if there is such a syllable; empty else (see engine/zhuyin.py nasal_swaps)
+    std::vector<ustr> nasal_swaps(const ustr& reading) const;
     double score(const ustr& reading) const;
     // the syllables of the user's own words (個人詞庫) are syllables too (see engine/zhuyin.py):
     // its reading keys; what the dictionary has keeps its score, what is no zhuyin syllable is

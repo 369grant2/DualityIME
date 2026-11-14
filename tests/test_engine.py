@@ -4799,6 +4799,41 @@ class AutocorrectTest(Base):
         # (The swap is what is tested: the last character is the context's, 嘛 with 長句選字加強 off, 嗎 on)
         self.assertEqual(self.type("su3xl3a87")[:2], "你好")
 
+    def nasal(self, readings):
+        from engine.zhuyin import reading_to_keys
+        return self.type("".join(reading_to_keys(r) for r in readings.split()))
+
+    def test_front_back_nasal_swapped(self):
+        # (#38) ㄣ and ㄥ (ㄢ and ㄤ) mixed up: 因該 is no word, 應該 a common one; 星情 -> 心情
+        self.assertEqual(self.nasal("ㄧㄣ ㄍㄞ"), "應該")
+        self.assertEqual(self.nasal("ㄒㄧㄥ ㄑㄧㄥˊ"), "心情")
+
+    def test_front_back_nasal_right_as_typed(self):
+        # (#38) typed right, nothing is swapped: 因為, 應該, 心情 stay
+        self.assertEqual(self.nasal("ㄧㄣ ㄨㄟˋ"), "因為")
+        self.assertEqual(self.nasal("ㄧㄥ ㄍㄞ"), "應該")
+        self.assertEqual(self.nasal("ㄒㄧㄣ ㄑㄧㄥˊ"), "心情")
+
+    def test_front_back_nasal_pick_kept(self):
+        # (#38, code-reviewer 2026-11-14) 英 picked on the 應 of 因該 -> 應該, then ㄅㄢˋ typed: the sentence no longer
+        # swaps the syllable, but the pick (of ㄧㄥ) stays, as a pick on a key-next-to swap does
+        from engine.zhuyin import reading_to_keys
+        c = self.c
+        self.type("".join(reading_to_keys(r) for r in ("ㄧㄣ", "ㄍㄞ")), enter=False)
+        c.key(special="HOME")
+        c.key(special="DOWN")
+        c.key(str(c.candidates.index("英") + 1))
+        self.assertEqual(c.composition[:1], "英")
+        c.key(special="END")
+        for k in reading_to_keys("ㄅㄢˋ"):
+            c.key(k)
+        self.assertEqual(c.composition[:1], "英", c.composition)
+
+    def test_front_back_nasal_not_without_autocorrect(self):
+        self.c.config.set(autocorrect=False)
+        self.c.settings_changed()
+        self.assertEqual(self.nasal("ㄧㄣ ㄍㄞ"), "因該")
+
     def test_a_personal_word_typed_is_never_swapped(self):
         saved = self.c.user.custom
         self.c.user.custom = {"ㄒㄧㄢˋ-ㄧˋ": ["現役"]}

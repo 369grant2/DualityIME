@@ -81,6 +81,8 @@ COST_NO_TONE = 1.0      # syllable typed without its tone key, another one right
 SWAP_GAIN_NO_WORD = 3.5   # log10: how much better the sentence must read to swap a syllable that spells
                           # something, but makes no word, for its neighbour's (老嗎 -> 好嗎)
 SWAP_GAIN_WORD = 3.0      # ...and one that makes a word of the dictionary (你老嗎 -> 你好嗎)
+SWAP_GAIN_NASAL = 2.0      # ...and ㄣ/ㄥ or ㄢ/ㄤ the other way round, the keys typed making no word (因該 -> 應該, #38): a
+                          # slip of the ear, far more common than a key next to the right one (tools/autocorrect_eval.py N)
 SWAP_WINDOW = 3           # syllables on each side of it that count (run_score)
 RUN_SCORES_KEPT = 50000   # run_score results kept across keys (then all dropped and started again)
 _RUN_SCORES = {}
@@ -780,14 +782,22 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
                 continue  # (a syllable on its own: nothing to make a word with)
             # of the syllables keys next to the ones typed make, those that make a word around it
             # (most syllables have none: no sentence to score), the one the sentence reads best with
-            best_alt, best = None, None
-            for alt in table.adjacent_parses(t.raw):
-                if _word_score(readings[:k] + [alt] + readings[k + 1:], k, lexicon, user) is None:
-                    continue
-                score = in_sentence(readings, k, alt)
-                if best is None or score > best:
-                    best_alt, best = alt, score
-            if best_alt is None:
+            # (and the syllable with ㄣ/ㄥ or ㄢ/ㄤ the other way round: 因該 -> 應該, #38) - each kind against its own
+            # gain: one kind's best failing its gain does not keep the other's from passing
+            near = table.adjacent_parses(t.raw)
+            kinds = [(near, False), ([a for a in table.nasal_swaps(t.value) if a not in near], True)]
+            found = []  # [(score, syllable, nasal)]: each kind's best that makes a word around it
+            for alts, nasal in kinds:
+                best_alt, best = None, None
+                for alt in alts:
+                    if _word_score(readings[:k] + [alt] + readings[k + 1:], k, lexicon, user) is None:
+                        continue
+                    score = in_sentence(readings, k, alt)
+                    if best is None or score > best:
+                        best_alt, best = alt, score
+                if best_alt is not None:
+                    found.append((best, best_alt, nasal))
+            if not found:
                 swapped = False
                 continue
             typed = in_sentence(readings, k, t.value)
@@ -796,11 +806,14 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
             variant = _other_tones_reading(readings, k, lexicon)
             if variant is not None:
                 typed = max(typed, in_sentence(variant, k, variant[k]))
-            gain = SWAP_GAIN_WORD if _word_score(readings, k, lexicon, None) is not None else SWAP_GAIN_NO_WORD
+            typed_word = _word_score(readings, k, lexicon, None) is not None
+            passing = [(best, alt) for best, alt, nasal in found
+                       if best - typed > (SWAP_GAIN_WORD if typed_word else SWAP_GAIN_NASAL if nasal else SWAP_GAIN_NO_WORD)]
             # ...and where the tones differ in another syllable (匹配 for ㄆㄧ ㄆㄟˋ: ㄆㄟˋ as there),
             # this one is no slip at all: left alone (not 批判, o next to 0); a pick makes it the
             # word (_learn_tone_variant_words)
-            if best - typed > gain and not _makes_other_tones_word(readings, k, lexicon):
+            if passing and not _makes_other_tones_word(readings, k, lexicon):
+                best, best_alt = max(passing, key=lambda p: p[0])
                 t.orig, t.value, t.corrected = t.value, best_alt, "valid"
                 readings[k] = best_alt
                 swapped = True
@@ -1598,7 +1611,8 @@ class Composer:
                     t.value, t.orig, t.corrected = t.orig, None, None
                 elif t.corrected == "tone" and pin[1] in self.table.toned_forms(t.raw):
                     t.value = pin[1]  # (the tone of the pick, not the one the sentence now prefers)
-                elif not t.corrected and pin[1] in self.table.adjacent_parses(t.raw):
+                elif not t.corrected and (pin[1] in self.table.adjacent_parses(t.raw)
+                                          or pin[1] in self.table.nasal_swaps(t.value)):  # (ㄣ/ㄥ too, #38)
                     t.orig, t.value, t.corrected = t.value, pin[1], "valid"
         self.readings = [t.value for t in self.tokens if t.kind == "zh"]
         if self.caret is not None:  # (the keys may read differently now)

@@ -55,6 +55,10 @@ CASES = [
     # order (;e: 剛), a key next to the right one spelling a word (現役 -> 信義, 你老 -> 你好), and 現 picked
     # back twice (31st in the list): as typed from then on
     "5k1u0 {ENTER}e;e; {ENTER}e; ;e {ENTER},u3{ENTER}su3xl3a87{ENTER}w961o3g4vu04u4fm {ENTER}",
+    # ...ㄣ and ㄥ mixed up (#38): 因該 -> 應該, 星情 -> 心情, in a sentence, and 因為 typed right; ↓ on the swapped one
+    "up e9 {ENTER}vu/ fu/6{ENTER}ji3up e9 fm4{ENTER}up jo4{ENTER}up e9 {HOME}{DOWN}{ESC}{ESC}",
+    # ...a character picked on the swapped one, then ㄅㄢˋ typed (the swap undone by the sentence): the pick stays
+    "up e9 {HOME}{DOWN}6{END}104{ENTER}",
     ("w961o3g4vu04u4fm {HOME}{RIGHT}{RIGHT}{RIGHT}" + "{DOWN}" * 31 + "{ENTER}{ENTER}") * 2 + "w961o3g4vu04u4fm {ENTER}",
     "ok hi go su ios 5k ", "5ke; {HOME}{DOWN}3{END}e; 1u0 {ENTER}",  # (浙 picked for 5k: kept as more comes)
     # a word across the phrase sent last (怎麼 sent, then 辦: not 半), and 長句選字加強 keeping cohesive

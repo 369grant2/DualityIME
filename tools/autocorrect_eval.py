@@ -12,6 +12,7 @@ as the sentence typed right does with the setting off. Kinds of mistakes:
   B  two zhuyin keys swapped (us3; 817 for 187)
   C  a key typed twice (ssu3)
   E  a tone key (or the space of a first tone) left out, another syllable after it (5k1u0 for 這邊)
+  N  ㄣ and ㄥ (or ㄢ and ㄤ) the other way round, spelling another syllable (因該 for 應該, #38)
 Two sets: random strings of common words (--count), and the Chinese of this repo's own text
 (README, docs, the settings page; --natural-count of them), where the context model matters.
 Broken (setting on vs off, the keys typed right):
@@ -36,7 +37,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from engine import create_composer  # noqa: E402
 from engine.bigram import load_other  # noqa: E402
-from engine.zhuyin import ADJACENT, reading_to_keys  # noqa: E402
+from engine.zhuyin import ADJACENT, NASAL_SWAPS, reading_to_keys  # noqa: E402
 from tune_english import MIXED  # noqa: E402
 from evaluate import reading_of  # noqa: E402
 
@@ -91,6 +92,21 @@ def typo(c, syllables, kind, rng):
     """The sentence's keys with one syllable mistyped the given way ("adjacent", "order",
     "double", "tone"), and the kind it turned out ("A" / "D" / "B" / "C" / "E"); None if this
     sentence has no such mistake to make."""
+    if kind == "nasal":
+        # ㄣ/ㄥ or ㄢ/ㄤ the other way round, where that spells a syllable (its own generator: A-E keep theirs)
+        keys_of = {v: k for k, v in c.table.keymap.items()}
+        swap = {keys_of[a]: keys_of[b] for a, b in NASAL_SWAPS.items() if a in keys_of and b in keys_of}
+        places = [k for k, s in enumerate(syllables) if any(ch in swap for ch in s[:-1])]
+        if not places:
+            return None
+        k = rng.choice(places)
+        body, tone = syllables[k][:-1], syllables[k][-1]
+        p = max(i for i, ch in enumerate(body) if ch in swap)
+        bad = body[:p] + swap[body[p]] + body[p + 1:] + tone
+        parsed = c.table.parse_syllable(bad)
+        if not parsed or not parsed[1]:
+            return None
+        return "".join(syllables[:k]) + bad + "".join(syllables[k + 1:]), "N"
     if kind == "tone":
         # the tone key (or the space of a first tone) left out, another syllable after it
         if len(syllables) < 2:
@@ -217,18 +233,23 @@ def main(argv):
     print(f"A fixed >= {TARGET_FIXED_A:.0%}         {'OK' if rate_a >= TARGET_FIXED_A else 'NOT MET'} ({rate_a:.1%})")
     e_tries, e_on, _ = fixed_natural["E"]
     d_tries, d_on, _ = fixed_natural["D"]
+    n_tries, n_on, _ = fixed_natural["N"]
+    print(f"natural: N {n_on / n_tries if n_tries else 0:.1%} ({n_tries} sentences, #38)")
     print(f"natural: D {d_on / d_tries if d_tries else 0:.1%}, E {e_on / e_tries if e_tries else 0:.1%}"
           f" (stage 1 gate: D +15 points over the start, E >= {TARGET_FIXED_E:.0%})")
 
 
 def run_fixed(c, name, clean, rng, rng_tone, show):
     """Typos of each kind in the sentences: {kind: [tries, fixed with it on, right with it off]}."""
-    fixed = {kind: [0, 0, 0] for kind in "ADBCE"}
-    missed = {kind: [] for kind in "ADBCE"}
+    fixed = {kind: [0, 0, 0] for kind in "ADBCEN"}
+    missed = {kind: [] for kind in "ADBCEN"}
+    # (N its own generator, from the set's name: drawing from rng or rng_tone would move A-E's typos)
+    rng_nasal = random.Random(sum(map(ord, name)) * 7919 + len(clean))
     for syllables in clean:
         want = typed(c, "".join(syllables), False)
         made_all = [typo(c, syllables, kind, rng) for kind in ("adjacent", "order", "double")]
         made_all.append(typo(c, syllables, "tone", rng_tone))
+        made_all.append(typo(c, syllables, "nasal", rng_nasal))
         for made in made_all:
             if not made:
                 continue

@@ -437,9 +437,35 @@ def compare(cases, config, tmp):
     return keys
 
 
+def compare_frames():
+    """自訂外觀's photo frames and places (#35): the DLL's sums (cpp/tip/photo_frame.h, through sz_trace --frames and
+    --places) give tests/photo_frames.json and tests/photo_places.json, as settings/ui/frame.js does
+    (tests/test_photo_frame.py)."""
+    with open(os.path.join(ROOT, "tests", "photo_frames.json"), encoding="utf-8") as f:
+        table = json.load(f)
+    lines = "".join(f"{r['window']} {r['keys']} {r['per_line']} {r['font']}\n" for r in table)
+    out = subprocess.run([EXE, "--frames"], input=lines.encode(), capture_output=True, check=True).stdout.decode().split()
+    for i, r in enumerate(table):
+        got = (float(out[2 * i]), float(out[2 * i + 1]))
+        if got != (r["w"], r["h"]):
+            sys.exit(f"photo frame differs: {r} -> {got}")
+    # where the photo goes (sz_trace --places, tests/photo_places.json)
+    with open(os.path.join(ROOT, "tests", "photo_places.json"), encoding="utf-8") as f:
+        places = json.load(f)
+    lines = "".join(" ".join(str(v) for v in (*r["frame"], r["zoom"], r["x"], r["y"], *r["window"], *r["photo"])) + "\n"
+                    for r in places)
+    out = subprocess.run([EXE, "--places"], input=lines.encode(), capture_output=True, check=True).stdout.decode().split()
+    for i, r in enumerate(places):
+        got = [float(v) for v in out[4 * i:4 * i + 4]]
+        if any(abs(g - want) > 1e-4 for g, want in zip(got, r["place"])):
+            sys.exit(f"photo place differs: {r} -> {got}")
+    return len(table) + len(places)
+
+
 def main(count=2000, seed=1):
     if not os.path.exists(EXE):
         sys.exit(f"build the C++ engine first: {EXE} not found")
+    frames = compare_frames()
     lexicon = Lexicon()
     ranks = load_english()
     english = sorted(ranks, key=ranks.get)[:3000]
@@ -451,7 +477,7 @@ def main(count=2000, seed=1):
             cases = CASES + [random_case(rng, pool, english) for _ in range(count)]
             total += compare(cases, config, tmp)
             cases_run += len(cases)
-    print(f"same: {cases_run} cases, {total} keys, {len(CONFIGS)} settings")
+    print(f"same: {cases_run} cases, {total} keys, {len(CONFIGS)} settings, {frames} photo frames")
 
 
 if __name__ == "__main__":

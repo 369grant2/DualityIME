@@ -4,6 +4,10 @@
 //   sz_trace --lm-check <ids file> <data dir>: the language model's scores (tools/lm/check_cpp.py)
 //   sz_trace --time <data dir> <user.json> <script file> [config.json]: instead of the states, how long
 //     the engine takes (loading, every key) and its memory (tools/key_latency_cpp.py)
+//   sz_trace --frames: lines "window keys per_line font" on stdin, "w h" for each (自訂外觀's photo frame, #35:
+//     tools/compare.py checks them against tests/photo_frames.json)
+//   sz_trace --places: lines "frame_w frame_h zoom x y w h photo_w photo_h" on stdin, "left top w h" for each
+//     (where the photo goes: tests/photo_places.json)
 // Script lines: characters as typed, {DOWN} {ENTER} ... special keys,
 // {#5} a numpad key, {CAPS} Caps Lock on/off, {UNDO} take back the last commit,
 // {FW} 全形 on/off, {SC} 簡體輸出 on/off (#32), {RESET} focus change, {LB} a literal "{".
@@ -24,6 +28,7 @@
 
 #include "../engine/composer.h"
 #include "../engine/lm.h"
+#include "../tip/photo_frame.h"
 
 using namespace sz;
 
@@ -136,6 +141,23 @@ int main(int argc, char** argv) {
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
     if (argc == 4 && std::string(argv[1]) == "--lm-check") return lm_check(argv[2], argv[3]);
+    if (argc == 2 && std::string(argv[1]) == "--frames") {
+        std::string window;
+        int keys, per_line, font;
+        while (std::cin >> window >> keys >> per_line >> font) {
+            PhotoFrame f = photo_frame(window, keys, per_line, font);
+            std::printf("%g %g\n", f.w, f.h);
+        }
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--places") {
+        double fw, fh, zoom, x, y, w, h, iw, ih;
+        while (std::cin >> fw >> fh >> zoom >> x >> y >> w >> h >> iw >> ih) {
+            PhotoPlace p = photo_place({fw, fh}, zoom, x, y, w, h, iw, ih);
+            std::printf("%.6f %.6f %.6f %.6f\n", p.left, p.top, p.w, p.h);
+        }
+        return 0;
+    }
     bool timing = argc > 1 && std::string(argv[1]) == "--time";
     if (timing) {  // (the other arguments as usual)
         ++argv;

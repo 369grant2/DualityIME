@@ -978,6 +978,7 @@ void UserModel::learn_phrase(const ustr& key, const ustr& phrase) {
     double count = phrase_count(key, phrase);
     phrases[key].set(phrase, count + 1);
     phrase_used[key].set(phrase, today_());
+    drop_simplified(key, phrase);
 }
 
 bool UserModel::learned(const ustr& key, const ustr& phrase) const {
@@ -993,13 +994,87 @@ void UserModel::learn_half(const ustr& key, const ustr& phrase) {
     double count = phrase_count(key, phrase);
     phrases[key].set(phrase, count + 0.5);
     phrase_used[key].set(phrase, today_());
+    drop_simplified(key, phrase);
 }
 
 void UserModel::forget_phrase(const ustr& key, const ustr& phrase) {
     // the user corrected this phrase away: their earlier picks of it no longer count
+    drop_simplified(key, phrase);
     auto* bucket = phrases.find(key);
     if (!bucket || !bucket->erase(phrase)) return;
     if (auto* used = phrase_used.find(key)) used->erase(phrase);
+}
+
+void UserModel::drop_simplified(const ustr& key, const ustr& phrase) {
+    // a pick (or a forgetting) in Traditional mode is the latest word on the phrase: Simplified mode's own entry
+    // for it goes (see engine/lexicon.py _drop_simplified)
+    if (simplified) return;
+    auto* bucket = simp_phrases_.find(key);
+    const double* c = bucket ? bucket->find(phrase) : nullptr;
+    if (!c) return;
+    SimpDrop d{key, phrase, *c, std::nullopt};
+    bucket->erase(phrase);
+    if (auto* used = simp_used_.find(key)) {
+        if (const int* day = used->find(phrase)) d.day = *day;
+        used->erase(phrase);
+    }
+    simp_dropped.push_back(std::move(d));
+    simp_dirty_ = true;
+}
+
+void UserModel::restore_simplified(const std::vector<SimpDrop>& dropped) {
+    for (auto it = dropped.rbegin(); it != dropped.rend(); ++it) {
+        simp_phrases_[it->key].set(it->phrase, it->count);
+        if (it->day) simp_used_[it->key].set(it->phrase, *it->day);
+        simp_dirty_ = true;
+    }
+}
+
+void UserModel::prune_simplified() {
+    // Simplified mode's own memory cut as the shared one (see engine/lexicon.py _prune_simplified)
+    struct E { double count; ustr r, p; };
+    std::vector<E> entries;
+    for (auto& [r, bucket] : simp_phrases_)
+        for (auto& [p, count] : bucket) {
+            if (count == 0) continue;
+            auto* u = simp_used_.find(r);
+            double c = faded(count, u ? u->find(p) : nullptr);
+            if (c >= (count >= 1 ? 1.0 : 0.5)) entries.push_back(E{c, r, p});
+        }
+    std::sort(entries.begin(), entries.end(), [](const E& a, const E& b) {  // reverse=True on (count, r, p)
+        if (a.count != b.count) return a.count > b.count;
+        if (a.r != b.r) return a.r > b.r;
+        return a.p > b.p;
+    });
+    if (entries.size() > KEEP_PHRASES) entries.resize(KEEP_PHRASES);
+    std::set<std::pair<ustr, ustr>> keep;
+    for (auto& e : entries) keep.emplace(e.r, e.p);
+    OrderedMap<ustr, OrderedMap<ustr, double>> ph;
+    OrderedMap<ustr, OrderedMap<ustr, int>> used;
+    for (auto& [r, bucket] : simp_phrases_)
+        for (auto& [p, count] : bucket) {
+            const auto* shared = phrases.find(r);
+            bool kept = count != 0 ? keep.count({r, p}) > 0 : shared && shared->contains(p);
+            if (!kept) continue;
+            ph[r].set(p, count);
+            auto* u = simp_used_.find(r);
+            const int* d = u ? u->find(p) : nullptr;
+            if (count != 0 && d) used[r].set(p, *d);
+        }
+    simp_phrases_ = std::move(ph);
+    simp_used_ = std::move(used);
+    OrderedMap<ustr, OrderedMap<ustr, double>> reps;
+    OrderedMap<ustr, OrderedMap<ustr, int>> reps_used;
+    for (auto& [phrase, terms] : replacements)
+        for (auto& [term, count] : terms) {
+            if (replacement_count(phrase, term) < 1) continue;
+            reps[phrase].set(term, count);
+            auto* u = replacement_used.find(phrase);
+            const int* d = u ? u->find(term) : nullptr;
+            if (d) reps_used[phrase].set(term, *d);
+        }
+    replacements = std::move(reps);
+    replacement_used = std::move(reps_used);
 }
 
 std::vector<UserModel::PhraseChange> UserModel::phrases_changed(
@@ -1168,6 +1243,13 @@ double UserModel::replacement_count(const ustr& phrase, const ustr& term) const 
     return faded(*count, u ? u->find(term) : nullptr);
 }
 
+void UserModel::touch_replacement(const ustr& phrase, const ustr& term) {
+    // came by itself for phrase and was sent so: its count as it stands now, from today (no fading while used)
+    double count = replacement_count(phrase, term);
+    replacements[phrase].set(term, count);
+    replacement_used[phrase].set(term, today_());
+}
+
 void UserModel::learn_replacement(const ustr& phrase, const ustr& term) {
     double count = replacement_count(phrase, term) + 1;
     replacements[phrase].set(term, count);
@@ -1194,6 +1276,7 @@ std::optional<ustr> UserModel::default_term(const ustr& phrase) const {
 
 void UserModel::save_simplified() {
     if (simplified_path_.empty() || keep_files_) return;
+    simp_dirty_ = false;
     auto counts = [](const OrderedMap<ustr, OrderedMap<ustr, double>>& m) {
         Json j = Json::object();
         for (auto& [k, bucket] : m) {
@@ -1453,6 +1536,7 @@ void UserModel::save() {
         std::swap(phrase_used, shared_used_);
     }
     prune();
+    prune_simplified();
     Json data = Json::object();
     Json& ph = data["phrases"] = Json::object();
     for (auto& [r, bucket] : phrases) {
@@ -1486,8 +1570,8 @@ void UserModel::save() {
         shared_phrases_ = std::move(phrases);
         shared_used_ = std::move(phrase_used);
         merge_simplified();
-        save_simplified();
     }
+    if (merged || simp_dirty_) save_simplified();
 }
 
 }  // namespace sz

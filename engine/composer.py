@@ -1673,18 +1673,24 @@ class Composer:
     def _render(self):
         chars = {}
         self._plain_chars = {}  # syllable -> its character as chosen, Traditional (_suggest matches the dictionary)
+        hidden = set()  # syllables a shorter Mainland word leaves with nothing shown (位元組 as 字节: 組)
         for s, l, p in self.segments:
             for k in range(l):
                 self._plain_chars[s + k] = p[k] if len(p) == l else (p if k == 0 else "")
-            p = self._shown_phrase(s, l, p)
+            shown = self._shown_phrase(s, l, p)
+            if len(shown) != l and self.user.simplified and shown != self.lexicon.script.to_simplified(p):
+                hidden.update(range(s + 1, s + l))  # (a Mainland word of another length: all after its first, #32)
             for k in range(l):
-                chars[s + k] = p[k] if len(p) == l else (p if k == 0 else "")
+                chars[s + k] = shown[k] if len(shown) == l else (shown if k == 0 else "")
         text, idx = [], 0
         self._plain_by_start = {}  # zh token start -> its character as chosen (Traditional)
+        self._term_hidden = set()  # zh token starts of the hidden syllables: no stop there (_stops, _bar_at_last)
         self._wide = {}  # token start -> characters shown, where a syllable is not one (_width)
         for t in self.tokens:
             if t.kind == "zh":
                 self._plain_by_start[t.start] = self._plain_chars.get(idx, "?")[:1]
+                if idx in hidden:
+                    self._term_hidden.add(t.start)
                 text.append(chars.get(idx, "?"))
                 if len(text[-1]) != 1:
                     self._wide[t.start] = len(text[-1])
@@ -1700,6 +1706,9 @@ class Composer:
                 typed = self._as_typed(t.start, t.value)
                 text.append(to_full_width(typed) if self.config.full_width else typed)
         self.composition = "".join(text)
+        if self.caret in self._term_hidden:  # (left there by a stop worked out before it was hidden: the word's first)
+            self.caret = max(t.start for t in self.tokens
+                             if t.kind == "zh" and t.start < self.caret and t.start not in self._term_hidden)
         self.cursor = len(self.composition) if self.caret is None else self._tok_offset(self.caret)
         self._suggest()
         if self.user.simplified:  # (shown in Simplified characters; what Tab takes is in _sugg_actions)
@@ -1740,7 +1749,7 @@ class Composer:
         out = []
         for t in self.tokens:
             if t.kind in ("zh", "fix"):
-                if t.kind == "zh" and getattr(self, "_wide", {}).get(t.start) == 0:
+                if t.start in getattr(self, "_term_hidden", ()):
                     continue  # (inside a shorter Mainland word, 位元組 shown 字节: nothing to stop before, #32)
                 out.append(t.start)
             else:
@@ -1807,6 +1816,7 @@ class Composer:
             return {x if x < p else x + d for x in marks if not p <= x < q}
         before = sum(1 for t in self.tokens if t.kind == "zh" and t.start < p)
         self.overrides = {sp: v for sp, v in self.overrides.items() if sp[0] + sp[1] <= before}
+        self.term_picks = {sp: v for sp, v in self.term_picks.items() if sp[0] + sp[1] <= before}  # (#32)
         self._forget_replaced(before)
         fixed = {}
         for a, (b, shown) in self.fixed.items():
@@ -2544,6 +2554,7 @@ class Composer:
             self.taken = {a: v for a, v in self.taken.items() if v[0] <= start or a >= end}
             before = sum(1 for t in self.tokens if t.kind == "zh" and t.start < start)
             self.overrides = {sp: v for sp, v in self.overrides.items() if sp[0] + sp[1] <= before}
+            self.term_picks = {sp: v for sp, v in self.term_picks.items() if sp[0] + sp[1] <= before}  # (#32)
             self._forget_replaced(before)
             for marks in (self.forced, self.chinese, self.literal):
                 marks -= set(range(start, end))
@@ -2604,6 +2615,7 @@ class Composer:
         # what is before stays as typed if the caret was inside a word
         before = sum(1 for t in self.tokens if t.kind == "zh" and t.start < c)
         self.overrides = {sp: v for sp, v in self.overrides.items() if sp[0] + sp[1] <= before}
+        self.term_picks = {sp: v for sp, v in self.term_picks.items() if sp[0] + sp[1] <= before}  # (#32)
         self._forget_replaced(before)
         for marks in (self.forced, self.literal):
             marks -= set(range(c, j))
@@ -2643,8 +2655,8 @@ class Composer:
         if not self.tokens or self.tokens[-1].kind not in ("zh", "fix"):
             return False
         last = self.tokens[-1]
-        if last.kind == "zh" and self._wide.get(last.start) == 0:  # (inside a shorter Mainland word: its first, #32)
-            last = next((t for t in reversed(self.tokens) if t.kind == "zh" and self._wide.get(t.start) != 0), last)
+        if last.start in self._term_hidden:  # (inside a shorter Mainland word: its first, #32)
+            last = next((t for t in reversed(self.tokens) if t.kind == "zh" and t.start not in self._term_hidden), last)
         self.caret = last.start
         self._render()
         if self.replacements:
@@ -3515,6 +3527,10 @@ class Composer:
                     digits_as_zhuyin=self.digits_as_zhuyin,
                     context_word=self.context_word, after_english=self.after_english)
         learned = []  # what this commit taught, as it was before: for undo_commit to put back
+        self.user.simp_dropped = []  # (what a pick in Traditional mode takes of Simplified mode's memory, #32)
+        terms = self._learn_terms(save=False)  # (saved with the picks below: one save a commit, #32)
+        if terms and not self.overrides:
+            self.user.save()
         if self.overrides:
             before = (copy.deepcopy(self.user.phrases), copy.deepcopy(self.user.phrase_used))
             before_picks = self._convert_all({})
@@ -3540,28 +3556,35 @@ class Composer:
         self.after_english = False
         self.context_word = self.segments[-1][2] if last and last.kind == "zh" and self.segments else None
         corrected = self._learn_corrections(len(self.raw))
-        terms = self._learn_terms()
         self._clear_input()
         self.commit = text
-        self.last_commit = (text, undo, learned, corrected, terms)
+        self.last_commit = (text, undo, learned, corrected, terms, self.user.simp_dropped)
 
-    def _learn_terms(self):
+    def _learn_terms(self, save=True, end=None):
         """簡體輸出 (#32): each Mainland word picked here is learned for its Taiwan phrase; the Taiwan phrase picked
-        where its Mainland word came by itself forgets it. [(phrase, (counts, days) as they were)] for undo_commit."""
-        if not self.user.simplified or not self.term_picks:
+        where its Mainland word came by itself forgets it; a Mainland word that came by itself and is sent so stays
+        (its day renewed: it does not fade while used, review 2026-11-14). In the order of the phrases.
+        [(phrase, (counts, days) as they were)] for undo_commit."""
+        if not self.user.simplified:
             return []
-        here = {(s, l): p for s, l, p in self.segments}
         changed = []
-        for span, (p, t) in self.term_picks.items():
-            if here.get(span) != p or (t == p and self.user.default_term(p) is None):
+        for s, l, p in self.segments:
+            if end is not None and s + l > end:  # (the head sent: what is after it stays, _commit_head)
+                continue
+            picked = self.term_picks.get((s, l))
+            t = picked[1] if picked and picked[0] == p else None
+            default = self.user.default_term(p)
+            if default is None and (t is None or t == p):
                 continue
             was = (copy.deepcopy(self.user.replacements.get(p)), copy.deepcopy(self.user.replacement_used.get(p)))
             changed.append((p, was))
-            if t != p:
+            if t is None:
+                self.user.touch_replacement(p, default)
+            elif t != p:
                 self.user.learn_replacement(p, t)
             else:
                 self.user.forget_replacement(p)
-        if changed:
+        if changed and save:
             self.user.save()
         return changed
 
@@ -3744,12 +3767,13 @@ class Composer:
         for its last word open."""
         if self.raw or not self.last_commit:
             return ""
-        text, undo, learned, corrected, terms = self.last_commit
+        text, undo, learned, corrected, terms, dropped = self.last_commit
         self.last_commit = None
         for name, value in undo.items():
             setattr(self, name, value)
-        if learned:  # picked by mistake: nothing of it learned or forgotten after all
+        if learned or dropped:  # picked by mistake: nothing of it learned or forgotten after all
             self.user.restore_phrases(learned)
+            self.user.restore_simplified(dropped)  # (nor taken of Simplified mode's memory, #32)
             self.user.save()
         if terms:  # (the Mainland words of 簡體輸出 the same, #32)
             for p, (counts, days) in reversed(terms):
@@ -3800,16 +3824,15 @@ class Composer:
         b = next((s for s in starts if len(self.raw) - zh[s].start <= MAX_RAW), starts[-1])
         tok = zh[b]
         head_overrides = {sp: v for sp, v in self.overrides.items() if sp[0] + sp[1] <= b}
+        # 簡體輸出 (#32): the Mainland words in what is sent are learned; the others move with their phrases
+        terms = self._learn_terms(save=False, end=b)
+        self.term_picks = {(s - b, l): v for (s, l), v in self.term_picks.items() if s >= b}
         if head_overrides:
             saved, self.overrides = self.overrides, head_overrides
             self._learn_overrides()
-            self.user.save()
             self.overrides = saved
-        # 簡體輸出 (#32): the Mainland words picked in what is sent are learned; the others move with their phrases
-        saved_terms = self.term_picks
-        self.term_picks = {sp: v for sp, v in saved_terms.items() if sp[0] + sp[1] <= b}
-        self._learn_terms()
-        self.term_picks = {(s - b, l): v for (s, l), v in saved_terms.items() if s >= b}
+        if head_overrides or terms:
+            self.user.save()  # (once: #32)
         self.overrides = {(s - b, l): v if len(v) == 2 or v[3] == BAR else v[:3] + ((v[3][0] - b, v[3][1]),)
                           for (s, l), v in self.overrides.items() if s >= b}
         self.replaced = {}

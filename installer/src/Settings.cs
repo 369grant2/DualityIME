@@ -215,7 +215,7 @@ public class Backend {
         { "cand_font_size", 18 }, { "cand_per_row", 1 }, { "cand_layout", "" }, { "cand_keys", "123456789" },
         { "cand_columns", 0 },
         { "appearance", new Dictionary<string, object>() },  // 自訂外觀 (#22): {} = the default look (never changed in place)
-        { "simplified", false }, { "simplified_hotkey", false }, { "simplified_key", "Ctrl+Shift+F" }  // 簡體輸出 (#32)
+        { "simplified", false }, { "simplified_hotkey", false }, { "simplified_key", "Ctrl+F1" }  // 簡體輸出 (#32)
     };
 
     public Backend(SettingsForm form, string data) {
@@ -344,6 +344,7 @@ public class Backend {
             { "dataDir", dataDir },
             { "remembered", remembered[0] },
             { "rememberedEmails", remembered[1] },
+            { "rememberedSimplified", remembered[2] < 0 ? null : (object)remembered[2] },
             { "words", ((List<object>)dict["words"]).Count },
             { "shortcuts", ((List<object>)dict["shortcuts"]).Count },
             { "quickFill", ReadQuickFill().Count },
@@ -367,9 +368,11 @@ public class Backend {
         }
     }
 
-    // 已記憶項目: { N, M }. N = the typing habits 全部清除 clears: phrase picks (each reading and
+    // 已記憶項目: { N, M, S }. N = the typing habits 全部清除 clears: phrase picks (each reading and
     // phrase), keys learned as English (one letter or digit is not: the engine ignores it), English words, and
-    // the key strings in 校正記憶 / 代碼記憶 (keys.json). M = the remembered e-mail addresses.
+    // the key strings in 校正記憶 / 代碼記憶 (keys.json). M = the remembered e-mail addresses. S = what Simplified
+    // mode learned of its own (user_simplified.json: its picks, a forgetting not, and its Mainland words), -1 without
+    // the file (簡體輸出 never used: the page shows N and M as before, #32).
     // 全部清除 asked and the engine not there yet (it clears at its next key: config.json's forget_words
     // above the forgot it noted in user.json, the same test as the engine's): N counts 0, and M too
     // for forget_emails, so the page shows at once what the engine is about to leave.
@@ -378,11 +381,19 @@ public class Backend {
         Dictionary<string, object> user = null, keys = null;
         try { user = json.DeserializeObject(File.ReadAllText(Path.Combine(dataDir, "user.json"), Encoding.UTF8)) as Dictionary<string, object>; } catch { }
         try { keys = json.DeserializeObject(File.ReadAllText(Path.Combine(dataDir, "keys.json"), Encoding.UTF8)) as Dictionary<string, object>; } catch { }
+        Dictionary<string, object> simp = null;
+        int simplified = -1;
+        string simpPath = Path.Combine(dataDir, "user_simplified.json");
+        if (File.Exists(simpPath)) {
+            simplified = 0;
+            try { simp = json.DeserializeObject(File.ReadAllText(simpPath, Encoding.UTF8)) as Dictionary<string, object>; } catch { }
+        }
         var config = ReadConfig();
         bool clearHabits = Long(config, "forget_words") > Long(user, "forgot");
         bool clearEmails = Long(config, "forget_emails") > Long(user, "forgot_emails");
         if (clearHabits) {
             keys = null;
+            simp = null;
             if (user != null) { user.Remove("phrases"); user.Remove("english"); user.Remove("words"); }
         }
         if (clearEmails && user != null) user.Remove("emails");
@@ -407,7 +418,20 @@ public class Backend {
         var part = keys != null && keys.ContainsKey("standard") ? keys["standard"] as Dictionary<string, object> : null;
         var picks = part != null && part.ContainsKey("picks") ? part["picks"] as Dictionary<string, object> : null;
         if (picks != null) habits += picks.Count;
-        return new[] { habits, emails };
+        foreach (string name in new[] { "phrases", "replacements" }) {
+            var table = simp != null && simp.ContainsKey(name) ? simp[name] as Dictionary<string, object> : null;
+            if (table == null) continue;
+            foreach (object bucket in table.Values) {
+                var b = bucket as Dictionary<string, object>;
+                if (b == null) continue;
+                foreach (object count in b.Values) {
+                    double n;
+                    try { n = Convert.ToDouble(count); } catch { continue; }
+                    if (n > 0) simplified++;
+                }
+            }
+        }
+        return new[] { habits, emails, simplified };
     }
 
     // a counter in config.json or user.json (0 when missing or not a number)
@@ -457,17 +481,21 @@ public class Backend {
     // 簡體輸出's key (#32): what is wrong with it, or null. Ctrl and / or Alt (Shift may join) and one key: A-Z, 0-9,
     // F1-F12 (the IME reads it so: text_service.cpp parse_hotkey); never Win, nor Ctrl+Shift / Alt+Shift alone
     public static string HotkeyProblem(string text) {
-        bool ctrl = false, alt = false, win = false;
+        bool ctrl = false, alt = false, shift = false, win = false;
         string main = null;
         foreach (string part in (text ?? "").Split('+')) {
             if (part == "Ctrl") ctrl = true;
             else if (part == "Alt") alt = true;
-            else if (part == "Shift") { }
+            else if (part == "Shift") shift = true;
             else if (part == "Win") win = true;
             else if (main == null) main = part;
             else return "請按下包含 Ctrl 或 Alt 的組合鍵";
         }
-        if (win || (main == null && (ctrl || alt))) return "這組鍵是 Windows 用的，請換一組";
+        bool closes = alt && !ctrl && main == "F4";  // (Alt+F4 closes the window: never the IME's, the user's call 2026-11-14)
+        if (win || closes || (main == null && (ctrl || alt))) return "這組鍵是 Windows 用的，請換一組";
+        // (copy, paste, cut, undo, redo, select all, save: every program's, review 2026-11-14)
+        if (ctrl && !alt && !shift && main != null && main.Length == 1 && "CVXZYAS".IndexOf(main[0]) >= 0)
+            return "這組鍵是複製、貼上這類常用的鍵，請換一組";
         bool key = main != null && ((main.Length == 1 && ((main[0] >= 'A' && main[0] <= 'Z') || (main[0] >= '0' && main[0] <= '9'))) ||
                                     (main.Length >= 2 && main.Length <= 3 && main[0] == 'F' && main.Substring(1).All(char.IsDigit) &&
                                      int.Parse(main.Substring(1)) >= 1 && int.Parse(main.Substring(1)) <= 12));

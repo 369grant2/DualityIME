@@ -32,7 +32,7 @@ DEFAULTS = {
     "appearance": {},           # 自訂外觀 (#22): colors and photos of the IME's windows; {} = the default look
     "simplified": False,        # 簡體輸出 (#32): what is shown and sent in Simplified characters (chosen in Traditional)
     "simplified_hotkey": False,  # ...switched with simplified_key too (off: the key goes to the program)
-    "simplified_key": "Ctrl+Shift+F",
+    "simplified_key": "Ctrl+F1",
 }
 
 

@@ -37,6 +37,11 @@ CASES = [
     # ↑ at the end of 字節 (位元組); a sentence long enough to send its older part, 軟件 picked in it and after it
     "ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1{SC}{ENTER}{SC}ej; fm {ENTER}",
     "jo4m06yj3{DOWN}1{UP}{ESC}{ENTER}",
+    # (review 2026-11-14) another 好 picked in one mode, a third in the other, back: the Traditional pick is the
+    # latest (Simplified mode's own entry for it goes)
+    "cp3{DOWN}2{ENTER}{SC}cp3{DOWN}3{ENTER}{SC}cp3{ENTER}",
+    # ...picked twice in one mode, once in the other and taken back at once: nothing of either taken after all
+    "cp3{DOWN}3{ENTER}cp3{DOWN}3{ENTER}{SC}cp3{DOWN}3{ENTER}{UNDO}{ESC}{ESC}{SC}cp3{ENTER}",
     "bj03wu3{DOWN}1" + "cp3cl3" * 6 + "bj03wu3{DOWN}1" + "cp3cl3" * 12 + "{ENTER}",
     # (before any pick of 試: with one, 試試 comes without the model too)
     "ji3y94u h4g4g4{ENTER}",  # 我再一次試試: 試試 only with 長句選字加強 (逝世 without)

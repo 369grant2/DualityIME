@@ -6649,6 +6649,36 @@ class SimplifiedMemoryTest(unittest.TestCase):
         self.assertEqual(self.read("user_simplified.json")["phrases"], {})
         self.assertEqual(self.read("user_simplified.json")["replacements"], {})
 
+    def test_traditional_pick_wins_over_simplified(self):
+        # (review 2026-11-14 #4, the user's choice B) the latest pick wins: 軟體 forgotten in Simplified mode, then
+        # picked in Traditional mode: Simplified mode reads the shared count again
+        u = self.user()
+        u.learn_phrase("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體")
+        u.set_simplified(True)
+        u.forget_phrase("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體")
+        u.set_simplified(False)
+        for _ in range(3):
+            u.learn_phrase("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體")
+        u.save()
+        u.set_simplified(True)
+        self.assertEqual(u.phrase_count("ㄖㄨㄢˇ-ㄊㄧˇ", "軟體"), 4)
+
+    def test_simplified_memory_pruned(self):
+        # (review 2026-11-14 #5) Simplified mode's own memory fades and is cut as the shared one is
+        day = [20000]
+        u = UserModel(self.path, today=lambda: day[0])
+        u.set_simplified(True)
+        u.learn_phrase("ㄧㄥˇ-ㄆㄧㄢˋ", "影片")
+        u.learn_replacement("影片", "視頻")
+        u.save()
+        day[0] = 20000 + 20 * 8  # (eight halvings: far below one pick)
+        u.learn_phrase("ㄋㄧˇ", "妳")
+        u.save()
+        saved = self.read("user_simplified.json")
+        self.assertNotIn("ㄧㄥˇ-ㄆㄧㄢˋ", saved["phrases"])
+        self.assertNotIn("影片", saved["replacements"])
+        self.assertIn("ㄋㄧˇ", saved["phrases"])
+
     def test_import_simplified(self):
         # a backup restored (import-memory.json): Simplified mode's memory merged into user_simplified.json, the
         # higher count kept
@@ -6674,7 +6704,7 @@ class SimplifiedMemoryTest(unittest.TestCase):
     def test_settings_defaults_simplified(self):
         self.assertIs(DEFAULTS["simplified"], False)
         self.assertIs(DEFAULTS["simplified_hotkey"], False)
-        self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+Shift+F")
+        self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+F1")
 
 
 class SimplifiedTypingTest(unittest.TestCase):
@@ -6876,6 +6906,85 @@ class SimplifiedTypingTest(unittest.TestCase):
         self.assertNotIn("ㄗㄨˇ", c.replacements)
         c.key(special="ESC")
         self.assertIn("字节", c.composition)
+
+    def test_default_term_kept_while_used(self):
+        # (review 2026-11-14 #1) a Mainland word that comes by itself, sent day after day without the list, does
+        # not fade back to the Taiwan word
+        day = [20000]
+        c = self.composer(True)
+        c.user.today = lambda: day[0]
+        for _ in range(2):
+            self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ", "DOWN")
+            self.pick(c, "软件")
+            c.key(special="ENTER")
+        for d in range(20005, 20100, 15):
+            day[0] = d
+            self.assertEqual(self.send(c, "ㄖㄨㄢˇ ㄊㄧˇ"), "软件", d)
+
+    def test_toggle_with_caret_in_hidden_word(self):
+        # (review 2026-11-14 #2) 位元組 written 字節 by itself; caret before 元 in Traditional mode, then back to
+        # Simplified: the caret is never left on the hidden syllable, ← works
+        c = self.composer(True)
+        for _ in range(2):
+            self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ", "DOWN")
+            self.pick(c, "字节")
+            c.key(special="ENTER")
+        self.type(c, "ㄨㄟˋ ㄩㄢˊ ㄗㄨˇ")
+        self.assertEqual(c.composition, "字节")
+        c.toggle_simplified()
+        c.key(special="HOME")
+        c.key(special="RIGHT")
+        c.toggle_simplified()
+        self.assertEqual(c.composition, "字节")
+        self.assertIn(c.cursor, (0, 2))
+        c.key(special="LEFT")
+        self.assertEqual(c.cursor, 0)
+
+    def test_insert_before_moves_no_term(self):
+        # (review 2026-11-14 #8) 軟件 picked for the first 軟體 of 軟體軟體; 軟體 typed at the start: the new one
+        # does not take the pick
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ ㄖㄨㄢˇ ㄊㄧˇ", "HOME", "DOWN")
+        self.pick(c, "软件")
+        self.assertEqual(c.composition, "软件软体")
+        c.key(special="HOME")
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ")
+        self.assertFalse(c.composition.startswith("软件"), c.composition)
+
+    def test_undo_puts_back_simplified_memory(self):
+        # (code-reviewer 2026-11-14) 詪 picked twice in Simplified mode, then in Traditional mode and taken back at
+        # once (Shift+Backspace): Simplified mode's own picks of it are there again, in the file too
+        c = self.composer(True)
+        for _ in range(2):
+            self.type(c, "ㄏㄣˇ", "DOWN")
+            c.key(c.config.cand_keys[c.candidates.index("𬣳")])  # (詪 in Simplified characters)
+            c.key(special="ENTER")
+        before = copy.deepcopy(c.user._simp_phrases)
+        self.assertEqual(before.get("ㄏㄣˇ"), {"詪": 2})
+        c.toggle_simplified()
+        self.type(c, "ㄏㄣˇ", "DOWN")
+        c.key(c.config.cand_keys[c.candidates.index("詪")])
+        c.key(special="ENTER")
+        self.assertNotIn("詪", c.user._simp_phrases.get("ㄏㄣˇ", {}))
+        self.assertTrue(c.undo_commit())
+        self.assertEqual(c.user._simp_phrases, before)
+        with open(os.path.join(self.tmp.name, "user_simplified.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["phrases"], before)
+
+    def test_one_save_per_commit(self):
+        # (review 2026-11-14 #10) a sentence with a pick and a Mainland word picked saves the memory once
+        c = self.composer(True)
+        self.type(c, "ㄖㄨㄢˇ ㄊㄧˇ ㄏㄣˇ ㄏㄠˇ", "DOWN")
+        c.key(c.config.cand_keys[2])  # (another character for 好: a pick of its own)
+        c.key(special="HOME")
+        c.key(special="DOWN")
+        self.pick(c, "软件")
+        self.assertTrue(c.overrides and c.term_picks)
+        saves = []
+        real = c.user.save
+        c.user.save = lambda: (saves.append(1), real())
+        c.key(special="ENTER")
+        self.assertEqual(len(saves), 1)
 
     def test_replacement_bar_converted(self):
         # the bar shown with the caret inside the text: Simplified characters too

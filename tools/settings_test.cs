@@ -38,15 +38,21 @@ static class SettingsTest {
             Check("遊戲中 Shift 交給遊戲 is on as it comes, game_mode is gone (#31)",
                   (bool)cfg["game_keys"] && !cfg.ContainsKey("game_mode"), json.Serialize(cfg));
 
-            // 簡體輸出 (#32): off, its key off, Ctrl+Shift+F as it comes; a key that is no shortcut is refused
+            // 簡體輸出 (#32): off, its key off, Ctrl+F1 as it comes; a key that is no shortcut is refused
             Check("簡體輸出 defaults", !(bool)cfg["simplified"] && !(bool)cfg["simplified_hotkey"] &&
-                  (string)cfg["simplified_key"] == "Ctrl+Shift+F", json.Serialize(cfg));
+                  (string)cfg["simplified_key"] == "Ctrl+F1", json.Serialize(cfg));
             Check("HotkeyProblem: Ctrl+Shift+F, Ctrl+F1, Alt+S fine", Backend.HotkeyProblem("Ctrl+Shift+F") == null &&
                   Backend.HotkeyProblem("Ctrl+F1") == null && Backend.HotkeyProblem("Alt+S") == null, "");
             Check("HotkeyProblem: F, Shift+F, Alt+Shift, Ctrl+Shift, Win+F, Ctrl+F13 refused",
                   Backend.HotkeyProblem("F") != null && Backend.HotkeyProblem("Shift+F") != null &&
                   Backend.HotkeyProblem("Alt+Shift") != null && Backend.HotkeyProblem("Ctrl+Shift") != null &&
                   Backend.HotkeyProblem("Win+F") != null && Backend.HotkeyProblem("Ctrl+F13") != null, "");
+            Check("HotkeyProblem: Alt+F4 refused, Windows closes windows with it (the user's call 2026-11-14)",
+                  Backend.HotkeyProblem("Alt+F4") == "這組鍵是 Windows 用的，請換一組" && Backend.HotkeyProblem("Ctrl+F4") == null, "");
+            Check("HotkeyProblem: Ctrl+C/V/X/Z/Y/A/S refused, Ctrl+Shift+S and Ctrl+Alt+C fine (review 2026-11-14)",
+                  "CVXZYAS".All(c => Backend.HotkeyProblem("Ctrl+" + c) == "這組鍵是複製、貼上這類常用的鍵，請換一組") &&
+                  Backend.HotkeyProblem("Ctrl+Shift+S") == null && Backend.HotkeyProblem("Ctrl+Alt+C") == null &&
+                  Backend.HotkeyProblem("Ctrl+B") == null, "");
             bool badKey32 = false;
             try { call("setConfig", new Dictionary<string, object> { { "key", "simplified_key" }, { "value", "Shift+F" } }); } catch { badKey32 = true; }
             call("setConfig", new Dictionary<string, object> { { "key", "simplified_key" }, { "value", "Ctrl+F1" } });
@@ -105,11 +111,19 @@ static class SettingsTest {
                 "{\"format\": 1, \"standard\": {\"picks\": {\"817\": {\"\": 2}, \"mp3\": {\"en\": 2}}, \"used\": {}}}", new UTF8Encoding(false));
             state = (Dictionary<string, object>)call("state", null);
             Check("remembered counts", (int)state["remembered"] == 3 + 1 + 1 + 2 && (int)state["rememberedEmails"] == 2, json.Serialize(state));
+            Check("no user_simplified.json: no Simplified count", state["rememberedSimplified"] == null, json.Serialize(state));
+            // 簡體輸出 (#32): Simplified mode's own picks (a forgetting, count 0, not) and its Mainland words, apart
+            File.WriteAllText(Path.Combine(dir, "user_simplified.json"),
+                "{\"format\": 1, \"phrases\": {\"ㄧㄥˇ-ㄆㄧㄢˋ\": {\"影片\": 2, \"映片\": 0}, \"ㄋㄧˇ\": {\"妳\": 1}}, \"used\": {}, " +
+                "\"replacements\": {\"影片\": {\"視頻\": 2}}, \"replacements_used\": {}}", new UTF8Encoding(false));
+            state = (Dictionary<string, object>)call("state", null);
+            Check("Simplified mode's memory counted apart", (int)state["remembered"] == 3 + 1 + 1 + 2 &&
+                  state["rememberedSimplified"] != null && (int)state["rememberedSimplified"] == 3, json.Serialize(state));
             // 全部清除: the engine clears at its next key; until then the count is already what it will leave
             call("forgetWords", new Dictionary<string, object> { { "emails", false } });
             state = (Dictionary<string, object>)call("state", null);
             Check("after 全部清除 the typing habits count 0, the e-mails stay", (int)state["remembered"] == 0 &&
-                  (int)state["rememberedEmails"] == 2, json.Serialize(state));
+                  (int)state["rememberedEmails"] == 2 && (int)state["rememberedSimplified"] == 0, json.Serialize(state));
             call("forgetWords", new Dictionary<string, object> { { "emails", true } });
             state = (Dictionary<string, object>)call("state", null);
             Check("after 全部清除 with the e-mails both count 0", (int)state["remembered"] == 0 &&
@@ -124,6 +138,7 @@ static class SettingsTest {
                   (int)state["rememberedEmails"] == 1, json.Serialize(state));
             File.Delete(Path.Combine(dir, "user.json"));
             File.Delete(Path.Combine(dir, "keys.json"));
+            File.Delete(Path.Combine(dir, "user_simplified.json"));
 
             call("saveDictionary", new Dictionary<string, object> {
                 { "kind", "words" }, { "rows", new object[] { new object[] { "華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ" } } } });

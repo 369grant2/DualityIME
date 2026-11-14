@@ -28,7 +28,7 @@ const api = (() => {
     forget_words: 0, forget_emails: 0, lookup: true, lookup_size: "small", game_keys: true,
     cand_font: "Microsoft JhengHei UI", cand_font_size: 18, cand_per_row: 1,
     cand_layout: "", cand_keys: "123456789", cand_columns: 0, appearance: {},
-    simplified: false, simplified_hotkey: false, simplified_key: "Ctrl+Shift+F"
+    simplified: false, simplified_hotkey: false, simplified_key: "Ctrl+F1"
   };
   const dict = { words: [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"]], shortcuts: [["addr", "台北市信義區…"]] };
   const images = {};  // 自訂外觀's photos: file -> data: URL
@@ -42,7 +42,7 @@ const api = (() => {
   return async (op, args = {}) => {
     switch (op) {
       case "state": return { config, version: "2.1.0", dataDir: "C:\\Users\\you\\AppData\\Roaming\\DualityIME",
-        remembered: 12, rememberedEmails: 2, words: dict.words.length, shortcuts: dict.shortcuts.length, quickFill: quickFill.length, beta: false, canUpdate: true, hasPime: false, dark: false };
+        remembered: 12, rememberedEmails: 2, rememberedSimplified: null, words: dict.words.length, shortcuts: dict.shortcuts.length, quickFill: quickFill.length, beta: false, canUpdate: true, hasPime: false, dark: false };
       case "setConfig": config[args.key] = args.value; return config;
       case "forgetWords": return 0;
       case "system": return wait(400, sys);

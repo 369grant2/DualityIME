@@ -240,7 +240,11 @@ public:
     bool simplified = false;
     void set_simplified(bool on);
     double replacement_count(const ustr& phrase, const ustr& term) const;
+    void touch_replacement(const ustr& phrase, const ustr& term);  // came by itself and sent: from today
     void learn_replacement(const ustr& phrase, const ustr& term);  // a Mainland word picked for a Taiwan one
+    struct SimpDrop { ustr key, phrase; double count; std::optional<int> day; };
+    std::vector<SimpDrop> simp_dropped;  // what drop_simplified took: for undo (Composer)
+    void restore_simplified(const std::vector<SimpDrop>& dropped);  // put back: the pick was taken back
     void forget_replacement(const ustr& phrase);                   // the Taiwan word picked back
     std::optional<ustr> default_term(const ustr& phrase) const;    // picked REPLACE_MIN_USES times: comes by itself
     OrderedMap<ustr, OrderedMap<ustr, double>> replacements;      // Taiwan word -> {Mainland word: count}
@@ -282,6 +286,9 @@ private:
     void merge_simplified();  // phrases / phrase_used = shared_* with simp_* laid over them
     void keep_simplified();   // simp_* = where phrases / phrase_used differ from shared_*
     void save_simplified();
+    void drop_simplified(const ustr& key, const ustr& phrase);  // a pick in Traditional mode: the latest
+    void prune_simplified();
+    bool simp_dirty_ = false;  // changed in Traditional mode: saved with user.json
     void import_memory_now(int counter);
     std::wstring path_, custom_path_, quick_fill_path_, simplified_path_;
     OrderedMap<ustr, OrderedMap<ustr, double>> simp_phrases_, shared_phrases_;

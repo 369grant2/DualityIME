@@ -31,7 +31,7 @@ const Json& Config::defaults() {
         j["appearance"] = Json::object();    // 自訂外觀 (#22): the IME's colors and photos; {} = the default look
         j["simplified"] = Json(false);       // 簡體輸出 (#32): shown and sent in Simplified characters
         j["simplified_hotkey"] = Json(false);  // ...switched with simplified_key too (off: the key goes to the program)
-        j["simplified_key"] = Json("Ctrl+Shift+F");
+        j["simplified_key"] = Json("Ctrl+F1");
         return j;
     }();
     return d;

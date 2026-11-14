@@ -7,10 +7,17 @@ u/3qu04{ENTER} => 影片
 ej; fm {ENTER} => 光驱
 bj03wu3{DOWN}1{ENTER} => 软件
 bj03wu3{ENTER} => 软体
-# Ctrl+Shift+F (the key, ticked in this config) to Traditional and back
-{^F}bj03wu3{ENTER}{^F} => 軟體
+# Ctrl+F1 (the key as it comes, ticked in this config) to Traditional and back
+{^F1}bj03wu3{ENTER}{^F1} => 軟體
 bj03wu3{ENTER} => 软体
 # (review 2026-11-14) 光驅 picked, then to Traditional while typing: Traditional characters, no zhuyin; ↑ at the end
 # of 字节 (位元組) opens no bar for its hidden syllable
-ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1{^F}{ENTER}{^F} => 光區很好
+ej; fm cp3cl3{HOME}{DOWN}3{HOME}{DOWN}1{^F1}{ENTER}{^F1} => 光區很好
 jo4m06yj3{DOWN}1{UP}{ESC}{ENTER} => 字节
+# (review 2026-11-14) 位元組 picked the second time: 字节 by itself; the caret put before 元 in Traditional mode, then
+# back to Simplified: the caret goes to the start of 字节 (好 typed there), not into its hidden syllable
+jo4m06yj3{DOWN}1{ENTER} => 字节
+jo4m06yj3{^F1}{HOME}{RIGHT}{^F1}cl3{ENTER} => 好字节
+# 视频 picked for the first 影片, then 影片 typed before it: the pick goes (as a pick in Traditional mode), never to the
+# new word
+u/3qu04u/3qu04{HOME}{DOWN}1{HOME}u/3qu04{ENTER} => 影片影片影片

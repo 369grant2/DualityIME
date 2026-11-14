@@ -352,6 +352,12 @@ int wmain(int argc, wchar_t** argv) {
                 if (name == "SHIFT") send({{VK_LSHIFT, false}, {VK_LSHIFT, true}});
                 else if (name.size() == 2 && name[0] == '#' && isdigit(static_cast<unsigned char>(name[1])))
                     tap(static_cast<WORD>(VK_NUMPAD0 + (name[1] - '0')));
+                else if (name.size() >= 3 && name[0] == '^' && name[1] == 'F' &&
+                         isdigit(static_cast<unsigned char>(name[2]))) {
+                    // {^F1}: Ctrl + F1..F12 (繁簡切換's key as it comes, #32)
+                    WORD vk = static_cast<WORD>(VK_F1 + std::atoi(name.c_str() + 2) - 1);
+                    send({{VK_LCONTROL, false}, {vk, false}, {vk, true}, {VK_LCONTROL, true}});
+                }
                 else if (name.size() >= 2 && name[0] == '^') {
                     // {^,}: Ctrl + the key (Shift too if the character needs it); {^^,}: F13 held as
                     // well (any other key held: the program's shortcut, not the input method's)

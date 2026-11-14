@@ -58,7 +58,9 @@ function scriptRows() {
     e.preventDefault();
     if (e.key === "Escape") return stop();
     if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;  // (a modifier alone: wait for the key)
-    const k = /^[a-z0-9]$/i.test(e.key) ? e.key.toUpperCase() : /^F([1-9]|1[0-2])$/.test(e.key) ? e.key : null;
+    // (by the key's place, e.code: Shift+1 gives e.key "!", review 2026-11-14)
+    const code = /^Key([A-Z])$/.exec(e.code) || /^Digit([0-9])$/.exec(e.code) || /^(F(?:[1-9]|1[0-2]))$/.exec(e.code);
+    const k = code ? code[1] : null;
     const parts = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Win", k || e.key].filter(Boolean);
     try {
       S.config = await api("setConfig", { key: "simplified_key", value: parts.join("+") });
@@ -463,7 +465,9 @@ function pageComplete() {
     card(
       row("Tab 智慧補字", "輸入時於游標後方提示最可能的下一個字", cfgToggle("completion", "Tab 智慧補字")),
       row("自動記憶常用英文與 Email", "自動記憶輸入滿 2 次的英文單字，以及輸入過 1 次的 Email。", cfgToggle("remember_words", "自動記憶常用英文與 Email")),
-      row("已記憶項目", `目前已記住 ${S.remembered} 筆打字習慣、${S.rememberedEmails} 個 Email`,
+      row("已記憶項目", S.rememberedSimplified == null  // (簡體輸出 never used: as before, #32)
+        ? `目前已記住 ${S.remembered} 筆打字習慣、${S.rememberedEmails} 個 Email`
+        : `目前已記住 繁體 ${S.remembered} 筆、簡體 ${S.rememberedSimplified} 筆打字習慣，${S.rememberedEmails} 個 Email`,
         h("button", { class: "btn", onclick: forgetMemory }, "全部清除")))
   ];
 }

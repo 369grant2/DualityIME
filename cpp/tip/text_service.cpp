@@ -542,6 +542,9 @@ static bool parse_hotkey(const std::string& text, UINT& vk, bool& ctrl, bool& al
             return false;
         }
     }
+    if (alt && !ctrl && vk == VK_F4) return false;  // (Alt+F4 closes the window: never ours, as Settings.cs HotkeyProblem)
+    if (ctrl && !alt && !shift && std::string("CVXZYAS").find(static_cast<char>(vk)) != std::string::npos)
+        return false;  // (copy, paste, cut, undo, redo, select all, save: every program's, as HotkeyProblem)
     return vk != 0 && (ctrl || alt);
 }
 
@@ -1000,7 +1003,7 @@ void TextService::read_reply(const Json& r) {
         cfg_.game_keys = flag("game_keys", true);
         cfg_.simplified = flag("simplified", false);
         cfg_.simplified_hotkey = flag("simplified_hotkey", false);
-        if (!parse_hotkey(text("simplified_key", "Ctrl+Shift+F"), cfg_.script_vk, cfg_.script_ctrl, cfg_.script_alt,
+        if (!parse_hotkey(text("simplified_key", "Ctrl+F1"), cfg_.script_vk, cfg_.script_ctrl, cfg_.script_alt,
                           cfg_.script_shift))
             cfg_.script_vk = 0;  // (not a key: no key at all)
         set_appearance_from(c->get("appearance"), wide(text("appearance_dir", "")));

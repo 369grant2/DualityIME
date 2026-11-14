@@ -617,6 +617,8 @@ class UserModel:
         self.simplified = False
         self.simplified_path = os.path.join(os.path.dirname(path), "user_simplified.json") if path else None
         self._simp_phrases, self._simp_used = {}, {}
+        self._simp_dirty = False  # (changed in Traditional mode: saved with user.json, _drop_simplified)
+        self.simp_dropped = []  # [(reading key, phrase, count, day)] _drop_simplified took: for undo (Composer)
         self.replacements, self.replacement_used = {}, {}
         self._shared = None  # (phrases, phrase_used) while Simplified mode shows the merged ones
         if self.simplified_path and os.path.exists(self.simplified_path):
@@ -762,6 +764,7 @@ class UserModel:
         count = self.phrase_count(reading_key, phrase)
         self.phrases.setdefault(reading_key, {})[phrase] = count + 1
         self.phrase_used.setdefault(reading_key, {})[phrase] = self.today()
+        self._drop_simplified(reading_key, phrase)
 
     def learned(self, reading_key, phrase):
         """Picked (a whole pick at least, faded or not): a word the user taught. Not a half (learn_half)."""
@@ -773,13 +776,64 @@ class UserModel:
         count = self.phrase_count(reading_key, phrase)
         self.phrases.setdefault(reading_key, {})[phrase] = count + 0.5
         self.phrase_used.setdefault(reading_key, {})[phrase] = self.today()
+        self._drop_simplified(reading_key, phrase)
 
     def forget_phrase(self, reading_key, phrase):
         """The user corrected this phrase away (部隊 made 不對): their earlier picks of it no longer count."""
         if self.phrases.get(reading_key, {}).pop(phrase, None) is not None:
             self.phrase_used.get(reading_key, {}).pop(phrase, None)
+        self._drop_simplified(reading_key, phrase)
 
     # ---- 簡體輸出 (#32) ------------------------------------------------------------------------------------
+    def _drop_simplified(self, reading_key, phrase):
+        """A pick (or a forgetting) in Traditional mode is the latest word on the phrase: Simplified mode's own
+        entry for it goes, and Simplified mode reads the shared one again (review 2026-11-14 #4, the user's B)."""
+        if self.simplified:
+            return
+        count = self._simp_phrases.get(reading_key, {}).pop(phrase, None)
+        if count is not None:
+            day = self._simp_used.get(reading_key, {}).pop(phrase, None)
+            self.simp_dropped.append((reading_key, phrase, count, day))
+            self._simp_dirty = True
+
+    def restore_simplified(self, dropped):
+        """What _drop_simplified took (simp_dropped), put back: the pick that took it was taken back."""
+        for reading_key, phrase, count, day in reversed(dropped):
+            self._simp_phrases.setdefault(reading_key, {})[phrase] = count
+            if day is not None:
+                self._simp_used.setdefault(reading_key, {})[phrase] = day
+            self._simp_dirty = True
+
+    def _prune_simplified(self):
+        """Simplified mode's own memory cut as the shared one (_prune, review 2026-11-14 #5): picks faded below one
+        use (a half: below a half) go, then all but the KEEP_PHRASES most used; a forgetting (count 0) goes once the
+        shared memory (self.phrases, pruned) has nothing of it; Mainland words faded below one pick go. In the
+        order they were in (the C++ engine's too)."""
+        entries = []
+        for r, bucket in self._simp_phrases.items():
+            for p, count in bucket.items():
+                if count and self._faded(count, self._simp_used.get(r, {}).get(p)) >= (1 if count >= 1 else 0.5):
+                    entries.append((self._faded(count, self._simp_used.get(r, {}).get(p)), r, p))
+        keep = {(r, p) for _, r, p in sorted(entries, reverse=True)[:KEEP_PHRASES]}
+        phrases, used = {}, {}
+        for r, bucket in self._simp_phrases.items():
+            for p, count in bucket.items():
+                if ((r, p) in keep) if count else (p in self.phrases.get(r, {})):
+                    phrases.setdefault(r, {})[p] = count
+                    day = self._simp_used.get(r, {}).get(p)
+                    if count and day is not None:
+                        used.setdefault(r, {})[p] = day
+        self._simp_phrases, self._simp_used = phrases, used
+        reps, reps_used = {}, {}
+        for phrase, terms in self.replacements.items():
+            for term, count in terms.items():
+                if self.replacement_count(phrase, term) >= 1:
+                    reps.setdefault(phrase, {})[term] = count
+                    day = self.replacement_used.get(phrase, {}).get(term)
+                    if day is not None:
+                        reps_used.setdefault(phrase, {})[term] = day
+        self.replacements, self.replacement_used = reps, reps_used
+
     def set_simplified(self, on):
         """Simplified mode: phrases / phrase_used become the shared ones with Simplified mode's laid over them
         (a count of 0 there: forgotten in Simplified mode); learning changes that copy, and what differs from the
@@ -830,6 +884,12 @@ class UserModel:
     def replacement_count(self, phrase, term):
         count = self.replacements.get(phrase, {}).get(term, 0)
         return self._faded(count, self.replacement_used.get(phrase, {}).get(term)) if count else 0
+
+    def touch_replacement(self, phrase, term):
+        """term came by itself for phrase and was sent so: its count as it stands now, from today (no fading while
+        it is used, review 2026-11-14)."""
+        self.replacements.setdefault(phrase, {})[term] = self.replacement_count(phrase, term)
+        self.replacement_used.setdefault(phrase, {})[term] = self.today()
 
     def learn_replacement(self, phrase, term):
         """term (a Mainland word, Traditional characters) picked for phrase in Simplified mode."""
@@ -1035,6 +1095,7 @@ class UserModel:
             merged = (self.phrases, self.phrase_used)
             self.phrases, self.phrase_used = self._shared
         self._prune()
+        self._prune_simplified()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1047,11 +1108,13 @@ class UserModel:
         if merged is not None:
             self._shared = (self.phrases, self.phrase_used)  # (pruned: the merged copy made again over them)
             self.phrases, self.phrase_used = self._merged()
+        if merged is not None or self._simp_dirty:
             self._save_simplified()
 
     def _save_simplified(self):
         if not self.simplified_path:
             return
+        self._simp_dirty = False
         tmp = self.simplified_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"format": 1, "phrases": self._simp_phrases, "used": {"phrases": self._simp_used},

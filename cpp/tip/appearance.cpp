@@ -17,14 +17,8 @@ namespace {
 thread_local Appearance g_look;
 thread_local std::string g_last;  // the appearance object and folder g_look was made from
 
-// the reference size of each window (DIP): the photo's scale comes from it, so a window growing or shrinking
-// while typing only shows more or less of the photo (settings/ui/app.js draws its preview the same way)
-struct Ref {
-    const char* window;
-    double w, h;
-};
-constexpr Ref REFS[] = {{"cand", 220, 300}, {"tip", 200, 44}, {"mode", 56, 48}, {"fill", 360, 240},
-                        {"keyboard", 600, 280}, {"bar", 420, 44}};
+// the windows that can have a look of their own (their photo frames: photo_frame.h)
+constexpr const char* WINDOWS[] = {"cand", "tip", "mode", "fill", "keyboard", "bar"};
 
 std::wstring wide_from_utf8(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
@@ -180,7 +174,7 @@ Appearance parse_appearance(const Json* a, const std::wstring& dir) {
     if (const Json* ws = a->get("windows"); ws && ws->is_object())
         for (auto& [k, v] : ws->members()) {
             bool known = false;
-            for (auto& r : REFS) known = known || k == r.window;
+            for (const char* w : WINDOWS) known = known || k == w;
             if (!known || !v.is_object()) continue;
             Look l = parse_look(&v, out.all, true);
             if (!l.own_image) l.image = out.all.image;
@@ -250,7 +244,8 @@ void glass(HDC dc, int x, int y, int w, int h, COLORREF color, BYTE alpha, int r
     DeleteDC(src);
 }
 
-bool draw_background(HDC dc, double scale, int w, int h, const char* window, int radius, COLORREF border) {
+bool draw_background(HDC dc, double scale, int w, int h, const char* window, int radius, COLORREF border,
+                     const PhotoFrame* frame) {
     const Appearance& a = g_look;
     if (!a.on || a.dir.empty()) return false;
     auto it = a.windows.find(window);
@@ -258,17 +253,12 @@ bool draw_background(HDC dc, double scale, int w, int h, const char* window, int
     if (l.image.empty()) return false;
     const Photo* p = photo(a.dir + L"\\" + l.image);
     if (!p) return false;
-    double rw = 220, rh = 300;
-    for (auto& r : REFS)
-        if (std::string(window) == r.window) rw = r.w, rh = r.h;
-    rw *= scale;
-    rh *= scale;
-    double k = std::max(rw / p->w, rh / p->h) * l.zoom / 100;
-    k = std::max({k, static_cast<double>(w) / p->w, static_cast<double>(h) / p->h});  // (still covers a bigger window)
-    double dw = p->w * k, dh = p->h * k;
-    // (min of max, not std::clamp: w - dw may round to a hair above 0, and clamp's low above its high is undefined)
-    double left = std::min(0.0, std::max(w - dw, rw / 2 - l.x * dw));
-    double top = std::min(0.0, std::max(h - dh, rh / 2 - l.y * dh));
+    // the photo's scale and centre come from its frame (#35: a whole page with these settings, the same as the
+    // settings page's preview), measured from the window's top-left corner: a window growing or shrinking while
+    // typing only shows more or less of the same picture
+    PhotoFrame fr = frame ? *frame : photo_frame(window, 9, 1, 18);
+    PhotoPlace pl = photo_place({fr.w * scale, fr.h * scale}, l.zoom, l.x, l.y, w, h, p->w, p->h);  // (device pixels)
+    double left = pl.left, top = pl.top, dw = pl.w, dh = pl.h;
     int r = static_cast<int>(radius * scale);
     HRGN clip = CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r);
     SelectClipRgn(dc, clip);

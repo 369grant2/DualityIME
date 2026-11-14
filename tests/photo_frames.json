@@ -1,0 +1,17 @@
+[
+  {"window": "cand", "keys": 9, "per_line": 1, "font": 18, "w": 110, "h": 319},
+  {"window": "cand", "keys": 9, "per_line": 9, "font": 18, "w": 487, "h": 71},
+  {"window": "cand", "keys": 9, "per_line": 3, "font": 18, "w": 212, "h": 133},
+  {"window": "cand", "keys": 10, "per_line": 5, "font": 18, "w": 348, "h": 102},
+  {"window": "cand", "keys": 9, "per_line": 1, "font": 10, "w": 110, "h": 229},
+  {"window": "cand", "keys": 9, "per_line": 1, "font": 48, "w": 110, "h": 661},
+  {"window": "cand", "keys": 8, "per_line": 4, "font": 24, "w": 280, "h": 118},
+  {"window": "cand", "keys": 10, "per_line": 10, "font": 30, "w": 700, "h": 86},
+  {"window": "fill", "keys": 9, "per_line": 1, "font": 18, "w": 332, "h": 339},
+  {"window": "fill", "keys": 9, "per_line": 1, "font": 30, "w": 332, "h": 474},
+  {"window": "fill", "keys": 9, "per_line": 1, "font": 10, "w": 332, "h": 249},
+  {"window": "keyboard", "keys": 9, "per_line": 1, "font": 18, "w": 918, "h": 292},
+  {"window": "tip", "keys": 9, "per_line": 1, "font": 18, "w": 200, "h": 44},
+  {"window": "mode", "keys": 9, "per_line": 1, "font": 18, "w": 56, "h": 48},
+  {"window": "bar", "keys": 9, "per_line": 1, "font": 18, "w": 420, "h": 44}
+]

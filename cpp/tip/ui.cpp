@@ -348,7 +348,9 @@ void CandidateWindow::draw(HDC dc, int w, int h) {
     const Theme& th = current_theme();
     double s = scale();
     Canvas cv(dc, s);
-    if (!draw_background(dc, s, w, h, "cand", 10, th.border)) cv.box(0, 0, w / s, h / s, th.key, th.border, 10);
+    // (the photo's frame: a whole page of these settings; spread out (→) it is the column's, #35)
+    PhotoFrame frame = photo_frame("cand", static_cast<int>(labels_.size()), grid_ ? 1 : per_line_, font_size_);
+    if (!draw_background(dc, s, w, h, "cand", 10, th.border, &frame)) cv.box(0, 0, w / s, h / s, th.key, th.border, 10);
     HFONT f = cv.font(font_size_, font_.c_str());
     HFONT num = cv.font(std::max(11, font_size_ * 2 / 3), L"Segoe UI");
     int label_w = 0;  // (the labels in a column of the spread-out list as wide as the widest)
@@ -445,7 +447,8 @@ void FillWindow::draw(HDC dc, int w, int h) {
     const Theme& th = current_theme();
     double s = scale();
     Canvas cv(dc, s);
-    if (!draw_background(dc, s, w, h, "fill", 10, th.border)) cv.box(0, 0, w / s, h / s, th.key, th.border, 10);
+    PhotoFrame frame = photo_frame("fill", 0, 0, font_size_);  // (9 rows, #35)
+    if (!draw_background(dc, s, w, h, "fill", 10, th.border, &frame)) cv.box(0, 0, w / s, h / s, th.key, th.border, 10);
     HFONT f = cv.font(font_size_, font_.c_str());
     HFONT minor = cv.font(std::max(11, font_size_ * 3 / 4), font_.c_str());
     HFONT title = cv.font(std::max(12, font_size_ * 3 / 4), L"Microsoft JhengHei UI");

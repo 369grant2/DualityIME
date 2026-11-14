@@ -6,10 +6,10 @@ const LOOK_PRESETS = [
   ["奶茶", "#f3e7d9", "#4a3426", "#e08a4c"], ["夜空", "#1d2340", "#e6e9ff", "#6c7cff"],
   ["抹茶", "#e7efe0", "#2f4a2a", "#7aa35c"], ["櫻花", "#fdeef2", "#5a2a3a", "#e66f93"],
   ["墨黑", "#151515", "#f0f0f0", "#3a82f6"]];
-// [key, tab name, reference size (DIP) the photo's scale comes from: as cpp/tip/appearance.cpp REFS]
+// [key, tab name] (each window's photo frame: frame.js lookFrame)
 const LOOK_WINDOWS = [
-  ["cand", "候選字視窗", 220, 300], ["tip", "補字提示", 200, 44], ["mode", "中英提示", 56, 48],
-  ["fill", "快速填入清單", 360, 240], ["keyboard", "符號鍵盤", 600, 280], ["bar", "替換列", 420, 44]];
+  ["cand", "候選字視窗"], ["tip", "補字提示"], ["mode", "中英提示"],
+  ["fill", "快速填入清單"], ["keyboard", "符號鍵盤"], ["bar", "替換列"]];
 const LOOK_NEW_PHOTO = { image: "", fade: 45, zoom: 100, x: 0.5, y: 0.5 };
 
 function lookLuminance(hex) {
@@ -169,25 +169,44 @@ function lookCard() {
     const sel = `background:${th.select};color:${th.selectText}`;
     const item = (n, t, on) => `<div class="lp-c"${on ? ` style="${sel}"` : ""}><b style="color:${on ? th.selectText : th.label}">${n}</b>${t}</div>`;
     switch (key) {
-      case "cand": return `<div class="lp-title" style="color:${th.label}">候選字</div>` + item(1, "你", true) + item(2, "妳") + item(3, "擬") + item(4, "禰");
+      case "cand": {  // (a whole page as these settings lay it out, #35)
+        const keys = candKeys(), per = candPerLine(candLayout(), keys);
+        const cells = [...keys].map((k, i) => item(k, CAND_SAMPLE[i] || "你", i === 0)).join("");
+        return `<div class="lp-title" style="color:${th.label}">候選字</div>` +
+          `<div class="lp-grid" style="grid-template-columns:repeat(${Math.min(per, keys.length)},auto);font-size:${candFont()}px">${cells}</div>`;
+      }
       case "tip": return `<div class="lp-c">時間 <span style="color:${th.label}">Tab</span></div>`;
       case "mode": return `<div class="lp-c lp-big">中</div>`;
       case "fill": return `<div class="lp-title" style="color:${th.label}">快速填入</div>` +
         `<div class="lp-c lp-row">sample@example.com<span style="color:${th.label}">[email]</span></div>` +
         `<div class="lp-c lp-row" style="${sel}">王小明<span>[name1]</span></div>` +
-        `<div class="lp-c lp-row">John<span style="color:${th.label}">[name2]</span></div>`;
+        `<div class="lp-c lp-row">John<span style="color:${th.label}">[name2]</span></div>` +
+        `<div class="lp-c lp-row">0912-345-678<span style="color:${th.label}">[phone]</span></div>` +
+        `<div class="lp-c lp-row">感謝您的幫忙<span style="color:${th.label}">[tks]</span></div>`;
       case "keyboard": {
         const k = (l, s, on) => `<div class="lp-key" style="${on ? sel : ""}"><i>${l}</i>${s}</div>`;
         return `<div class="lp-tabs"><span style="${sel}">一般</span><span>數學</span><span>特殊</span></div>` +
           `<div class="lp-keys">${k("Q", "《")}${k("W", "》")}${k("E", "「", true)}${k("R", "」")}${k("T", "『")}${k("Y", "』")}${k("U", "【")}${k("I", "】")}</div>` +
-          `<div class="lp-keys">${k("A", "※")}${k("S", "＊")}${k("D", "○")}${k("F", "●")}${k("G", "，")}${k("H", "、")}${k("J", "。")}${k("K", "；")}</div>`;
+          `<div class="lp-keys">${k("A", "※")}${k("S", "＊")}${k("D", "○")}${k("F", "●")}${k("G", "，")}${k("H", "、")}${k("J", "。")}${k("K", "；")}</div>` +
+          `<div class="lp-keys">${k("Z", "！")}${k("X", "？")}${k("C", "…")}${k("V", "‥")}${k("B", "—")}${k("N", "｛")}${k("M", "｝")}</div>`;
       }
       case "bar": return `<div class="lp-bar">${["ㄋㄧˇ", "s以", "suˇ", "su3"].map((t, i) => `<span${i === 0 ? ` style="${sel}"` : ""}>${t}</span>`).join("")}</div>`;
       default: return "";
     }
   }
-  // the preview's size of each window (DIP) and how much smaller it is drawn
-  const PREVIEW = { cand: [150, 168, 1], tip: [96, 30, 1], mode: [40, 40, 1], fill: [270, 122, 1], keyboard: [600, 170, 0.5], bar: [300, 44, 1] };
+  // the preview's size of the windows whose size follows what they show (DIP); the candidate list, quick fill
+  // and keyboard are drawn as big as their photo frame (a whole page, frame.js), smaller to fit (#35)
+  const PREVIEW = { tip: [96, 30], mode: [40, 40], bar: [300, 44] };
+  function candFont() { return Math.min(48, Math.max(10, Number(S.config.cand_font_size) || 18)); }
+  function frameOf(key) {
+    const keys = candKeys();
+    return lookFrame(key, keys.length, candPerLine(candLayout(), keys), candFont());
+  }
+  function previewSize(key, frame) {
+    if (PREVIEW[key]) return [...PREVIEW[key], 1];
+    const f = key === "keyboard" ? 0.5 : Math.min(1, 320 / frame[0], 340 / frame[1]);
+    return [frame[0], frame[1], f];
+  }
   const sizes = {};  // image file -> [w, h]
   async function photoSize(file) {
     if (sizes[file]) return sizes[file];
@@ -201,20 +220,18 @@ function lookCard() {
     });
   }
   // where the photo goes in a window w x h (DIP) - cpp/tip/appearance.cpp draw_background
-  function place(ref, look, w, h, iw, ih) {
-    let k = Math.max(ref[0] / iw, ref[1] / ih) * look.zoom / 100;
-    k = Math.max(k, w / iw, h / ih);
-    const dw = iw * k, dh = ih * k;
-    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-    return { left: clamp(ref[0] / 2 - look.x * dw, w - dw, 0), top: clamp(ref[1] / 2 - look.y * dh, h - dh, 0), dw, dh };
+  function place(frame, look, w, h, iw, ih) {  // (frame.js lookPlace: the DLL's sums)
+    const [left, top, dw, dh] = lookPlace(frame, look.zoom, look.x, look.y, w, h, iw, ih);
+    return { left, top, dw, dh };
   }
   let drawing = 0;
   async function drawPreview() {
     const n = ++drawing;
     const th = lookTheme(A);
     const boxes = [];
-    for (const [key, name, rw, rh] of LOOK_WINDOWS) {
-      const [w, h0, f] = PREVIEW[key];
+    for (const [key, name] of LOOK_WINDOWS) {
+      const frame = frameOf(key);
+      const [w, h0, f] = previewSize(key, frame);
       const look = lookOf(key), file = imageOf(key);
       const size = file ? await photoSize(file) : null;
       if (n !== drawing) return;
@@ -224,11 +241,11 @@ function lookCard() {
       // (the keys' border over a photo as the IME draws it: grey under light text, white under dark)
       win.style.setProperty("--key-border", size ? (lookLuminance(A.text) > 0.5 ? "#787878" : "#ffffff") : th.keyBorder);
       if (size) {
-        const p = place([rw, rh], look, w, h0, size[0], size[1]);
+        const p = place(frame, look, w, h0, size[0], size[1]);
         win.append(h("img", { class: "lp-photo", src: urls[file], alt: "", draggable: "false",
           style: `left:${p.left * f}px;top:${p.top * f}px;width:${p.dw * f}px;height:${p.dh * f}px` }));
         win.append(h("div", { class: "lp-veil", style: `background:${th.veil};opacity:${look.fade / 100}` }));
-        win.addEventListener("mousedown", (e) => drag(e, key, [rw, rh], w, h0, f, size));
+        win.addEventListener("mousedown", (e) => drag(e, key, frame, w, h0, f, size));
       }
       const inner = h("div", { class: "lp-in", style: `transform:scale(${f});transform-origin:0 0;width:${w}px` });
       inner.innerHTML = contents(key, th);

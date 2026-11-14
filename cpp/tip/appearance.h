@@ -9,6 +9,7 @@
 #include <string>
 
 #include "json.h"
+#include "photo_frame.h"
 #include "ui.h"
 
 namespace sz {
@@ -41,10 +42,12 @@ Theme derive_theme(COLORREF bg, COLORREF text, COLORREF select);
 // relative luminance 0-1; the veil over a photo is black for light text (> 0.5), else white
 double luminance(COLORREF c);
 
-// While the custom look is on and `window` has a photo that loads: draws it (cover-cropped against the window's
-// reference size, the veil over it) clipped to the rounded window with its border, and returns true. Else draws
+// While the custom look is on and `window` has a photo that loads: draws it (cover-cropped against its frame,
+// the veil over it) clipped to the rounded window with its border, and returns true. Else draws
 // nothing and returns false: the caller draws its box as before.
-bool draw_background(HDC dc, double scale, int w, int h, const char* window, int radius, COLORREF border);
+// frame: the photo's frame (DIP, cpp/tip/photo_frame.h); nullptr: the window's fixed one
+bool draw_background(HDC dc, double scale, int w, int h, const char* window, int radius, COLORREF border,
+                     const PhotoFrame* frame = nullptr);
 
 // a rectangle of `color` at `alpha` (0-255) over what is drawn, rounded by `radius` (device pixels)
 void glass(HDC dc, int x, int y, int w, int h, COLORREF color, BYTE alpha, int radius);

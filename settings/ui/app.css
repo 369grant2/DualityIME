@@ -311,6 +311,8 @@ table.list input::placeholder { color: var(--sub); }
 .lp-title { font-size: 12px; padding: 0 6px 2px; }
 .lp-c { padding: 2px 6px; border-radius: 4px; font-size: 15px; white-space: nowrap; }
 .lp-c b { font-weight: normal; margin-right: 6px; font-size: 12px; }
+.lp-grid { display: grid; gap: 2px 4px; }
+.lp-grid .lp-c { font-size: inherit; padding: 3px 10px; }
 .lp-big { font-size: 18px; text-align: center; }
 .lp-row { display: flex; justify-content: space-between; gap: 8px; }
 .lp-row span { font-size: 12px; }

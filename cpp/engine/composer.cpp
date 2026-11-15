@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <array>
 #include <functional>
 #include <regex>
 #include <tuple>
@@ -390,14 +391,29 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                                 const std::set<int>& breaks, const std::set<int>& exact) {
     // exact: raw offsets where a syllable is not autocorrected
     const size_t n = raw.size();
+    // The cheapest split of raw[:j] whose last token is zhuyin right after English with no space - English cut short
+    // there, not English the user asked for (state 1) - and the cheapest of all the others (state 0), in the order
+    // first reached: as one they lost to a longer English token whose switch was still to come (Session + 能, #42;
+    // engine/composer.py _tokenize_run's best, also why only that one).
+    // nodes[0] is the start; place[j].node[state] the node of a split, place[j].ord the states in the order first
+    // reached (fixed arrays: tokenize runs many times a key, no allocation per place)
     struct Best {
-        bool set = false;
         double cost = 0;
         size_t prev = 0;
         Token tok;
     };
-    std::vector<Best> best(n + 1);
-    best[0].set = true;
+    struct Place {
+        int node[2] = {-1, -1};
+        int ord[2] = {0, 0};
+        int count = 0;
+    };
+    std::vector<Best> nodes(1);
+    nodes.reserve(2 * n + 2);  // (two states a place at most: no move while offering)
+    std::vector<Place> place(n + 1);
+    place[0].node[0] = 0;
+    place[0].count = 1;
+    size_t cur = 0;        // the split the tokens offered now come after
+    bool cur_open = false;  // ...and it ends in English with no space after it (set with cur)
     static const std::unordered_set<std::string> none;
     const auto& learned = user ? user->english : none;
     const auto& mine = user ? user->sure_english() : none;  // 自訂詞彙's English words, and the ones sent twice
@@ -451,19 +467,41 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         return false;
     };
     auto offer = [&](size_t i, size_t j, double cost, Token tok) {
-        if (tok.kind == Kind::En && is_digit(tok.raw[0]) && i > 0 && best[i].tok.kind == Kind::Lit &&
-            best[i].tok.raw.size() == 1 && zh_punct.count(best[i].tok.raw[0]))
+        (void)i;
+        if (tok.kind == Kind::En && is_digit(tok.raw[0]) && cur != 0 && nodes[cur].tok.kind == Kind::Lit &&
+            nodes[cur].tok.raw.size() == 1 && zh_punct.count(nodes[cur].tok.raw[0]))
             // digits right after a zhuyin key read as punctuation: the u,4 of sugatau,4 is 頁,
             // not sugatau + ， + 4 (the same as the 2; of youtube2;, the other way round)
             cost += EN_DIGIT_SYMBOL;
-        if (i > 0 && best[i].tok.kind == Kind::En && !ends_with(best[i].tok.raw, std::string(" "))) {
+        if (tok.kind == Kind::Zh || tok.kind == Kind::Partial)
+            for (int f : forced)
+                if (tok.start < f && f < static_cast<int>(j)) {
+                    // (a syllable swallowing a key the user asked to be English: u,4 picked as typed in sugatau,4 -
+                    // not 滅 from the a before it, #42)
+                    cost -= COST_FORCED_TOKEN;
+                    break;
+                }
+        if (tok.kind == Kind::En && std::isalpha(static_cast<unsigned char>(tok.raw[0])) && cur != 0 &&
+            nodes[cur].tok.kind == Kind::Zh && !nodes[cur].tok.corrected.empty() &&
+            !ends_with(nodes[cur].tok.raw, std::string(" ")))
+            // letters right after a syllable 注音自動校正 made of keys typed otherwise: likelier one English word
+            // (tmux, bella: not 吃 + ux, 日 + lla - #42)
+            cost += EN_SWITCH;
+        if (cur_open) {
             if (tok.kind == Kind::En) return;  // (two pieces side by side are one piece, scored as such)
             if (tok.kind == Kind::Zh || tok.kind == Kind::Partial)
                 // zhuyin right after English, no space between: the switch, and the more
                 // common the syllable the likelier (python是, not pytho + 裸 for pythoxji3)
             {
                 cost += EN_SWITCH + EN_RARITY * std::max(0.0, -table.score(tok.value) - 2.0);
-                char last = best[i].tok.raw.back(), first = tok.raw[0];
+                char last = nodes[cur].tok.raw.back(), first = tok.raw[0];
+                // ...twice for a syllable of digit keys alone right after digits, or one that starts with a symbol
+                // key: likelier more of the number or the term (1994年, not 19 + 愛 + 年; IL-6在, not IL + 而; 85大樓
+                // stays, 大樓 a word), and one 注音自動校正 made, a digit key first, right after digits (65歲, not
+                // 6 + 之為). What the switch weighed before each place kept its cheapest split alone (#42).
+                if ((is_digit(last) && (all_digit(rstrip(tok.raw)) || (!tok.corrected.empty() && is_digit(first)))) ||
+                    !std::isalnum(static_cast<unsigned char>(first)))
+                    cost += EN_SWITCH;
                 // - but a syllable of one letter is as likely the end of a term (RNAi, USDt, dBu, mmHg), so
                 // it gets what it got before; a digit key first only where it starts a word with the next
                 // syllable (API包括; alone it is as likely a model: MP5k, D2l); digits alone never (PS5, V8)
@@ -471,7 +509,7 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                 // My the y, u with the space are the word's last letter - NumPy 本身 read NumP資本身)
                 if (last >= 'A' && last <= 'Z') {
                     const std::string typed = rstrip(tok.raw);
-                    const std::string& before = best[i].tok.raw;
+                    const std::string& before = nodes[cur].tok.raw;
                     bool acronym = before.size() >= 2;
                     for (char c : before)
                         if (c < 'A' || c > 'Z') acronym = false;
@@ -491,17 +529,27 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                 }
                 if (tok.kind == Kind::Zh && starts_phrase(j, tok.value)) cost -= EN_PHRASE;
             } else if (tok.kind == Kind::Lit && tok.raw.size() == 1 && zh_punct.count(tok.raw[0]) &&
-                     is_digit(best[i].tok.raw.back()))
+                     is_digit(nodes[cur].tok.raw.back()))
                 // a zhuyin key as punctuation right after digits: youtube2; is youtube當,
                 // not youtube2 + ； (the same as the 2; inside a piece)
                 cost += EN_DIGIT_SYMBOL;
         }
-        double c = best[i].cost + cost;
-        if (!best[j].set || c < best[j].cost) {
-            best[j].set = true;
-            best[j].cost = c;
-            best[j].prev = i;
-            best[j].tok = std::move(tok);
+        double c = nodes[cur].cost + cost;
+        int state = (tok.kind == Kind::Zh || tok.kind == Kind::Partial) && cur_open &&
+                            !contains(forced, nodes[cur].tok.start)
+                        ? 1
+                        : 0;
+        Place& pl = place[j];
+        int slot = pl.node[state];
+        if (slot < 0) {  // (a node is never read by another before every offer into its place is made: j > i)
+            pl.node[state] = static_cast<int>(nodes.size());
+            pl.ord[pl.count++] = state;
+            nodes.push_back(Best{c, cur, std::move(tok)});
+        } else if (c < nodes[static_cast<size_t>(slot)].cost) {
+            Best& b = nodes[static_cast<size_t>(slot)];
+            b.cost = c;
+            b.prev = cur;
+            b.tok = std::move(tok);
         }
     };
     // a token over raw[i:j] would swallow a place where the user asked for zhuyin
@@ -513,20 +561,20 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         return 0.0;
     };
     std::string_view rv(raw);
-    // the readings of the syllables at the end of the best tokens up to i, nothing between them
-    auto zh_before = [&](size_t i) {
+    // the readings of the syllables at the end of the split of node p0, nothing between them
+    auto zh_before = [&](size_t p0) {
         std::vector<ustr> out;
-        for (size_t p = i; p > 0 && best[p].tok.kind == Kind::Zh; p = best[p].prev) out.push_back(best[p].tok.value);
+        for (size_t p = p0; p != 0 && nodes[p].tok.kind == Kind::Zh; p = nodes[p].prev) out.push_back(nodes[p].tok.value);
         std::reverse(out.begin(), out.end());
         return out;
     };
-    // the syllables at the end of the best tokens up to i are all digits, right after an English word
-    auto number_after_english = [&](size_t i) {
-        size_t p = i;
-        while (p > 0 && best[p].tok.kind == Kind::Zh && all_digit(rstrip(best[p].tok.raw))) p = best[p].prev;
-        if (p == i) return false;
+    // the syllables at the end of the split of node p0 are all digits, right after an English word
+    auto number_after_english = [&](size_t p0) {
+        size_t p = p0;
+        while (p != 0 && nodes[p].tok.kind == Kind::Zh && all_digit(rstrip(nodes[p].tok.raw))) p = nodes[p].prev;
+        if (p == p0) return false;
         if (p == 0) return after_english;
-        return best[p].tok.kind == Kind::En && all_alpha(strip(best[p].tok.raw));
+        return nodes[p].tok.kind == Kind::En && all_alpha(strip(nodes[p].tok.raw));
     };
     // the keys from j spell this syllable
     auto spells = [&](size_t j, const ustr& reading) {
@@ -537,7 +585,26 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         return false;
     };
     for (size_t i = 0; i < n; ++i) {
-        if (!best[i].set) continue;
+      // (each split reached up to i in turn: by then every token ending at i has been offered)
+      // (the splits to go on from: both kinds only while the other one ends in English with no space, its switch still
+      // to come; else the cheaper alone, a tie the first reached - engine/composer.py going_on)
+      size_t go[2];
+      int n_go = 0;
+      {
+          const Place& pl = place[i];
+          for (int si = 0; si < pl.count; ++si) go[n_go++] = static_cast<size_t>(pl.node[pl.ord[si]]);
+          if (n_go == 2) {
+              const Token& last = nodes[static_cast<size_t>(pl.node[0])].tok;
+              if (!(last.kind == Kind::En && !ends_with(last.raw, std::string(" ")))) {
+                  if (nodes[go[1]].cost < nodes[go[0]].cost) go[0] = go[1];
+                  n_go = 1;
+              }
+          }
+      }
+      for (int si = 0; si < n_go; ++si) {
+        cur = go[si];
+        cur_open = cur != 0 && nodes[cur].tok.kind == Kind::En && !nodes[cur].tok.raw.empty() &&
+                   nodes[cur].tok.raw.back() != ' ';
         char ch = raw[i];
         int ii = static_cast<int>(i);
         double bonus = contains(forced, ii) ? COST_FORCED_TOKEN : contains(chinese, ii) ? -COST_FORCED_TOKEN : 0.0;
@@ -555,8 +622,8 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                     // the word's syllables before it, or before its next one - nowhere else
                     // (not digits after English with the word's digits before them: you are 19 197)
                     ustr own = table.parse_in_word(rv.substr(i, j - i));
-                    if (!own.empty() && !(all_digit(rstrip(rv.substr(i, j - i))) && number_after_english(i)) &&
-                        table.in_its_word(own, zh_before(i), [&](const ustr& nxt) { return spells(j, nxt); })) {
+                    if (!own.empty() && !(all_digit(rstrip(rv.substr(i, j - i))) && number_after_english(cur)) &&
+                        table.in_its_word(own, zh_before(cur), [&](const ustr& nxt) { return spells(j, nxt); })) {
                         offer(i, j, syllable_cost(table, own, true) + crosses(i, j),
                               Token{Kind::Zh, raw.substr(i, j - i), own, ii});
                         continue;
@@ -569,7 +636,7 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                 // Chinese (你.2 is 你都; no.2 stays)
                 bool punct_order = parsed && !as_typed && ordered_only && correct &&
                                    !table.parse_syllable(rv.substr(i + 1, j - i - 1));
-                bool after_zh = i > 0 && best[i].tok.kind == Kind::Zh;
+                bool after_zh = cur != 0 && nodes[cur].tok.kind == Kind::Zh;
                 for (size_t k = i + 1; punct_order && !after_zh && k + 1 < j; ++k)
                     if (is_digit(raw[k])) punct_order = false;
                 if (as_typed)
@@ -613,7 +680,7 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                     }
                     // (a key becomes a tone key only with no digit after it: gpt4 is not 神4, h264 not 此64)
                     auto near = table.adjacent_parses(rv.substr(i, j - i), j < n && !is_digit(raw[j]));
-                    bool context = i > 0 && best[i].tok.kind == Kind::Zh;
+                    bool context = cur != 0 && nodes[cur].tok.kind == Kind::Zh;
                     for (size_t k = j + 2; !near.empty() && !context && k <= std::min(j + MAX_SYL_KEYS, n); ++k)
                         if (table.parse_syllable(rv.substr(j, k - j))) context = true;
                     if (!near.empty() && context) {
@@ -631,8 +698,8 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                     // (check_corrections). Not before a final on its own (2u + .4 ㄡˋ is the
                     // 2u.4 掉 with a key next to the right one)
                     // Nor right after English (su5k1u0 stays su5k邊: keys of a word, more likely)
-                    bool after_en = i > 0 && best[i].tok.kind == Kind::En && !best[i].tok.raw.empty() &&
-                                    best[i].tok.raw.back() != ' ';
+                    bool after_en = cur != 0 && nodes[cur].tok.kind == Kind::En && !nodes[cur].tok.raw.empty() &&
+                                    nodes[cur].tok.raw.back() != ' ';
                     std::vector<ustr> forms;
                     if (j < n && raw[j] != ' ' && !after_en && !is_final(table.symbol(raw[j])))
                         forms = table.toned_forms(rv.substr(i, j - i));
@@ -656,7 +723,7 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
             } else if (!parsed && table.has_in_word_parts()) {
                 // (...and not finished yet, after the word's syllables before it: 電 + 1u; is 電ㄅㄧㄤ)
                 ustr own = table.partial_in_word(rv.substr(i));
-                if (!own.empty() && table.in_its_word(own, zh_before(i), nullptr, true))
+                if (!own.empty() && table.in_its_word(own, zh_before(cur), nullptr, true))
                     offer(i, n, COST_PARTIAL + crosses(i, n), Token{Kind::Partial, raw.substr(i), own, ii});
             }
         }
@@ -688,8 +755,8 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         size_t sp = raw.find(' ', i);
         size_t end = sp == std::string::npos ? n : sp;
         bool after_word = (after_english && i == 0) ||
-                          (i > 0 && best[i].tok.kind == Kind::En && ends_with(best[i].tok.raw, std::string(" ")) &&
-                           all_alpha(strip(best[i].tok.raw)));
+                          (cur != 0 && nodes[cur].tok.kind == Kind::En && ends_with(nodes[cur].tok.raw, std::string(" ")) &&
+                           all_alpha(strip(nodes[cur].tok.raw)));
         for (size_t j = i + 1; j <= end; ++j) {
             std::string piece = raw.substr(i, j - i);
             bool word_after = after_word;
@@ -712,10 +779,16 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
             else
                 offer(i, j, cost, Token{Kind::En, piece, U(piece), ii});
         }
+      }
     }
     std::vector<Token> tokens;
-    if (best[n].set && n > 0) {
-        for (size_t j = n; j > 0; j = best[j].prev) tokens.push_back(best[j].tok);
+    if (place[n].count > 0 && n > 0) {
+        size_t pick = 0;  // (the cheapest; a tie: the first reached)
+        for (int si = 0; si < place[n].count; ++si) {
+            size_t node = static_cast<size_t>(place[n].node[place[n].ord[si]]);
+            if (pick == 0 || nodes[node].cost < nodes[pick].cost) pick = node;
+        }
+        for (size_t p = pick; p != 0; p = nodes[p].prev) tokens.push_back(nodes[p].tok);
         std::reverse(tokens.begin(), tokens.end());
     }
     return digits_as_zhuyin ? tokens : digits_to_numbers(tokens, after_english, chinese);
@@ -933,10 +1006,12 @@ const std::unordered_map<ustr, int64_t> ORDER_LM_THRESHOLDS_Q16 = {
 // the Chinese before it enough to keep it (我們走817 -> 我們走吧). Only the last syllable of a run with
 // Chinese before it and nothing being typed right after; the text before is the engine's own choice
 // for the syllables as read so far, from the start of the run or from after the last of its tokens
-// already made a number (engine/composer.py _model_reads_it)
+// already made a number (engine/composer.py _model_reads_it). From the start of the run, the model reads context()
+// first: what was just sent and the Chinese of the runs before (the same as convert_all, #42)
 bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>& run, size_t k,
                     const std::vector<ustr>& rds, const Lexicon* lexicon, const UserModel* user,
-                    const BigramModel* bigram, const LmScorer* lm, const std::set<size_t>& numbers) {
+                    const BigramModel* bigram, const LmScorer* lm, const std::set<size_t>& numbers,
+                    const std::function<ustr()>& context) {
     const Token& t = tokens[run[k]];
     auto threshold = ORDER_LM_THRESHOLDS_Q16.find(t.value);
     if (!lm || !lexicon || threshold == ORDER_LM_THRESHOLDS_Q16.end() || k + 1 != run.size()) return false;
@@ -952,12 +1027,14 @@ bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>&
                              *lexicon, user, {}, bigram, std::nullopt))
         before += seg.phrase;
     if (before.size() != k - first) return false;
+    if (first == 0)
+        if (ustr ctx = context(); !ctx.empty()) lm = lm->view(ctx);
     return lm->syllable_mass_q16(before, t.value) >= threshold->second;
 }
 
 std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTable& table, const Lexicon* lexicon,
                                      const UserModel* user, const std::set<int>& exact, const BigramModel* bigram,
-                                     const LmScorer* lm) {
+                                     const LmScorer* lm, const ustr& sent) {
     // the 注音自動校正 that needs the words around a syllable (see engine/composer.py): digits
     // out of order stay zhuyin on their own (吧) or in a word likelier than the characters apart
     // (好吧), or at the end of a run when 長句選字加強's model expects the syllable there
@@ -986,6 +1063,18 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
         if (by_itself) alone.insert(i);
     }
     std::set<size_t> numbers;
+    // (the readings of the runs before: model_reads_it's context is what was sent, then the engine's own choice for
+    // them, as its text before - worked out only when asked for)
+    std::vector<std::vector<ustr>> earlier;
+    auto context = [&]() {
+        ustr ctx = sent;
+        for (auto& e : earlier)
+            for (auto& seg : convert(e, *lexicon, user, {}, bigram, std::nullopt))
+                for (char32_t ch : seg.phrase)
+                    if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) ctx.push_back(ch);
+        if (ctx.size() > LM_CONTEXT) ctx.erase(0, ctx.size() - LM_CONTEXT);
+        return ctx;
+    };
     for (auto& run : zh_runs(tokens)) {
         std::vector<ustr> rds;
         for (size_t i : run) rds.push_back(tokens[i].value);
@@ -998,9 +1087,21 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
             if (alone.count(run[k])) continue;
             std::optional<double> gain;
             if (lexicon) gain = better_word(rds, k, *lexicon, user);
-            if ((!gain || *gain <= ORDER_DIGITS_GAIN) && !model_reads_it(tokens, run, k, rds, lexicon, user, bigram, lm, numbers))
+            if ((!gain || *gain <= ORDER_DIGITS_GAIN) && !model_reads_it(tokens, run, k, rds, lexicon, user, bigram, lm, numbers,
+                                                                       context))
                 numbers.insert(run[k]);
         }
+        // (the run as convert will see it: cut where its digits became a number, which reads no Chinese)
+        std::vector<ustr> part;
+        for (size_t k = 0; k < run.size(); ++k) {
+            if (numbers.count(run[k])) {
+                if (!part.empty()) earlier.push_back(part);
+                part.clear();
+            } else {
+                part.push_back(rds[k]);
+            }
+        }
+        if (!part.empty()) earlier.push_back(part);
     }
     if (!numbers.empty()) {
         std::vector<Token> out;
@@ -1173,7 +1274,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             bool digits_as_zhuyin, const std::set<int>& literal, const std::set<int>& chinese,
                             const Fixed* fixed, const Lexicon* lexicon, const std::set<int>* breaks,
                             const std::set<int>* exact, const Fixed* taken, const BigramModel* bigram,
-                            const LmScorer* lm) {
+                            const LmScorer* lm, const ustr* sent) {
     // literal: raw offsets of keys that are always themselves (numpad); fixed: keys shown
     // as picked from the replacement bar (ㄏㄠˇ, clˇ); taken: keys read as a syllable picked
     // from the list (注音自動校正: si3 as ㄋㄧˇ). They cut the text in two.
@@ -1197,7 +1298,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
     const std::set<int>& brk = breaks ? *breaks : no_breaks;
     const std::set<int>& ex = exact ? *exact : no_breaks;
     auto checked = [&](std::vector<Token> toks) {
-        return table.autocorrect ? check_corrections(std::move(toks), table, lexicon, user, ex, bigram, lm) : toks;
+        return table.autocorrect ? check_corrections(std::move(toks), table, lexicon, user, ex, bigram, lm, sent ? *sent : ustr()) : toks;
     };
     if (cuts.empty())
         return checked(tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese,
@@ -1988,7 +2089,7 @@ void Composer::settings_changed() {
 
 std::vector<Token> Composer::retokenize(const std::set<int>& chinese) const {
     return tokenize(raw, table_, &user, english_, forced_, after_english_, digits_as_zhuyin_, literal_, chinese,
-                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm());
+                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr());
 }
 
 const LmScorer* Composer::lm() const {
@@ -2089,6 +2190,25 @@ ustr Composer::shown_phrase(int s, int l, const ustr& p) const {
     return lexicon_.script().to_simplified(t);
 }
 
+ustr Composer::sent_context() const {
+    return config.flag("lm_context") ? lm_context_ : ustr();
+}
+
+const ustr* Composer::sent_ptr() const {
+    return config.flag("lm_context") && !lm_context_.empty() ? &lm_context_ : nullptr;
+}
+
+ustr Composer::run_context(const std::vector<Segment>& before) const {
+    // what the model reads before a run of the buffer (engine/composer.py _run_context): what was just sent while
+    // 接續前文選字 is on, then the Chinese characters of the runs before it as converted, the last LM_CONTEXT
+    ustr context = sent_context();
+    for (auto& seg : before)
+        for (char32_t ch : seg.phrase)
+            if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) context.push_back(ch);
+    if (context.size() > LM_CONTEXT) context.erase(0, context.size() - LM_CONTEXT);
+    return context;
+}
+
 std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     // convert each maximal run of zh tokens; instead: other picks than the user's ({}: what it
     // would be without them)
@@ -2109,22 +2229,9 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     if (in_run) runs.emplace_back(run_start, idx);
     bool starts_buffer = !tokens.empty() && tokens[0].kind == Kind::Zh;
     const LmScorer* model = lm();
-    // 接續前文選字 (#37): the run that starts the buffer is read after what was just sent - also after punctuation
-    // that starts it (, is ㄝ too: typed after a sentence sent, it waits in the buffer with what comes next; the
-    // user's call 2026-11-15). The word sent last (prev) stays for the buffer's very start only.
-    bool reads = false;
-    for (auto& t : tokens) {
-        if (t.kind == Kind::Zh) {
-            reads = true;
-            break;
-        }
-        bool punct = t.kind == Kind::Lit;
-        for (unsigned char ch : t.raw)
-            if (ch < 0x80 && std::isalnum(ch)) punct = false;
-        if (!punct) break;
-    }
-    bool use = reads && model && !lm_context_.empty() && config.flag("lm_context");
-    const LmScorer* first_model = use ? model->view(lm_context_) : model;
+    // The model reads each run after what comes before it (run_context): what was just sent (接續前文選字, #37) and
+    // the Chinese of the runs before it in the buffer, across English, digits and punctuation (#42). The word sent
+    // last (prev) stays for the buffer's very start only.
     for (auto [a, b] : runs) {
         std::map<std::pair<int, int>, ustr> ov;
         for (auto& [span, v] : overrides)
@@ -2136,8 +2243,12 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
         bool alone = readings.size() == 1;
         for (auto& t : tokens)
             if (t.kind == Kind::En) alone = false;
-        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, a == 0 && reads ? first_model : model,
-                                 alone))
+        const LmScorer* run_model = model;
+        if (model) {
+            ustr context = run_context(out);
+            if (!context.empty()) run_model = model->view(context);
+        }
+        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, run_model, alone))
             out.push_back(Segment{a + seg.start, seg.length, seg.phrase});
     }
     runs_ = runs;
@@ -3564,7 +3675,7 @@ std::optional<std::pair<int, std::vector<ustr>>> Composer::reads_as_chinese(int 
         if (a != unfix) fixed[a] = v;
     auto trial =
         tokenize(raw, table_, &user, english_, forced, after_english_, digits_as_zhuyin_, lit, ch, &fixed, &lexicon_,
-                 &breaks_, &exact_, &taken_, bigram_, lm());
+                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr());
     std::vector<const Token*> inside;
     for (auto& t : trial)
         if (s <= t.start && t.start < end) inside.push_back(&t);

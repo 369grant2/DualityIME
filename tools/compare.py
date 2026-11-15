@@ -34,6 +34,20 @@ CASES = [
     "{CL}zqx{DOWN}1y94fm4d042u04u/3{ENTER}",
     # (a comma typed after a sentence sent waits in the buffer (, is ㄝ too): the Chinese after it still reads the context)
     "{CL}vu0 cjo6ru8 vu3yl3{ENTER},y94fm4d042u04u/3{ENTER}{CL},y94fm4d042u04u/3{ENTER}",
+    # #42: the Chinese after English, digits or punctuation reads the Chinese before it in the buffer (and what was sent):
+    # the example (辨識成), two English gaps, a comma between, a buffer starting with English after a sentence sent,
+    # a pick in the first run read by the second
+    "{CL}ji356ru, 5k4u;4283cjo41o4Github1u04g4t/6tj/6zj4a87{ENTER}",
+    "{CL}ji3m/4Githubck6Gitlab1u3rul4{ENTER}",
+    "{CL}ji3ap7vu0 fm4t z04,y94fm4{ENTER}",
+    "{CL}ji3ap7vu0 fm4t z04{ENTER}Githuby94fm4{ENTER}",
+    "{CL}g4ok y94fm4{HOME}{DOWN}2{ENTER}",
+    # #42: English cut short then zhuyin kept apart in the split (Session能), not digits split into zhuyin (1994年,
+    # 85大樓 stays), a symbol key first (IL-6在), gpt4 and mp3 as before, English the user picked kept whole (si3 from
+    # the bar, u,4 picked as typed in sugatau,4)
+    "{CL}ul4fm,41l3ru, vu84x96Sessions/6gjp4xu4d9 z8 {ENTER}",
+    "{CL}1994su06{ENTER}85284x.6{ENTER}IL-6y94{ENTER}gpt4 {ENTER}mp3g4{ENTER}",
+    "{CL}si3cl3{HOME}{UP}{RIGHT}{RIGHT}{RIGHT}{ENTER}{ENTER}sugatau,4au04{LEFT}{LEFT}{LEFT}{LEFT}{UP}{RIGHT}{RIGHT}{RIGHT}{ENTER}{LEFT}{ENTER}",
     # 簡體輸出 (#32; every setting types them, the last one in Simplified mode): 軟體's Mainland word picked twice
     # (then by itself), picked back; 位元組 shown as the shorter 字節, the caret over it and a key taken back;
     # 光驅 (a Mainland word the dictionary lacks), 導出, 影片

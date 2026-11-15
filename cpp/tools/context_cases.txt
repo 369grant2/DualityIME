@@ -12,3 +12,9 @@ vu0 cjo6ru8 vu3yl3{ENTER}{ENTER}y94fm4d042u04u/3{ENTER} => 先回家洗澡{NL}�
 vu0 cjo6ru8 vu3yl3{ENTER},y94fm4d042u04u/3{ENTER} => 先回家洗澡,再去看電影
 # sent, then a lone mark (Ctrl+. : 。) and Enter: after a mark alone no line break is allowed between (any paragraph ending in 。 would pass): the context drops: 在
 vu0 cjo6ru8 vu3yl3{ENTER}{^.}{ENTER}y94fm4d042u04u/3{ENTER} => 先回家洗澡。{NL}在去看電影
+# #42: the Chinese after English in the buffer reads the Chinese before it: 辨識成 (each run on its own made 便是成)
+ji356ru, 5k4u;4283cjo41o4Github1u04g4t/6tj/6zj4a87{ENTER} => 我直接這樣打會被Github辨識成重複嗎
+# #42: 能 (s/6) right after Session is zhuyin, not more of the English word (it came out Sessions/6)
+ul4fm,41l3ru, vu84x96Sessions/6gjp4xu4d9 z8 {ENTER} => 要確保接下來Session能順利開發
+# #42: sent, then a buffer that starts with English: the Chinese after it reads what was sent too: 再 (alone 在)
+ji3ap7vu0 fm4t z04{ENTER}Githuby94fm4d042u04u/3{ENTER} => 我們先去吃飯Github再去看電影

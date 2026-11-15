@@ -216,6 +216,9 @@ def load(data_dir=DATA_DIR):
 LM_STATES_KEPT = 3000  # states (and scored syllables) kept across keys, then all dropped but the start
                        # (a sentence of 47 syllables typed with 注音自動校正 on makes about 1100; the
                        # C++ engine keeps a state in 3 KB: about 10 MB)
+LM_VIEWS_KEPT = 64     # views (Scorer.view) kept: the runs of one buffer read contexts of their own (#42), and a full
+                       # buffer (composer.MAX_RAW keys) holds about 33: fewer and each key would drop and make them all
+                       # again (compare.py's cases with 22 runs took minutes). Their states share LM_STATES_KEPT.
 
 
 class Scorer:
@@ -233,16 +236,24 @@ class Scorer:
 
     def view(self, context):
         """接續前文選字 (#37): a Scorer of the same model whose texts come after context (<s> + context + text), with
-        caches of its own; the one of the last context asked for is kept and given again."""
-        kept = getattr(self, "_view", None)
-        if kept is not None and kept._context == context:
-            return kept
+        caches of its own; the last LM_VIEWS_KEPT contexts asked for are kept and given again (#42: each run of a
+        buffer reads a context of its own), the one used least lately dropped first."""
+        import collections
+        kept = getattr(self, "_views", None)
+        if kept is None:
+            kept = self._views = collections.OrderedDict()
+        v = kept.get(context)
+        if v is not None:
+            kept.move_to_end(context)
+            return v
         self.candidates("")  # (the table built once, here, and shared: a view must not build its own each sentence)
         v = Scorer.__new__(Scorer)
         v.lm, v.lexicon, v._cands = self.lm, self.lexicon, self._cands
-        v._context, v._view = context, None
+        v._context, v._views, v._base = context, None, self
         v._clear()
-        self._view = v
+        kept[context] = v
+        if len(kept) > LM_VIEWS_KEPT:
+            kept.popitem(last=False)
         return v
 
     def _start(self):
@@ -272,9 +283,21 @@ class Scorer:
         return self._cands.get(syllable)
 
     def _room(self):
-        if len(self.states) >= LM_STATES_KEPT or len(self.score_cache) >= LM_STATES_KEPT or \
-                len(self.mass_cache) >= LM_STATES_KEPT:
-            self._clear()
+        base = getattr(self, "_base", None)
+        if base is None:
+            if len(self.states) >= LM_STATES_KEPT or len(self.score_cache) >= LM_STATES_KEPT or \
+                    len(self.mass_cache) >= LM_STATES_KEPT:
+                self._clear()
+            return
+        # (a view: all the views' caches together within the one budget, then all dropped)
+        views = base._views.values()
+        if sum(len(v.states) for v in views) >= LM_STATES_KEPT or \
+                sum(len(v.score_cache) for v in views) >= LM_STATES_KEPT or \
+                sum(len(v.mass_cache) for v in views) >= LM_STATES_KEPT:
+            for v in views:
+                v._clear()
+            if self not in views:  # (a view already dropped from the list, still in use by its caller)
+                self._clear()
 
     def state(self, text):
         k = len(text)

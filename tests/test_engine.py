@@ -96,6 +96,15 @@ class ConversionTest(Base):
 
 
 class MixedEnglishTest(Base):
+    def test_word_then_zhuyin_not_glued(self):
+        # (#42: the s of 能 (s/6) right after Session made Sessions/6 one English token - the cheapest split up to the
+        # 6 was kept, though the next syllable then cost more after English than after 能: the user, 2026-11-15)
+        self.assertEqual(self.type(keys("ㄧㄠˋ ㄑㄩㄝˋ ㄅㄠˇ ㄐㄧㄝ ㄒㄧㄚˋ ㄌㄞˊ") + "Session" +
+                                   keys("ㄋㄥˊ ㄕㄨㄣˋ ㄌㄧˋ ㄎㄞ ㄈㄚ")), "要確保接下來Session能順利開發")
+        for typed in ("Sessions ", "python3 ", "Win10 ", "gpt4 ", "iPhone15 "):
+            self.assertEqual(self.type(typed), typed)  # (English and models' names stay as typed; mp3 is 允 until
+                                                        # 代碼記憶 learns it, as before)
+
     def test_plain_english_word_commits_on_space(self):
         self.assertEqual(self.type("hello "), "hello ")
 
@@ -1803,10 +1812,13 @@ class NumberTest(Base):
     def test_bar_offers_the_syllable_from_the_caret_across_the_split(self):
         # read as sugatau,4 + 面: the caret before the u offers 業 (u,4), across the , and 4;
         # picked, the rest is read again: sugata頁面, and the caret goes on to 面
+        # (the reading set up by picking u,4 as typed: costs alone no longer misread it since the split keeps English
+        # cut short apart, #42)
         c = self.c
-        self.misread(phrase=0.0, rarity=1.2)
         for ch in "sugatau,4au04":
             c.key(ch)
+        self.caret_to(6)
+        self.pick_bar("u,4")
         self.assertEqual(c.composition, "sugatau,4面")
         self.caret_to(6)
         self.assertIn("頁", c.replacements)  # (labelled as it comes out: 頁 before 面)
@@ -6444,6 +6456,13 @@ class OrderDigitsWithModelTest(Base):
         self.c.settings_changed()
         super().tearDown()
 
+    def test_slip_right_after_english(self):
+        # (#42, the user 2026-11-15: a syllable mistyped right after English or digits is put right too - from
+        # docs/superpowers/items/42/en_then_zh_eval.py --slip, written wrong before the split kept both kinds of path)
+        for typed, want in (("CP56lt el ", "CP值超高"), ("30jys94", "30無奈")):
+            self.assertEqual(self.type(typed), want)
+        self.assertTrue(self.type("Githuv1u04g4").startswith("Githuv"))  # (English typed wrong stays English)
+
     def test_end_of_sentence_reads_as_chinese(self):
         # (P 1601 >= the threshold 1544, Q16: 0.0244 against 0.0236 with the model of 2026-11-09, a margin of
         # only 3.7%: a retrained model may tip it, re-run tools/lm/order_thresholds.py)
@@ -6784,6 +6803,33 @@ class LmContextTest(unittest.TestCase):
         v.candidates("ㄗㄞˋ")
         self.assertIs(v._cands, s._cands)
 
+    def test_views_kept(self):
+        # (#42: each run of a buffer has a context of its own: the last LM_VIEWS_KEPT views are kept - more than the
+        # runs a full buffer can hold (MAX_RAW keys: 我 + a space is 3), so typing never drops one still in use)
+        self.assertGreater(lm.LM_VIEWS_KEPT, composer.MAX_RAW // 3)
+        s = lm.Scorer(lm.shared().lm, lm.shared().lexicon)
+        a = s.view("我們")
+        b = s.view("先去")
+        self.assertIs(s.view("先去"), b)
+        self.assertIs(s.view("我們"), a)
+        for k in range(lm.LM_VIEWS_KEPT - 2):
+            s.view(str(k))                  # (kept: 先去 我們 0 1 ...)
+        self.assertIs(s.view("我們"), a)  # (used lately: 先去 is now the oldest)
+        s.view("一")                        # (先去 dropped)
+        self.assertIsNot(s.view("先去"), b)
+
+    def test_views_share_one_budget(self):
+        # (the views' states together stay within LM_STATES_KEPT, as one scorer's: then all are dropped)
+        s = lm.Scorer(lm.shared().lm, lm.shared().lexicon)
+        with unittest.mock.patch.object(lm, "LM_STATES_KEPT", 40):
+            a, b = s.view("我們"), s.view("先去")
+            a.state("再去看電影吃飯睡覺洗澡")
+            b.state("再去看電影吃飯睡覺洗澡")  # (each holds 11 + 1: 24 together)
+            self.assertEqual(len(a.states) + len(b.states), 24)
+            b.state("一二三四五六七八九十甲乙丙丁戊己庚辛壬癸")  # (past 40 together: all dropped, then filled again)
+            self.assertLess(len(a.states) + len(b.states), 40)
+            self.assertEqual(len(a.states), 1)  # (only its start)
+
     def test_view_starts_from_context(self):
         s = lm.shared()
         ctx, text = "我們先去吃飯", "再去看電影"
@@ -6841,7 +6887,8 @@ class LmContextTest(unittest.TestCase):
         with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
             for k in "ok " + self.keys("ㄗㄞˋ ㄑㄩˋ"):
                 c.key(k)
-        self.assertEqual(seen, [])  # (the buffer starts with English: its Chinese run reads no context)
+        # (the buffer starts with English: its Chinese run reads what was sent too - the user's call 2026-11-15, #42)
+        self.assertIn("我們", seen)
 
     def test_context_after_punctuation_that_starts_the_buffer(self):
         # (, is ㄝ too: typed after a sentence sent it stays in the buffer with what comes next, whose Chinese still
@@ -6856,7 +6903,7 @@ class LmContextTest(unittest.TestCase):
         self.assertEqual([t.kind for t in c.tokens][:2], ["lit", "zh"])
         self.assertIn("先回家洗澡", seen)
 
-    def test_no_context_after_punctuation_then_english(self):
+    def test_context_after_punctuation_then_english(self):
         c = self.composer()
         self.send(c, self.keys("ㄒㄧㄢ ㄏㄨㄟˊ ㄐㄧㄚ ㄒㄧˇ ㄗㄠˇ"))
         seen = []
@@ -6864,7 +6911,7 @@ class LmContextTest(unittest.TestCase):
         with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
             for k in ",ok " + self.keys("ㄗㄞˋ ㄑㄩˋ"):
                 c.key(k)
-        self.assertEqual(seen, [])  # (English between: its Chinese reads no context, as without the comma)
+        self.assertIn("先回家洗澡", seen)  # (English between reads what was sent too, #42)
 
     def test_context_head_commit(self):
         c = self.composer()
@@ -6883,6 +6930,129 @@ class LmContextTest(unittest.TestCase):
 
     def test_defaults_lm_context(self):
         self.assertIs(DEFAULTS["lm_context"], True)
+
+
+class ContextAcrossEnglishTest(unittest.TestCase):
+    """#42: in one buffer, the Chinese after English, letters and digits or punctuation reads the Chinese before it (and
+    what was just sent while 接續前文選字 is on), the last LM_CONTEXT characters; only with 長句選字加強 on."""
+
+    GITHUB = "ji356ru, 5k4u;4283cjo41o4Github1u04g4t/6tj/6zj4a87"  # 我直接這樣打會被Github辨識成重複嗎
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.assertIsNotNone(lm.shared(), "data/lm.bin or numpy missing")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def composer(self, **settings):
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS, long_sentence=True, lm_context=True)
+        c.config.values.update(settings)
+        c.settings_changed()
+        if settings.get("simplified"):
+            c.user.set_simplified(True)
+        return c
+
+    def keys(self, readings):
+        from engine.zhuyin import reading_to_keys
+        return "".join(reading_to_keys(r) for r in readings.split())
+
+    def send(self, c, raw):
+        for k in raw:
+            c.key(k)
+        c.key(special="ENTER")
+
+    def typed(self, c, raw):
+        """The contexts of the views asked for while typing raw."""
+        seen = []
+        real = lm.Scorer.view
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
+            for k in raw:
+                c.key(k)
+        return seen
+
+    def test_github_example(self):
+        c = self.composer()
+        for k in self.GITHUB:
+            c.key(k)
+        self.assertEqual(c.composition, "我直接這樣打會被Github辨識成重複嗎")
+
+    def test_two_english_gaps(self):
+        c = self.composer()
+        seen = self.typed(c, self.keys("ㄨㄛˇ ㄩㄥˋ") + "Github" + self.keys("ㄏㄜˊ") + "Gitlab" + self.keys("ㄅㄧˇ ㄐㄧㄠˋ"))
+        self.assertEqual(c.composition, "我用Github和Gitlab比較")
+        self.assertIn("我用和", seen)  # (the third run reads both runs before it)
+
+    def test_punctuation_between_runs(self):
+        c = self.composer()
+        seen = self.typed(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ") + "," + self.keys("ㄗㄞˋ ㄑㄩˋ"))
+        self.assertIn("我們先去吃飯", seen)
+
+    def test_later_run_reads_picked_text(self):
+        c = self.composer()
+        for k in self.keys("ㄕˋ") + "ok " + self.keys("ㄗㄞˋ ㄑㄩˋ"):
+            c.key(k)
+        first = c.composition[0]
+        c.key(special="HOME")
+        c.key(special="DOWN")
+        other = next(x for x in c.candidates if len(x) == 1 and x != first)
+        seen = self.typed(c, str(c.candidates.index(other) + 1))
+        self.assertEqual(c.composition[0], other)
+        self.assertIn(other, seen)
+
+    def test_later_run_context_traditional_in_simplified(self):
+        c = self.composer(simplified=True)
+        seen = self.typed(c, self.keys("ㄉㄧㄢˋ ㄋㄠˇ") + "ok " + self.keys("ㄗㄞˋ ㄑㄩˋ"))
+        self.assertIn("電腦", seen)  # (Traditional, as what was sent: 电脑 shown)
+
+    def test_buffer_starting_english_reads_sent(self):
+        c = self.composer()
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ"))
+        seen = self.typed(c, "Github" + self.keys("ㄗㄞˋ ㄑㄩˋ"))
+        self.assertIn("我們先去吃飯", seen)
+
+    def test_lm_context_off_later_runs_still_read(self):
+        c = self.composer(lm_context=False)
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ"))
+        seen = self.typed(c, self.keys("ㄨㄛˇ ㄩㄥˋ") + "Github" + self.keys("ㄗㄞˋ ㄑㄩˋ"))
+        self.assertEqual(seen, [s for s in seen if "吃飯" not in s])  # (what was sent: not read)
+        self.assertIn("我用", seen)
+
+    def test_order_check_reads_the_same_context(self):
+        # (digits out of order at the end of a run, 注音自動校正: the model asked whether 吧 is expected reads what convert
+        # reads - what was sent, then the runs before as the engine would write them; review backlog 2026-11-15)
+        c = self.composer(autocorrect=True)
+        self.send(c, self.keys("ㄒㄧㄢ ㄏㄨㄟˊ ㄐㄧㄚ"))
+        asked = []
+        real = lm.Scorer.syllable_mass_q16
+        with unittest.mock.patch.object(lm.Scorer, "syllable_mass_q16",
+                                        lambda s, before, syl: asked.append(getattr(s, "_context", "")) or
+                                        real(s, before, syl)):
+            for k in self.keys("ㄨㄛˇ ㄇㄣ˙") + "ok " + "ji3ap7y.3817":
+                c.key(k)
+        self.assertIn("先回家我們", asked)
+
+    def test_order_check_leaves_numbers_out_of_the_context(self):
+        # (an earlier run's digits that stayed a number read no Chinese, as convert reads them: not 我們走大 - code-reviewer
+        # 2026-11-15)
+        c = self.composer(autocorrect=True)
+        asked = []
+        real = lm.Scorer.syllable_mass_q16
+        with unittest.mock.patch.object(lm.Scorer, "syllable_mass_q16",
+                                        lambda s, before, syl: asked.append(getattr(s, "_context", "")) or
+                                        real(s, before, syl)):
+            for k in "ji3ap7y.3824 ok ji3ap7y.3824":
+                c.key(k)
+        self.assertIn("我們走", asked)
+        self.assertNotIn("我們走大", asked)
+
+    def test_off_unchanged(self):
+        c = self.composer(long_sentence=False)
+        seen = self.typed(c, self.GITHUB)
+        self.assertEqual(seen, [])
+        # (as before #42; without the model the engine already wrote 辨識成: the model reading 辨識成 from <s> made 便是成)
+        self.assertEqual(c.composition, "我直接這樣打會被Github辨識成重複嗎")
 
 
 class SimplifiedTypingTest(unittest.TestCase):

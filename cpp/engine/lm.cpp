@@ -384,15 +384,23 @@ LmScorer::LmScorer(const CharLM& lm, const Lexicon& lexicon) : lm_(lm), lexicon_
 }
 
 LmScorer::LmScorer(const LmScorer& base, const ustr& context)
-    : lm_(base.lm_), lexicon_(base.lexicon_), cands_(base.cands_), context_(context) {
+    : lm_(base.lm_), lexicon_(base.lexicon_), cands_(base.cands_), context_(context), base_(&base) {
     start_ = lm_.start();
     for (char32_t ch : context_) start_ = lm_.step(start_, lm_.id(ch));
     clear();
 }
 
 const LmScorer* LmScorer::view(const ustr& context) const {
-    if (!view_ || view_->context_ != context) view_.reset(new LmScorer(*this, context));
-    return view_.get();
+    // (the last LM_VIEWS_KEPT kept, the one used most lately first; a pointer given out stays valid until a later
+    // call drops its view: convert_all uses each view before asking for the next)
+    for (auto it = views_.begin(); it != views_.end(); ++it)
+        if ((*it)->context_ == context) {
+            if (it != views_.begin()) views_.splice(views_.begin(), views_, it);
+            return views_.front().get();
+        }
+    views_.emplace_front(new LmScorer(*this, context));
+    if (views_.size() > LM_VIEWS_KEPT) views_.pop_back();
+    return views_.front().get();
 }
 
 const std::vector<int>* LmScorer::candidates(const ustr& syllable) const {
@@ -408,9 +416,25 @@ void LmScorer::clear() const {
 }
 
 void LmScorer::room() const {
-    if (states_.size() >= LM_STATES_KEPT || score_cache_.size() >= LM_STATES_KEPT ||
-        mass_cache_.size() >= LM_STATES_KEPT)
-        clear();
+    if (!base_) {
+        if (states_.size() >= LM_STATES_KEPT || score_cache_.size() >= LM_STATES_KEPT ||
+            mass_cache_.size() >= LM_STATES_KEPT)
+            clear();
+        return;
+    }
+    // (a view: all the views' caches together within the one budget, then all dropped - engine/lm.py Scorer._room)
+    size_t states = 0, scores = 0, masses = 0;
+    bool listed = false;
+    for (auto& v : base_->views_) {
+        states += v->states_.size();
+        scores += v->score_cache_.size();
+        masses += v->mass_cache_.size();
+        listed = listed || v.get() == this;
+    }
+    if (states >= LM_STATES_KEPT || scores >= LM_STATES_KEPT || masses >= LM_STATES_KEPT) {
+        for (auto& v : base_->views_) v->clear();
+        if (!listed) clear();  // (a view already dropped from the list, still in use by its caller)
+    }
 }
 
 void LmScorer::prepare(const std::vector<ustr>& texts) const {

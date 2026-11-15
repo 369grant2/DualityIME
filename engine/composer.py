@@ -145,7 +145,7 @@ class Token:
 
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
-             taken=None, bigram=None, lm=None):
+             taken=None, bigram=None, lm=None, sent=""):
     """Split raw keys into the cheapest sequence of tokens.
 
     literal: raw offsets of keys that are always themselves (numpad digits and
@@ -157,7 +157,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
     taken: {start: (end, reading)} keys read as the given syllable (注音自動校正: picked from
         the list, si3 as ㄋㄧˇ); they cut the text too.
     lm: 長句選字加強's scorer (None: off), asked about digits out of order at the end of a run
-        (_check_corrections).
+        (_check_corrections); sent: what was just sent (接續前文選字), read first (#37, #42).
     Other arguments: see _tokenize_run.
     """
     cuts = sorted([(p, p + 1, None) for p in literal if p < len(raw)] +
@@ -167,7 +167,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
     if not cuts:
         tokens = _tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese, lexicon,
                                breaks, exact)
-        return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm) if table.autocorrect else tokens
+        return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent) if table.autocorrect else tokens
     tokens, start = [], 0
     for a, b, text in cuts + [(len(raw), len(raw), None)]:
         if a < start:
@@ -190,7 +190,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
             else:
                 tokens.append(Token("fix", raw[a:b], text, a))
         start = b
-    return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm) if table.autocorrect else tokens
+    return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent) if table.autocorrect else tokens
 
 
 def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=False,
@@ -209,8 +209,14 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
     exact: raw offsets where a syllable is not autocorrected.
     """
     n = len(raw)
-    best = [None] * (n + 1)
-    best[0] = (0.0, [])
+    # best[j]: the cheapest split of raw[:j] whose last token is zhuyin right after English with no space (English cut
+    # short there, the switch paid), and the cheapest of all the others, in the order first reached. Kept apart, as one
+    # they lost to a longer English token whose switch was still to come (Session + 能: the English Sessions/6 cost less
+    # up to 6, then 順 after it cost more than after 能 - #42). Only that one: keeping every kind of last token apart, or
+    # all English apart, let splits through that the costs were never tuned for, tuned as they are against a longer
+    # English token's switch still to come (u dk y h0 dl3 as English u, dk, y; gpt4 as 申斥; mp3 learned as English, 允).
+    best = [{} for _ in range(n + 1)]
+    best[0] = {None: (0.0, [])}
     learned = user.english if user else set()
     mine = user.sure_english() if user else set()  # 自訂詞彙's English words, and the ones sent twice
     # 代碼記憶: codes the user put back as typed twice are English too (mp3, not 允), the setting on or off
@@ -295,6 +301,15 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
             # digits right after a zhuyin key read as punctuation: the u,4 of sugatau,4 is 頁,
             # not sugatau + ， + 4 (the same as the 2; of youtube2;, the other way round)
             cost += EN["digit_symbol"]
+        if tok.kind in ("zh", "partial") and any(tok.start < f < j for f in forced):
+            # (a syllable swallowing a key the user asked to be English: u,4 picked as typed in sugatau,4 - not 滅 from
+            # the a before it, #42)
+            cost -= COST_FORCED_TOKEN
+        if tok.kind == "en" and tok.raw[0].isalpha() and prev[1] and prev[1][-1].kind == "zh" and \
+                prev[1][-1].corrected and not prev[1][-1].raw.endswith(" "):
+            # letters right after a syllable 注音自動校正 made of keys typed otherwise: likelier one English word
+            # (tmux, bella: not 吃 + ux, 日 + lla - #42)
+            cost += EN["switch"]
         if prev[1] and prev[1][-1].kind == "en" and not prev[1][-1].raw.endswith(" "):
             if tok.kind == "en":
                 return  # (two pieces side by side are one piece, scored as such)
@@ -302,6 +317,14 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
                 # zhuyin right after English, no space between: the switch, and the more
                 # common the syllable the likelier (python是, not pytho + 裸 for pythoxji3)
                 cost += EN["switch"] + EN["rarity"] * max(0.0, -table.score(tok.value) - 2.0)
+                # ...twice for a syllable of digit keys alone right after digits, or one that starts with a symbol key:
+                # likelier more of the number or the term (1994年, not 19 + 愛 + 年; IL-6在, not IL + 而; 85大樓 stays,
+                # 大樓 a word). What the switch weighed before each place kept its cheapest split alone (#42).
+                # (and one 注音自動校正 made, a digit key first, right after digits: 65歲, not 6 + 之為)
+                if (prev[1][-1].raw[-1].isdigit() and (tok.raw.rstrip(" ").isdigit() or
+                                                       (tok.corrected and tok.raw[0].isdigit()))) or \
+                        not tok.raw[0].isalnum():
+                    cost += EN["switch"]
                 # after capitals the switch costs nothing when the zhuyin starts with a lower-case key -
                 # but a syllable of one letter is as likely the end of a term (RNAi, USDt, dBu, mmHg: i, t,
                 # u, g with the space are ㄛ ㄔ ㄧ ㄕ), so it gets what it got before unless it starts a
@@ -328,13 +351,27 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
                 # not youtube2 + ； (the same as the 2; inside a piece, below)
                 cost += EN["digit_symbol"]
         c = prev[0] + cost
-        if best[j] is None or c < best[j][0]:
-            best[j] = (c, prev[1] + [tok])
+        # (zhuyin right after English with no space - English cut short there - apart from every other split: see best)
+        # (not English the user asked for: cut short, it would not stay as typed - si3 picked from the bar)
+        state = tok.kind in ("zh", "partial") and bool(prev[1]) and prev[1][-1].kind == "en" and \
+            not prev[1][-1].raw.endswith(" ") and prev[1][-1].start not in forced
+        old = best[j].get(state)
+        if old is None or c < old[0]:
+            best[j][state] = (c, prev[1] + [tok])
 
-    for i in range(n):
-        prev = best[i]
-        if prev is None:
-            continue
+    def going_on(i):
+        """The splits up to i to go on from (by then every token ending at i has been offered): both kinds only while
+        the other one ends in English with no space, its switch still to come; else the cheaper alone (a tie: the
+        first reached) - what one split a place gave before, and half the work (#42)."""
+        splits = list(best[i].values())
+        if len(splits) == 2:
+            other = best[i].get(False)
+            last = other[1][-1] if other and other[1] else None
+            if not (last is not None and last.kind == "en" and not last.raw.endswith(" ")):
+                splits = [min(splits, key=lambda v: v[0])]
+        return splits
+
+    for i, prev in ((i, p) for i in range(n) for p in going_on(i)):
         ch = raw[i]
         bonus = COST_FORCED_TOKEN if i in forced else -COST_FORCED_TOKEN if i in chinese else 0.0
         # complete syllable
@@ -476,7 +513,7 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
                 offer(j + 1, cost, prev, Token("en", piece + " ", piece + " ", i))
             else:
                 offer(j, cost, prev, Token("en", piece, piece, i))
-    tokens = best[n][1] if best[n] else []
+    tokens = min(best[n].values(), key=lambda v: v[0])[1] if best[n] else []  # (a tie: the first reached)
     return tokens if digits_as_zhuyin else _digits_to_numbers(tokens, after_english, chinese)
 
 
@@ -656,14 +693,15 @@ def _zh_runs(tokens):
         yield run
 
 
-def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers):
+def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers, context=lambda: ""):
     """Digits out of order run[k], about to become a number: the model expects the syllable after
     the Chinese before it enough to keep it (我們走817 -> 我們走吧, 房間號碼是817 stays). Only the last
     syllable of a run with Chinese before it, and nothing being typed right after (the first key of
     個: 我們走817 stays, not 我們走吧ㄍ and 817個 back). The text before is the engine's own choice for
     the syllables as read so far (before the other corrections), from the start of the run - or from
     after the last of its tokens already made a number (numbers: 我們走817個817 asks after 個, not
-    after 我們走吧個, which the user never sees)."""
+    after 我們走吧個, which the user never sees). From the start of the run the model reads context() first: what was
+    just sent and the Chinese of the runs before, as convert reads them (#42)."""
     t = run[k]
     threshold = ORDER_LM_THRESHOLDS_Q16.get(t.value)
     if lm is None or lexicon is None or threshold is None or k != len(run) - 1:
@@ -677,10 +715,14 @@ def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers
     before = "".join(p for _, _, p in convert(readings[first:k], lexicon, user, {}, bigram))
     if len(before) != k - first:
         return False
+    if first == 0:
+        ctx = context()
+        if ctx:
+            lm = lm.view(ctx)
     return lm.syllable_mass_q16(before, t.value) >= threshold
 
 
-def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None):
+def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None, sent=""):
     """The 注音自動校正 that needs the words around a syllable, once the keys are split:
     digits read out of order (817) stay zhuyin on their own (吧) or in a word (好吧), or at the end
     of a run when 長句選字加強's model expects the syllable there (lm, _model_reads_it: 我們走吧), else they
@@ -703,6 +745,14 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
     alone = {id(t) for i, t in enumerate(tokens) if t.corrected == "order" and
              all(not (0 <= x < len(tokens)) or tokens[x].kind not in ("zh", "partial", "en") for x in (i - 1, i + 1))}
     numbers = set()
+    # (the readings of the runs before: _model_reads_it's context is what was sent, then the engine's own choice for
+    # them, as its text before - worked out only when asked for)
+    earlier = []
+
+    def context():
+        text = "".join(ch for e in earlier for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p if is_han(ch))
+        return (sent + text)[-LM_CONTEXT:]
+
     for run in _zh_runs(tokens):
         readings = [t.value for t in run]
         for k, t in enumerate(run):
@@ -711,8 +761,18 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
             elif t.corrected == "order" and id(t) not in alone:
                 gain = _better_word(readings, k, lexicon, user) if lexicon is not None else None
                 if (gain is None or gain <= ORDER_DIGITS_GAIN) and \
-                        not _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers):
+                        not _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers, context):
                     numbers.add(id(t))
+        part = []  # (the run as convert will see it: cut where its digits became a number, which reads no Chinese)
+        for t in run:
+            if id(t) in numbers:
+                if part:
+                    earlier.append(part)
+                part = []
+            else:
+                part.append(t.value)
+        if part:
+            earlier.append(part)
     if numbers:
         out = []
         for t in tokens:
@@ -1619,7 +1679,8 @@ class Composer:
                     pinned[old[s + k].start] = (old[s + k].raw, v[0][k])
         self.tokens = tokenize(self.raw, self.table, self.user, self.english, self.forced,
                                self.after_english, self.digits_as_zhuyin, self.literal, self.chinese, self.fixed,
-                               self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm())
+                               self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
+                               self._sent_context())
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
@@ -1670,6 +1731,17 @@ class Composer:
         self._lm_on = self.config.long_sentence
         return language_model.shared(lexicon=self.lexicon) if self._lm_on else None
 
+    def _sent_context(self):
+        """What was just sent while 接續前文選字 is on (#37): read before the buffer, "" for none."""
+        return self.lm_context if self.config.lm_context else ""
+
+    def _run_context(self, before):
+        """What the model reads before a run of the buffer (長句選字加強 on): what was just sent while 接續前文選字 is on
+        (#37), then the Chinese characters of the runs before it, as converted (before: their (start, length,
+        phrase), Traditional) - the last LM_CONTEXT characters, "" for none."""
+        earlier = "".join(ch for _, _, p in before for ch in p if is_han(ch))
+        return (self._sent_context() + earlier)[-LM_CONTEXT:]
+
     def _convert_all(self, overrides=None):
         """Convert each maximal run of zh tokens; returns per-syllable phrases. overrides:
         instead of the user's picks ({}: what it would be without them)."""
@@ -1691,21 +1763,17 @@ class Composer:
             runs.append((run_start, idx))
         starts_buffer = bool(self.tokens) and self.tokens[0].kind == "zh"
         lm = self._lm()
-        # 接續前文選字 (#37): the run that starts the buffer is read after what was just sent - also after punctuation
-        # that starts it (, is ㄝ too: typed after a sentence sent, it waits in the buffer with what comes next; the
-        # user's call 2026-11-15). The word sent last (prev) stays for the buffer's very start only.
-        first = next((k for k, t in enumerate(self.tokens) if t.kind == "zh"), None)
-        reads = first is not None and all(t.kind == "lit" and not any(ch.isascii() and ch.isalnum() for ch in t.raw)
-                                          for t in self.tokens[:first])  # (ASCII letters and digits, as the C++ engine)
-        use = reads and lm is not None and self.lm_context and self.config.lm_context
-        first_lm = lm.view(self.lm_context) if use else lm
+        # The model reads each run after what comes before it (_run_context): what was just sent (接續前文選字, #37) and
+        # the Chinese of the runs before it in the buffer, across English, digits and punctuation (#42). The word sent
+        # last (prev) stays for the buffer's very start only.
         for a, b in runs:
             ov = {(s - a, l): v[1] for (s, l), v in overrides.items() if a <= s and s + l <= b}
             prev = self.context_word if a == 0 and starts_buffer else None
             # (one syllable and no English word: punctuation, or the next syllable being typed, do
             # not make it a sentence - 輸, is as picked)
             alone = len(self.readings) == 1 and all(t.kind != "en" for t in self.tokens)
-            run_lm = first_lm if a == 0 and reads else lm
+            context = self._run_context(out) if lm is not None else ""
+            run_lm = lm.view(context) if context else lm
             for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, run_lm, alone):
                 out.append((a + s, l, p))
         self.runs = runs
@@ -2862,7 +2930,7 @@ class Composer:
         trial = tokenize(self.raw, self.table, self.user, self.english, forced, self.after_english,
                          self.digits_as_zhuyin, self.literal - set(unlit), (self.chinese - set(unchinese)) | {s},
                          {a: v for a, v in self.fixed.items() if a != unfix}, self.lexicon, self.breaks,
-                         self.exact, self.taken, self.bigram, self._lm())
+                         self.exact, self.taken, self.bigram, self._lm(), self._sent_context())
         inside = [t for t in trial if s <= t.start < end]
         if not inside or inside[0].start != s or any(t.kind != "zh" for t in inside) or \
                 inside[-1].start + len(inside[-1].raw) != end:

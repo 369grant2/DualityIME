@@ -38,6 +38,8 @@ static class SettingsTest {
             Check("遊戲中 Shift 交給遊戲 is on as it comes, game_mode is gone (#31)",
                   (bool)cfg["game_keys"] && !cfg.ContainsKey("game_mode"), json.Serialize(cfg));
 
+            // 接續前文選字 (#37): on as it comes, with 長句選字加強
+            Check("接續前文選字 default", (bool)cfg["lm_context"] && (bool)cfg["long_sentence"], json.Serialize(cfg));
             // 簡體輸出 (#32): off, its key off, Ctrl+F1 as it comes; a key that is no shortcut is refused
             Check("簡體輸出 defaults", !(bool)cfg["simplified"] && !(bool)cfg["simplified_hotkey"] &&
                   (string)cfg["simplified_key"] == "Ctrl+F1", json.Serialize(cfg));

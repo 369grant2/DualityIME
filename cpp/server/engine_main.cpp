@@ -245,6 +245,8 @@ Json handle(Session& s, const Json& req) {
         return o;
     } else if (op == "reset") {
         c.reset();
+    } else if (op == "context_lost") {  // 接續前文選字 (#37): what is before the caret is not what was sent
+        c.context_lost();
     } else if (op == "forget_undo") {
         c.forget_undo();
     } else if (op == "close_symbols") {  // (the symbol keyboard, or 快速填入 opened from it)
@@ -269,7 +271,9 @@ Json handle(Session& s, const Json& req) {
             if (auto ch = one_char(req.get("ch")))
                 out += c.config.flag("full_width") ? to_full_width(ustr(1, *ch)) : ustr(1, *ch);
         }
+        ustr context = c.lm_context();  // (what was just sent stays right before the caret: #37)
         c.reset();
+        c.keep_context(context);
         c.commit = out;
     }
     Json o = state(s, handled);

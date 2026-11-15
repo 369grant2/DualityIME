@@ -112,6 +112,11 @@ public:
     // letters and digits, which stay the app's shortcuts.
     bool type_full_punct(char32_t ch);
     void reset();
+    // 接續前文選字 (#37): what is before the caret is no longer what was sent (the front end checks it): the model
+    // reads no context until something is sent again
+    void context_lost() { lm_context_.clear(); }
+    void keep_context(const ustr& context) { lm_context_ = context; }  // (engine_main's flush, after reset)
+    const ustr& lm_context() const { return lm_context_; }
     bool toggle_full_width();
     bool toggle_simplified();  // 簡體輸出 (#32): Traditional <-> Simplified, remembered in the settings
     void settings_changed();
@@ -198,6 +203,7 @@ private:
         TermPicks term_picks;
         std::vector<TermChange> terms;  // what 簡體輸出 learned of the Mainland words (#32)
         std::vector<UserModel::SimpDrop> dropped;  // what a pick in Traditional mode took of Simplified mode's memory
+        ustr lm_context;  // what 接續前文選字 read before this commit (#37)
     };
 
     void clear_input();
@@ -335,6 +341,8 @@ private:
     mutable bool lm_on_ = false;  // long_sentence when lm() was last asked (settings_changed)
 
     std::optional<ustr> context_word_;
+    ustr lm_context_;  // 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT characters)
+    void sent(const std::vector<ustr>& phrases);  // their Chinese characters into lm_context_
     bool after_english_ = false;
     std::optional<std::pair<ustr, Undo>> last_commit_;
     Overrides overrides_;

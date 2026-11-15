@@ -10,7 +10,7 @@
 //     (where the photo goes: tests/photo_places.json)
 // Script lines: characters as typed, {DOWN} {ENTER} ... special keys,
 // {#5} a numpad key, {CAPS} Caps Lock on/off, {UNDO} take back the last commit,
-// {FW} 全形 on/off, {SC} 簡體輸出 on/off (#32), {RESET} focus change, {LB} a literal "{".
+// {FW} 全形 on/off, {SC} 簡體輸出 on/off (#32), {RESET} focus change, {CL} context lost (#37), {LB} a literal "{".
 #include <chrono>
 #include <cstdio>
 #include <crtdbg.h>
@@ -204,6 +204,7 @@ int main(int argc, char** argv) {
                 else if (name == "FW") extra = std::string("fw:") + (c.toggle_full_width() ? "1" : "0");
                 else if (name == "SC") extra = std::string("sc:") + (c.toggle_simplified() ? "1" : "0");
                 else if (name == "RESET") c.reset();
+                else if (name == "CL") c.context_lost();  // (接續前文選字's context dropped, #37)
                 else if (name == "LB") extra = c.key(U'{', "", caps) ? "1" : "0";
                 else if (name[0] == '#') extra = c.type_literal(static_cast<char32_t>(name[1])) ? "1" : "0";
                 else if (name[0] == '^') extra = c.type_full_punct(static_cast<char32_t>(name[1])) ? "1" : "0";

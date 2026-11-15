@@ -34,7 +34,9 @@ teacher_rerank._job) and this script's candidate lists come from tools/lm/decode
 convert() (docs/review-backlog.md): step 6 is the measure that counts.
 
 Student score of a candidate = sum over its characters of log10 P(ch | before) among the characters the
-dictionary writes for that syllable (the engine's Scorer.phrase_score); combined as the engine does:
+dictionary writes for that syllable (the engine's Scorer.phrase_score); a row with "ctx" (gen_train.py --context,
+#37 接續前文選字) is read after it: <s> + ctx + the candidate, scored on the candidate's characters only, and its
+teacher score is the one of the text after that context (key ctx + tab + text). Combined as the engine does:
 engine + w * student, w learnt (starts at the shipped 0.5).
 Target: softmax over each sentence's n-best of ln10 * (engine + tlam * teacher). Loss: cross-entropy
 of the student's softmax against it (listwise distillation).
@@ -63,6 +65,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 from train import SIZES, CharLM, BOS  # noqa: E402
 
 from common import WORK  # noqa: E402  (DUALITYIME_LM_WORK moves it)
+from gpu import note, tidy  # noqa: E402
 OUT = os.path.join(WORK, "teacher_rerank")
 DIST = os.path.join(OUT, "distill")
 LN10 = math.log(10)
@@ -92,10 +95,13 @@ class Data:
         if not rd:
             return None
         n = len(rd)
+        c = "" if os.environ.get("TR_NOCTX") else r.get("ctx", "")  # (TR_NOCTX: the control without contexts)
         hyps, eng, tgt, tch, full = [], [], [], [], []
         for t, e, _ in r["hyps"]:
             eng.append(e)
-            tch.append(teacher.get(t) if teacher else None)
+            # (a row's teacher score is the one after its own context, kept for the control without contexts too)
+            full_c = r.get("ctx", "")
+            tch.append(teacher.get(full_c + "\t" + t if full_c else t) if teacher else None)
             full.append(t)
             if len(t) != n:  # (the engine alone, as shipped)
                 hyps.append(None)
@@ -106,7 +112,7 @@ class Data:
             hyps.append(np.array(ids, dtype=np.int32))
             tgt.append(np.array(pos, dtype=np.int32))
         return {"text": r["text"], "base": r["base"], "syl": rd, "hyps": hyps, "full": full, "eng": eng,
-                "tgt": tgt, "teacher": tch}
+                "tgt": tgt, "teacher": tch, "ctx": np.array([self.ids.get(ch, 0) for ch in c], dtype=np.int32)}
 
 
 def score_hyps(model, rows, data, device):
@@ -115,17 +121,22 @@ def score_hyps(model, rows, data, device):
     if not seqs:
         return out
     L = max(len(rows[ri]["hyps"][hi]) for ri, hi in seqs)
+    C = max(len(rows[ri]["ctx"]) for ri, _ in seqs)  # (the longest context: <s> + ctx + candidate)
     K = max((len(data.cands[s]) for ri, _ in seqs for s in rows[ri]["syl"] if s in data.cands), default=1)
     B = len(seqs)
-    x = torch.full((B, L), BOS, dtype=torch.long)
+    x = torch.full((B, C + L), BOS, dtype=torch.long)
+    at = torch.zeros((B, L), dtype=torch.long)  # (the position whose output scores each character: after its context)
     cand = torch.full((B, L, K), -1, dtype=torch.long)
     tgt = torch.full((B, L), -1, dtype=torch.long)
     mats = {}
     for b, (ri, hi) in enumerate(seqs):
         row = rows[ri]
         ids = row["hyps"][hi]
-        n = len(ids)
-        x[b, 1:n] = torch.from_numpy(ids[:-1].astype(np.int64))
+        n, c = len(ids), len(row["ctx"])
+        if c:
+            x[b, 1:1 + c] = torch.from_numpy(row["ctx"].astype(np.int64))
+        x[b, 1 + c:c + n] = torch.from_numpy(ids[:-1].astype(np.int64))
+        at[b] = torch.arange(L) + c
         if ri not in mats:
             m = torch.full((n, K), -1, dtype=torch.long)
             for k, s in enumerate(row["syl"]):
@@ -135,8 +146,9 @@ def score_hyps(model, rows, data, device):
             mats[ri] = m
         cand[b, :n] = mats[ri]
         tgt[b, :n] = torch.from_numpy(row["tgt"][hi].astype(np.int64))
-    x, cand, tgt = x.to(device), cand.to(device), tgt.to(device)
-    logits, _ = model(x)                                     # [B, L, V]
+    x, at, cand, tgt = x.to(device), at.to(device), cand.to(device), tgt.to(device)
+    logits, _ = model(x)                                     # [B, C + L, V]
+    logits = logits.gather(1, at.clamp(max=C + L - 1)[..., None].expand(-1, -1, logits.size(-1)))  # [B, L, V]
     valid = cand >= 0
     g = logits.float().gather(2, cand.clamp(min=0))          # [B, L, K]
     g = g.masked_fill(~valid, -1e9)
@@ -153,10 +165,10 @@ def evaluate(model, w, ev, data, device, label):
     model.eval()
     lines = []
     with torch.no_grad():
-        for name in SETS:
-            rows = ev[name]
+        for name, rows in ev.items():  # (teacher_rerank.SETS, and TR_EXTRA's: the sets with contexts)
             right = ship = w2r = r2w = 0
             for i in range(0, len(rows), 32):
+                tidy()  # (the sets' shapes change too: contexts of every length)
                 chunk = rows[i:i + 32]
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     sc = score_hyps(model, chunk, data, device)
@@ -208,12 +220,14 @@ def main():
     teacher = json.load(open(os.path.join(DIST, f"teacher_{tname}.json"), encoding="utf-8"))
     train = []
     with open(os.path.join(DIST, dfile), encoding="utf-8") as f:
-        for line in f:
+        for k, line in enumerate(f, 1):
             row = data.row(json.loads(line), teacher)
             if row and sum(h is not None for h in row["hyps"]) >= 2:
                 train.append(row)
             if limit and len(train) >= limit:
                 break
+            if k % 200000 == 0:  # (gpu_run.py watches the log grow: millions of rows take minutes)
+                print(f"  read {k} rows, {len(train)} kept", flush=True)
     del teacher
     import teacher_rerank as tr
     ev = {}
@@ -331,14 +345,17 @@ def main():
             opt.step()
             sched.step()
             step += 1
+            tidy()  # (tools/lm/gpu.py: without it the GPU spills into system memory and the job crawls)
             if step % 500 == 0:
-                msg = f"ep {ep} step {step}/{steps} loss {loss.item():.4f} w {w.item():.3f} {time.time() - t0:.0f}s"
+                msg = (f"ep {ep} step {step}/{steps} loss {loss.item():.4f} w {w.item():.3f} {time.time() - t0:.0f}s"
+                       + note())
                 print(msg, flush=True)
                 log.write(msg + "\n")
                 log.flush()
         log.write(evaluate(model, math.exp(wlog.item()), ev, data, device, f"epoch {ep + 1}") + "\n")
         log.flush()
         torch.save(model.state_dict(), os.path.join(DIST, f"{name}.pt"))
+        torch.save(model.state_dict(), os.path.join(DIST, f"{name}_ep{ep + 1}.pt"))  # (each epoch kept: the best is picked)
         json.dump({"size": size, "emb": emb, "hidden": hidden, "layers": layers, "vocab": len(data.vocab),
                    "w": math.exp(wlog.item()), "teacher": tname, "tlam": tlam, "init": init, "data": dfile,
                    "epochs": ep + 1}, open(os.path.join(DIST, f"{name}.json"), "w", encoding="utf-8"))

@@ -25,6 +25,15 @@ from engine.zhuyin import reading_to_keys  # noqa: E402
 EXE = os.path.join(ROOT, "cpp", "build", "x64-Release", "sz_trace.exe")
 
 CASES = [
+    # 接續前文選字 (#37): 我們先去吃飯 sent, then ㄗㄞˋ去看電影 read after it; after {CL} (the caret moved) and after
+    # English at the buffer's start, without it; three sentences in a row; undo puts the context back
+    "ji3ap7vu0 fm4t z04{ENTER}y94fm4d042u04u/3{ENTER}ji3ap7vu0 fm4t z04{ENTER}{CL}y94fm4d042u04u/3{ENTER}",
+    "ji3ap7vu0 fm4t z04{ENTER}ok y94fm4d042u04u/3{ENTER}ji3ap7{ENTER}ji3ap7vu0 {ENTER}y94fm4{ENTER}",
+    "ji3ap7vu0 fm4t z04{ENTER}y94fm4{ENTER}{UNDO}{ESC}{ESC}y94fm4d042u04u/3{ENTER}",
+    # (a 映射詞彙 sent is read too: zqx -> 先回家洗澡, then ㄗㄞˋ去看電影 gives 再; without it 在)
+    "{CL}zqx{DOWN}1y94fm4d042u04u/3{ENTER}",
+    # (a comma typed after a sentence sent waits in the buffer (, is ㄝ too): the Chinese after it still reads the context)
+    "{CL}vu0 cjo6ru8 vu3yl3{ENTER},y94fm4d042u04u/3{ENTER}{CL},y94fm4d042u04u/3{ENTER}",
     # 簡體輸出 (#32; every setting types them, the last one in Simplified mode): 軟體's Mainland word picked twice
     # (then by itself), picked back; 位元組 shown as the shorter 字節, the caret over it and a key taken back;
     # 光驅 (a Mainland word the dictionary lacks), 導出, 影片
@@ -323,6 +332,7 @@ CONFIGS = [
     {"cand_keys": "1234qweras", "cand_layout": "grid",  # other candidate keys, a grid (#23)
      "no_quick_fill": True},  # (not a setting: no quick_fill.json, so 快速填入 lists its samples, #33)
     {"simplified": True},  # 簡體輸出 (#32): shown and sent in Simplified characters, its memory in user_simplified.json
+    {"lm_context": False},  # 接續前文選字 off ({} above: on, the default; #37)
 ]
 DICTIONARY = {
     "words": [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"], ["史芸", "ㄕˇㄩㄣˊ"], ["好", "ㄏㄠˇ"], ["ㄎㄎ", ""], ["Kazuma", ""],
@@ -332,7 +342,8 @@ DICTIONARY = {
               ["阿Q精神", "ㄚ ㄐㄧㄥ ㄕㄣˊ"], ["5G手機", "ㄕㄡˇ ㄐㄧ"], ["大谷翔平", "ㄉㄚˋ ㄍㄨˇ ㄒㄧㄤˊ ㄆㄧㄥˊ"],
               ["New York披薩", "ㄆㄧ ㄙㄚˋ"], ["iPhone15", ""], ["拍胸脯保證", "ㄆㄞ ㄒㄩㄥ ㄆㄨˇ ㄅㄠˇ ㄓㄥˋ"],
               ["陳㐀", "ㄔㄣˊ ？"], ["我們㐀", "ㄨㄛˇ ㄇㄣ˙ ？"]],  # (框選查詢 writes ？ for a character it has no reading of)
-    "shortcuts": [["addr", "台北市信義區"], ["sig", "祝 順心"], ["cl3", "你好嗎"], ["台灣", "Taiwan"], ["KFC", "肯德基"]],
+    "shortcuts": [["addr", "台北市信義區"], ["sig", "祝 順心"], ["cl3", "你好嗎"], ["台灣", "Taiwan"], ["KFC", "肯德基"],
+                  ["zqx", "先回家洗澡"]],  # (zqx: 接續前文選字 reads a 映射詞彙 sent, #37)
 }
 
 # 快速填入 (quick_fill.json, #21): ` then Space lists them

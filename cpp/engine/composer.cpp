@@ -3,6 +3,7 @@
 #include "candlayout.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <regex>
@@ -107,7 +108,8 @@ constexpr size_t BEAM = 12;
 constexpr size_t PER_SPAN = 8;
 constexpr double NO_CHAR_SCORE = -8.0;  // a syllable written as zhuyin: no character has it (convert)
 constexpr double DICT_FLOOR = 0.4;
-constexpr double LM_WEIGHT = 0.555;  // 長句選字加強: log10 of the model's probability counts this much against the engine's score
+constexpr size_t LM_CONTEXT = 32;  // 接續前文選字 (#37): the Chinese characters just sent that the model reads first, at most
+constexpr double LM_WEIGHT = 0.6;  // 長句選字加強: log10 of the model's probability counts this much against the engine's score
 constexpr double WORD_BONUS = 0.4;  // ...and each character inside a cohesive word this much (engine/composer.py)
 constexpr double WORD_COHESION = 1.0;  // cohesive: log10 count(word) - the sum of its characters' (engine/composer.py)
 constexpr double LN10 = 2.302585092994046;  // (written out: engine/composer.py uses the same digits)
@@ -899,28 +901,28 @@ std::unordered_map<ustr, double>& run_scores() {
 // model's probability that the next character is one of the syllable's (Q16) is at least this
 // (engine/composer.py ORDER_LM_THRESHOLDS_Q16; a test compares the two tables)
 const std::unordered_map<ustr, int64_t> ORDER_LM_THRESHOLDS_Q16 = {
-    {U"ㄅㄢˇ", 1764},
-    {U"ㄅㄢˋ", 4285},
+    {U"ㄅㄢˇ", 1857},
+    {U"ㄅㄢˋ", 4294},
     {U"ㄉㄢˇ", 1311},
-    {U"ㄉㄢˋ", 1708},
+    {U"ㄉㄢˋ", 1447},
     {U"ㄓㄢˇ", 1311},
-    {U"ㄓㄢˋ", 7236},
+    {U"ㄓㄢˋ", 6196},
     {U"ㄅㄚˇ", 1311},
     {U"ㄅㄚˋ", 1311},
     {U"ㄅㄚˊ", 1311},
-    {U"ㄅㄚ˙", 1544},
+    {U"ㄅㄚ˙", 1651},
     {U"ㄉㄚˇ", 1311},
-    {U"ㄉㄚˋ", 6541},
-    {U"ㄉㄚˊ", 12856},
+    {U"ㄉㄚˋ", 5739},
+    {U"ㄉㄚˊ", 12191},
     {U"ㄉㄚ˙", 1311},
     {U"ㄓㄚˇ", 1311},
     {U"ㄓㄚˋ", 1311},
     {U"ㄓㄚˊ", 1311},
-    {U"ㄅㄞˇ", 10054},
+    {U"ㄅㄞˇ", 9418},
     {U"ㄅㄞˋ", 1311},
-    {U"ㄅㄞˊ", 10057},
+    {U"ㄅㄞˊ", 9423},
     {U"ㄉㄞˇ", 1311},
-    {U"ㄉㄞˋ", 7071},
+    {U"ㄉㄞˋ", 7100},
     {U"ㄓㄞˇ", 1311},
     {U"ㄓㄞˋ", 1311},
     {U"ㄓㄞˊ", 1311},
@@ -1878,10 +1880,19 @@ Composer::Composer(SyllableTable& table, const Lexicon& lexicon, const English& 
 
 void Composer::reset() {
     context_word_.reset();
+    lm_context_.clear();
     after_english_ = false;
     commit.clear();
     last_commit_.reset();
     clear_input();
+}
+
+void Composer::sent(const std::vector<ustr>& phrases) {
+    // the Chinese characters the model's training text kept (tools/lm/prepare.py RANGES: 㐀-鿿, 豈-﫿)
+    for (auto& p : phrases)
+        for (char32_t ch : p)
+            if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) lm_context_.push_back(ch);
+    if (lm_context_.size() > LM_CONTEXT) lm_context_.erase(0, lm_context_.size() - LM_CONTEXT);
 }
 
 void Composer::clear_input() {
@@ -2076,6 +2087,22 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     if (in_run) runs.emplace_back(run_start, idx);
     bool starts_buffer = !tokens.empty() && tokens[0].kind == Kind::Zh;
     const LmScorer* model = lm();
+    // 接續前文選字 (#37): the run that starts the buffer is read after what was just sent - also after punctuation
+    // that starts it (, is ㄝ too: typed after a sentence sent, it waits in the buffer with what comes next; the
+    // user's call 2026-11-15). The word sent last (prev) stays for the buffer's very start only.
+    bool reads = false;
+    for (auto& t : tokens) {
+        if (t.kind == Kind::Zh) {
+            reads = true;
+            break;
+        }
+        bool punct = t.kind == Kind::Lit;
+        for (unsigned char ch : t.raw)
+            if (ch < 0x80 && std::isalnum(ch)) punct = false;
+        if (!punct) break;
+    }
+    bool use = reads && model && !lm_context_.empty() && config.flag("lm_context");
+    const LmScorer* first_model = use ? model->view(lm_context_) : model;
     for (auto [a, b] : runs) {
         std::map<std::pair<int, int>, ustr> ov;
         for (auto& [span, v] : overrides)
@@ -2087,7 +2114,8 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
         bool alone = readings.size() == 1;
         for (auto& t : tokens)
             if (t.kind == Kind::En) alone = false;
-        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, model, alone))
+        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, a == 0 && reads ? first_model : model,
+                                 alone))
             out.push_back(Segment{a + seg.start, seg.length, seg.phrase});
     }
     runs_ = runs;
@@ -3945,6 +3973,7 @@ void Composer::type_symbol(const ustr& sym) {
     }
     context_word_.reset();
     after_english_ = false;
+    sent({sym});  // (its Chinese, if any, is what is right before the caret now: #37)
     commit = before + sym;
 }
 
@@ -4190,6 +4219,7 @@ void Composer::pick(int i, bool from_bar) {
             before = commit;
         }
         last_commit_.reset();
+        this->sent({action.text});  // (sent right before the caret: 接續前文選字 reads it, in Traditional, #37)
         ustr sent = action.text;
         if (action.type == "shortcut" && user.simplified) sent = lexicon_.script().to_simplified(sent);  // (#32)
         commit = before + sent;
@@ -4827,6 +4857,7 @@ void Composer::do_commit() {
     Undo undo{raw, forced_, chinese_, literal_, caps_, overrides_, digits_as_zhuyin_, context_word_, after_english_,
               fixed_, breaks_};
     undo.exact = exact_;
+    undo.lm_context = lm_context_;
     undo.taken = taken_;
     undo.pending = pending_;
     undo.term_picks = term_picks_;
@@ -4863,6 +4894,11 @@ void Composer::do_commit() {
     after_english_ = false;
     if (last && last->kind == Kind::Zh && !segments_.empty()) context_word_ = segments_.back().phrase;
     else context_word_.reset();
+    {  // (接續前文選字, #37)
+        std::vector<ustr> phrases;
+        for (auto& seg : segments_) phrases.push_back(seg.phrase);
+        sent(phrases);
+    }
     undo.corrected = learn_corrections(static_cast<int>(raw.size()));
     undo.dropped = user.simp_dropped;
     clear_input();
@@ -5133,6 +5169,7 @@ ustr Composer::undo_commit() {
     overrides_ = undo.overrides;
     digits_as_zhuyin_ = undo.digits_as_zhuyin;
     context_word_ = undo.context_word;
+    lm_context_ = undo.lm_context;
     after_english_ = undo.after_english;
     term_picks_ = undo.term_picks;
     if (!undo.learned.empty() || !undo.dropped.empty()) {  // picked by mistake: nothing learned or forgotten after all
@@ -5272,6 +5309,12 @@ void Composer::commit_head() {
             context_word_ = seg.phrase;
             break;
         }
+    {  // (接續前文選字, #37)
+        std::vector<ustr> phrases;
+        for (auto& seg : segments_)
+            if (seg.start + seg.length <= b) phrases.push_back(seg.phrase);
+        sent(phrases);
+    }
     after_english_ = false;
     commit = composition.substr(0, syl_offset(b));
     // what is sent may teach an English word (mochi, sent the second time): the rest may read

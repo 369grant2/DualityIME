@@ -6,7 +6,7 @@
 // keys: characters as typed, {ENTER} {ESC} {BACK} {DOWN} {UP} {LEFT} {RIGHT} {TAB} {PGDN} {PGUP}
 // {#5} (a numpad key) {SPACE} {SHIFT} (a Shift tap) {SBACK} (Shift+Backspace) {SSPACE} (Shift+Space)
 // {WAIT} (half a second), {^,} (Ctrl + a key, with Shift if its character needs it), {^^,} (the same
-// with F13 held as well). Lines starting with # are comments.
+// with F13 held as well). Lines starting with # are comments. In the expected text {NL} is a line break.
 // A line starting with {PAGE}: the keys go to a window like a web page with no text box in
 // focus (browsers mark its TSF context disabled and empty), {NOFOCUS}: to a window the app
 // turned the input method off for (ImmAssociateContext NULL: games...), {PLAIN}: to a plain window with no text box (a media player's
@@ -402,6 +402,17 @@ int wmain(int argc, wchar_t** argv) {
         pump(150);
         std::string got = utf8(to_page ? g_page_text : text());
         while (!got.empty() && (got.back() == '\r' || got.back() == '\n')) got.pop_back();
+        // a line break inside the text (Enter in the box) is written {NL} in the expected text (接續前文選字, #37)
+        std::string flat;
+        for (size_t k = 0; k < got.size(); ++k) {
+            if (got[k] == '\r' || got[k] == '\n') {
+                flat += "{NL}";
+                if (got[k] == '\r' && k + 1 < got.size() && got[k + 1] == '\n') ++k;
+            } else {
+                flat += got[k];
+            }
+        }
+        got = flat;
         bool ok = got == expected;
         (ok ? passed : failed)++;
         std::printf("%s  %s => %s%s%s\n", ok ? "ok  " : "FAIL", keys.c_str(), got.c_str(),

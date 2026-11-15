@@ -231,8 +231,29 @@ class Scorer:
         self._cands = None  # syllable -> sorted ids, made on first use
         self._clear()
 
+    def view(self, context):
+        """接續前文選字 (#37): a Scorer of the same model whose texts come after context (<s> + context + text), with
+        caches of its own; the one of the last context asked for is kept and given again."""
+        kept = getattr(self, "_view", None)
+        if kept is not None and kept._context == context:
+            return kept
+        self.candidates("")  # (the table built once, here, and shared: a view must not build its own each sentence)
+        v = Scorer.__new__(Scorer)
+        v.lm, v.lexicon, v._cands = self.lm, self.lexicon, self._cands
+        v._context, v._view = context, None
+        v._clear()
+        self._view = v
+        return v
+
+    def _start(self):
+        """The state the texts start from: <s>, then the context of a view."""
+        st = self.lm.start()
+        for ch in getattr(self, "_context", ""):
+            st = self.lm.step(st, self.lm.ids.get(ch, 0))
+        return st
+
     def _clear(self):
-        self.states = {"": self.lm.start()}
+        self.states = {"": self._start()}
         self.score_cache = {}  # (text before, syllable) -> scores of the syllable's candidates
         self.mass_cache = {}   # (text before, syllable) -> syllable_mass_q16
 

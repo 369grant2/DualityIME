@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.stdout.reconfigure(encoding="utf-8")
 
 from common import WORK  # noqa: E402
+from gpu import tidy  # noqa: E402
 
 SIZES = {"S": (128, 256, 1), "M": (192, 384, 1), "L": (256, 512, 2),
          "XL": (384, 768, 2)}  # (embedding, hidden, layers); XL: about 11M weights, under the 15 MB the installer may grow
@@ -103,6 +104,7 @@ def main(argv):
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
+        tidy()  # (tools/lm/gpu.py: without it the GPU spills into system memory and the job crawls)
         step += 1
         seen += x.numel()
         if step % 500 == 0 or time.time() - t0 > budget:

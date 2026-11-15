@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import DEFAULTS, Config, candlayout, composer, create_composer  # noqa: E402
 from engine.lexicon import FORGET_DAYS, Lexicon, UserModel  # noqa: E402
 from engine.zhuyin import KEYMAP, TONES, SyllableTable  # noqa: E402
+from engine import lm  # noqa: E402
 
 # The tests of other features run with 長句選字加強 off (LongSentenceTest turns it on itself):
 # every Config and Composer here starts from DEFAULTS. DUALITYIME_TEST_LONG_SENTENCE=1 runs
@@ -3762,7 +3763,8 @@ class LearnedSinglesTest(Base):
         for on in (False, True):
             with self.subTest(long_sentence=on):
                 c = self.c
-                c.config.set(long_sentence=on)
+                # (接續前文選字 off: the same sentence sent again and again would be its own context, #37)
+                c.config.set(long_sentence=on, lm_context=False)
                 c.settings_changed()
                 c.reset()
                 c.user.phrases.clear()
@@ -4000,7 +4002,8 @@ class NamePickTest(Base):
         # from then on (the word leaves it on its own), so the surname had to be picked twice as well,
         # each time after the name seemed learned. 蔣冠霆 is learned as it was sent.
         c = self.c
-        c.config.set(long_sentence=True)
+        # (接續前文選字 off: the same name sent again and again would be its own context, #37)
+        c.config.set(long_sentence=True, lm_context=False)
         c.settings_changed()
         if c._lm() is None:
             self.skipTest("no language model here (numpy)")
@@ -5683,6 +5686,7 @@ class PersonalDictionaryTest(unittest.TestCase):
         self.assertEqual(self.c.candidates, ["台北市信義區"])
         self.c.key(ch="1")
         self.assertEqual(self.c.commit, "我台北市信義區")
+        self.assertEqual(self.c.lm_context, "我台北市信義區")  # (接續前文選字 reads what it sent too, #37)
 
     def test_part_of_a_shortcut_lists_the_matches(self):
         self.write(shortcuts=[["addr", "台北市信義區"], ["adm", "管理員"]])
@@ -6365,9 +6369,10 @@ class SyllableMassTest(unittest.TestCase):
         self.assertIsNotNone(self.scorer, "data/lm.bin or numpy missing")
 
     def test_mass_matches_the_experiment(self):
-        # (P(ㄅㄚ˙ | 算了) = 0.2065 with the model distilled 2026-11-09, 0.2266 with the one before (scratchpad
-        # 2026-11-04); P(吧 | 房間號碼是) = 0.00009)
-        self.assertAlmostEqual(self.scorer.syllable_mass_q16("算了", "ㄅㄚ˙") / 65536, 0.2065, delta=0.01)
+        # (P(ㄅㄚ˙ | 算了) = 0.1165 with the model distilled with contexts 2026-11-15 (#37), 0.2065 with the one of
+        # 2026-11-09, 0.2266 with the one before (scratchpad 2026-11-04); P(吧 | 房間號碼是) = 0.00009. A new
+        # data/lm.bin: rerun tools/lm/order_thresholds.py too)
+        self.assertAlmostEqual(self.scorer.syllable_mass_q16("算了", "ㄅㄚ˙") / 65536, 0.1165, delta=0.01)
         self.assertLess(self.scorer.syllable_mass_q16("房間號碼是", "ㄅㄚ˙"), int(0.002 * 65536))
 
     def test_whole_vocabulary_is_one(self):
@@ -6705,6 +6710,144 @@ class SimplifiedMemoryTest(unittest.TestCase):
         self.assertIs(DEFAULTS["simplified"], False)
         self.assertIs(DEFAULTS["simplified_hotkey"], False)
         self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+F1")
+
+
+class LmContextTest(unittest.TestCase):
+    """接續前文選字 (#37): the model reads what was just sent (Traditional, Chinese characters only, the last 32) before
+    the run that starts the buffer."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.assertIsNotNone(lm.shared(), "data/lm.bin or numpy missing")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def composer(self, **settings):
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS, long_sentence=True, lm_context=True)
+        c.config.values.update(settings)
+        c.settings_changed()
+        if settings.get("simplified"):
+            c.user.set_simplified(True)
+        return c
+
+    def keys(self, readings):
+        from engine.zhuyin import reading_to_keys
+        return "".join(reading_to_keys(r) for r in readings.split())
+
+    def send(self, c, raw):
+        for k in raw:
+            c.key(k)
+        c.key(special="ENTER")
+        return c.commit
+
+    def test_view_shares_the_candidate_table(self):
+        # (a view made before the scorer built its table must not build its own each sentence: /code-review 2026-11-15)
+        s = lm.Scorer(lm.shared().lm, lm.shared().lexicon)
+        v = s.view("我們")
+        v.candidates("ㄗㄞˋ")
+        self.assertIs(v._cands, s._cands)
+
+    def test_view_starts_from_context(self):
+        s = lm.shared()
+        ctx, text = "我們先去吃飯", "再去看電影"
+        rd = "ㄗㄞˋ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ".split()
+        want = sum(s.char_score(ctx + text[:k], ch, rd[k]) for k, ch in enumerate(text))
+        self.assertEqual(s.view(ctx).text_score(text, rd), want)
+        self.assertIs(s.view(ctx), s.view(ctx))  # (one view kept for the context)
+
+    def test_context_after_commit(self):
+        c = self.composer()
+        self.assertEqual(self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ")), "我們先去吃飯")
+        self.assertEqual(c.lm_context, "我們先去吃飯")
+        for k in self.keys("ㄗㄞˋ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ"):
+            c.key(k)
+        want = composer.convert(c.readings, c.lexicon, c.user, {}, c.bigram, c.context_word,
+                                lm.shared().view("我們先去吃飯"), False)
+        self.assertEqual(c.segments, want)
+
+    def test_context_kept_to_32_chinese_characters(self):
+        # (32: as good as 64 with this model, half the time added - the user's call 2026-11-15)
+        c = self.composer()
+        for _ in range(12):
+            self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ"))
+        self.assertEqual(len(c.lm_context), 32)
+        self.send(c, "ok ")
+        self.assertEqual(len(c.lm_context), 32)  # (English sent adds nothing)
+
+    def test_context_cleared_on_reset_and_lost(self):
+        c = self.composer()
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙"))
+        c.reset()
+        self.assertEqual(c.lm_context, "")
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙"))
+        c.context_lost()
+        self.assertEqual(c.lm_context, "")
+
+    def test_undo_puts_the_context_back(self):
+        c = self.composer()
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙"))
+        self.send(c, self.keys("ㄒㄧㄢ ㄑㄩˋ"))
+        self.assertEqual(c.lm_context, "我們先去")
+        self.assertEqual(c.undo_commit(), "先去")
+        self.assertEqual(c.lm_context, "我們")  # (what it read before that commit: the text is back in the buffer)
+
+    def test_context_simplified_is_traditional(self):
+        c = self.composer(simplified=True)
+        self.assertEqual(self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙")), "我们")
+        self.assertEqual(c.lm_context, "我們")
+
+    def test_context_not_after_english(self):
+        c = self.composer()
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙"))
+        seen = []
+        real = lm.Scorer.view
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
+            for k in "ok " + self.keys("ㄗㄞˋ ㄑㄩˋ"):
+                c.key(k)
+        self.assertEqual(seen, [])  # (the buffer starts with English: its Chinese run reads no context)
+
+    def test_context_after_punctuation_that_starts_the_buffer(self):
+        # (, is ㄝ too: typed after a sentence sent it stays in the buffer with what comes next, whose Chinese still
+        # reads what was sent - the user's call 2026-11-15)
+        c = self.composer()
+        self.send(c, self.keys("ㄒㄧㄢ ㄏㄨㄟˊ ㄐㄧㄚ ㄒㄧˇ ㄗㄠˇ"))
+        seen = []
+        real = lm.Scorer.view
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
+            for k in "," + self.keys("ㄗㄞˋ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ"):
+                c.key(k)
+        self.assertEqual([t.kind for t in c.tokens][:2], ["lit", "zh"])
+        self.assertIn("先回家洗澡", seen)
+
+    def test_no_context_after_punctuation_then_english(self):
+        c = self.composer()
+        self.send(c, self.keys("ㄒㄧㄢ ㄏㄨㄟˊ ㄐㄧㄚ ㄒㄧˇ ㄗㄠˇ"))
+        seen = []
+        real = lm.Scorer.view
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
+            for k in ",ok " + self.keys("ㄗㄞˋ ㄑㄩˋ"):
+                c.key(k)
+        self.assertEqual(seen, [])  # (English between: its Chinese reads no context, as without the comma)
+
+    def test_context_head_commit(self):
+        c = self.composer()
+        for k in self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ") * 6:
+            c.key(k)
+        self.assertTrue(c.commit)  # (the buffer grew past MAX_RAW: its head was sent)
+        self.assertTrue(c.lm_context and "我" in c.lm_context)
+
+    def test_context_setting_off_unchanged(self):
+        c = self.composer(lm_context=False)
+        self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ"))
+        for k in self.keys("ㄗㄞˋ ㄑㄩˋ ㄎㄢˋ ㄉㄧㄢˋ ㄧㄥˇ"):
+            c.key(k)
+        want = composer.convert(c.readings, c.lexicon, c.user, {}, c.bigram, c.context_word, lm.shared(), False)
+        self.assertEqual(c.segments, want)
+
+    def test_defaults_lm_context(self):
+        self.assertIs(DEFAULTS["lm_context"], True)
 
 
 class SimplifiedTypingTest(unittest.TestCase):

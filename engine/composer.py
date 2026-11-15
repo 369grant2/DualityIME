@@ -91,31 +91,31 @@ ORDER_DIGITS_GAIN = 1.0    # ...and for digits out of order to stay zhuyin (好�
 # time (held-out web text, tools/lm/order_thresholds.py; 2026-11-04 design). The C++ engine has the
 # same table (a test compares them).
 ORDER_LM_THRESHOLDS_Q16 = {
-    "ㄅㄢˇ": 1764,   # 0.0269 版板
-    "ㄅㄢˋ": 4285,   # 0.0654 辦半
-    "ㄉㄢˇ": 1311,   # 0.0200 膽
-    "ㄉㄢˋ": 1708,   # 0.0261 但蛋
-    "ㄓㄢˇ": 1311,   # 0.0200 展
-    "ㄓㄢˋ": 7236,   # 0.1104 站戰
-    "ㄅㄚˇ": 1311,   # 0.0200 把
-    "ㄅㄚˋ": 1311,   # 0.0200 爸罷
-    "ㄅㄚˊ": 1311,   # 0.0200 拔
-    "ㄅㄚ˙": 1544,   # 0.0236 吧
-    "ㄉㄚˇ": 1311,   # 0.0200 打
-    "ㄉㄚˋ": 6541,   # 0.0998 大
-    "ㄉㄚˊ": 12856,  # 0.1962 達答
-    "ㄉㄚ˙": 1311,   # 0.0200
-    "ㄓㄚˇ": 1311,   # 0.0200 眨
-    "ㄓㄚˋ": 1311,   # 0.0200 炸
-    "ㄓㄚˊ": 1311,   # 0.0200 札
-    "ㄅㄞˇ": 10054,   # 0.1534 百
-    "ㄅㄞˋ": 1311,   # 0.0200 拜敗
-    "ㄅㄞˊ": 10057,   # 0.1535 白
-    "ㄉㄞˇ": 1311,   # 0.0200 歹
-    "ㄉㄞˋ": 7071,   # 0.1079 帶代
-    "ㄓㄞˇ": 1311,   # 0.0200 窄
-    "ㄓㄞˋ": 1311,   # 0.0200 債
-    "ㄓㄞˊ": 1311,   # 0.0200 宅
+    "ㄅㄢˇ": 1857,    # 0.0283 版板
+    "ㄅㄢˋ": 4294,    # 0.0655 辦半
+    "ㄉㄢˇ": 1311,    # 0.0200 膽
+    "ㄉㄢˋ": 1447,    # 0.0221 但蛋
+    "ㄓㄢˇ": 1311,    # 0.0200 展
+    "ㄓㄢˋ": 6196,    # 0.0945 站戰
+    "ㄅㄚˇ": 1311,    # 0.0200 把
+    "ㄅㄚˋ": 1311,    # 0.0200 爸罷
+    "ㄅㄚˊ": 1311,    # 0.0200 拔
+    "ㄅㄚ˙": 1651,    # 0.0252 吧
+    "ㄉㄚˇ": 1311,    # 0.0200 打
+    "ㄉㄚˋ": 5739,    # 0.0876 大
+    "ㄉㄚˊ": 12191,   # 0.1860 達答
+    "ㄉㄚ˙": 1311,    # 0.0200
+    "ㄓㄚˇ": 1311,    # 0.0200 眨
+    "ㄓㄚˋ": 1311,    # 0.0200 炸
+    "ㄓㄚˊ": 1311,    # 0.0200 札
+    "ㄅㄞˇ": 9418,    # 0.1437 百
+    "ㄅㄞˋ": 1311,    # 0.0200 拜敗
+    "ㄅㄞˊ": 9423,    # 0.1438 白
+    "ㄉㄞˇ": 1311,    # 0.0200 歹
+    "ㄉㄞˋ": 7100,    # 0.1083 帶代
+    "ㄓㄞˇ": 1311,    # 0.0200 窄
+    "ㄓㄞˋ": 1311,    # 0.0200 債
+    "ㄓㄞˊ": 1311,    # 0.0200 宅
 }
 COST_RARE = 3.0         # syllable whose most common character is obscure (ㄙㄟ 㩙)
 RARE_SCORE = -6.0       # log10 frequency below which a syllable counts as obscure
@@ -1071,7 +1071,15 @@ def single_scores(reading, scored, lexicon, user, bigram):
     return [(p, u - shift) for p, u in scored]
 
 
-LM_WEIGHT = 0.555  # 長句選字加強: log10 of the model's probability counts this much against the engine's score
+LM_CONTEXT = 32    # 接續前文選字 (#37): the Chinese characters just sent that the model reads first, at most
+
+
+def is_han(ch):
+    """A character the model's training text kept (tools/lm/prepare.py RANGES: 㐀-鿿, 豈-﫿)."""
+    return "㐀" <= ch <= "鿿" or "豈" <= ch <= "﫿"
+
+
+LM_WEIGHT = 0.6  # 長句選字加強: log10 of the model's probability counts this much against the engine's score
 WORD_BONUS = 0.4   # ...and each character inside a cohesive word this much: the model reads characters,
                    # and split 新舊 into 心就 (decisions.md, 2026-11-03)
 WORD_COHESION = 1.0  # cohesive: log10 count(word) - the sum of its characters' (新舊 1.74, 選字 1.13; not
@@ -1503,11 +1511,21 @@ class Composer:
     def reset(self):
         """Forget everything, including what was typed before (focus change)."""
         self.context_word = None    # last Chinese phrase committed, for the bigram
+        self.lm_context = ""        # 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT)
         self.after_english = False  # last commit ended with an English word
         self.commit = ""
         self.last_commit = None     # what undo_commit() can bring back
         self.fill = None
         self._clear_input()
+
+    def context_lost(self):
+        """接續前文選字 (#37): what is before the caret is no longer what was sent (the caret moved, text pasted or
+        changed: the front end checks it): the model reads no context until something is sent again."""
+        self.lm_context = ""
+
+    def _sent(self, phrases):
+        """The Traditional phrases of what was just sent: their Chinese characters go into lm_context (#37)."""
+        self.lm_context = (self.lm_context + "".join(ch for p in phrases for ch in p if is_han(ch)))[-LM_CONTEXT:]
 
     def _clear_input(self):
         self.raw = ""
@@ -1659,13 +1677,22 @@ class Composer:
             runs.append((run_start, idx))
         starts_buffer = bool(self.tokens) and self.tokens[0].kind == "zh"
         lm = self._lm()
+        # 接續前文選字 (#37): the run that starts the buffer is read after what was just sent - also after punctuation
+        # that starts it (, is ㄝ too: typed after a sentence sent, it waits in the buffer with what comes next; the
+        # user's call 2026-11-15). The word sent last (prev) stays for the buffer's very start only.
+        first = next((k for k, t in enumerate(self.tokens) if t.kind == "zh"), None)
+        reads = first is not None and all(t.kind == "lit" and not any(ch.isascii() and ch.isalnum() for ch in t.raw)
+                                          for t in self.tokens[:first])  # (ASCII letters and digits, as the C++ engine)
+        use = reads and lm is not None and self.lm_context and self.config.lm_context
+        first_lm = lm.view(self.lm_context) if use else lm
         for a, b in runs:
             ov = {(s - a, l): v[1] for (s, l), v in overrides.items() if a <= s and s + l <= b}
             prev = self.context_word if a == 0 and starts_buffer else None
             # (one syllable and no English word: punctuation, or the next syllable being typed, do
             # not make it a sentence - 輸, is as picked)
             alone = len(self.readings) == 1 and all(t.kind != "en" for t in self.tokens)
-            for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, lm, alone):
+            run_lm = first_lm if a == 0 and reads else lm
+            for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, run_lm, alone):
                 out.append((a + s, l, p))
         self.runs = runs
         return out
@@ -2911,6 +2938,7 @@ class Composer:
             self._do_commit()
             before = self.commit
         self.context_word, self.after_english = None, False
+        self._sent([sym])  # (its Chinese, if any, is what is right before the caret now: #37)
         self.commit = before + sym
 
     def type_full_punct(self, ch):
@@ -3127,6 +3155,7 @@ class Composer:
                 self._do_commit()
                 before = self.commit
             self.last_commit = None
+            self._sent([symbols_])  # (sent right before the caret: 接續前文選字 reads it, in Traditional, #37)
             if action[0] == "shortcut" and self.user.simplified:  # (映射詞彙's text too, #32)
                 symbols_ = self.lexicon.script.to_simplified(symbols_)
             self.commit = before + symbols_
@@ -3525,7 +3554,7 @@ class Composer:
                     fixed=dict(self.fixed), taken=dict(self.taken), pending=dict(self.pending),
                     literal=set(self.literal), caps=set(self.caps), overrides=dict(self.overrides),
                     digits_as_zhuyin=self.digits_as_zhuyin,
-                    context_word=self.context_word, after_english=self.after_english)
+                    context_word=self.context_word, after_english=self.after_english, lm_context=self.lm_context)
         learned = []  # what this commit taught, as it was before: for undo_commit to put back
         self.user.simp_dropped = []  # (what a pick in Traditional mode takes of Simplified mode's memory, #32)
         terms = self._learn_terms(save=False)  # (saved with the picks below: one save a commit, #32)
@@ -3555,6 +3584,7 @@ class Composer:
         # then co nk4 is 黑色, not co 色; look up 還是 reads its look within the sentence)
         self.after_english = False
         self.context_word = self.segments[-1][2] if last and last.kind == "zh" and self.segments else None
+        self._sent(p for _, _, p in self.segments)  # (接續前文選字, #37)
         corrected = self._learn_corrections(len(self.raw))
         self._clear_input()
         self.commit = text
@@ -3848,6 +3878,7 @@ class Composer:
         self.taken = {a - tok.start: (b - tok.start, r) for a, (b, r) in self.taken.items() if a >= tok.start}
         self.pending = {x - tok.start: v for x, v in self.pending.items() if x >= tok.start}
         self.context_word = next(p for s, l, p in self.segments if s + l == b)
+        self._sent(p for s, l, p in self.segments if s + l <= b)  # (接續前文選字, #37)
         self.after_english = False
         self.commit = self.composition[:self._syl_offset(b)]
         # what is sent may teach an English word (mochi, sent the second time): the rest may read

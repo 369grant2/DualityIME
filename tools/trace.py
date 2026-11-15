@@ -50,6 +50,8 @@ def main(user_path, script_path, config_path=None):
                     extra = "sc:" + ("1" if c.toggle_simplified() else "0")
                 elif name == "RESET":
                     c.reset()
+                elif name == "CL":  # (接續前文選字's context dropped, #37)
+                    c.context_lost()
                 elif name == "LB":
                     extra = "1" if c.key("{", caps=caps) else "0"
                 elif name[0] == "#":

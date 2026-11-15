@@ -86,15 +86,22 @@ public:
     // the states of every beginning of the texts, stepped together (text_score then finds them)
     void prepare(const std::vector<ustr>& texts) const;
     const CharLM& model() const { return lm_; }
+    // 接續前文選字 (#37): a scorer of the same model whose texts come after context (<s> + context + text), with
+    // caches of its own; the one of the last context asked for is kept and given again (engine/lm.py Scorer.view)
+    const LmScorer* view(const ustr& context) const;
 
 private:
+    LmScorer(const LmScorer& base, const ustr& context);  // (view's)
     void clear() const;
     void room() const;
     CharLM::State state(const ustr& text) const;
 
     const CharLM& lm_;
     const Lexicon& lexicon_;
-    std::unordered_map<ustr, std::vector<int>> cands_;
+    std::shared_ptr<const std::unordered_map<ustr, std::vector<int>>> cands_;  // (shared with the views)
+    ustr context_;                    // a view's context ("" for the scorer itself)
+    CharLM::State start_;             // <s>, then the context
+    mutable std::unique_ptr<LmScorer> view_;  // the last view made
     mutable std::unordered_map<ustr, CharLM::State> states_;
     mutable std::unordered_map<ustr, std::vector<int64_t>> score_cache_;  // before + U'\0' + syllable
     mutable std::unordered_map<ustr, int64_t> mass_cache_;               // before + U'\0' + syllable

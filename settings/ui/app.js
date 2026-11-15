@@ -389,10 +389,24 @@ function pageTyping() {
         h("span", {}, "按到旁邊的鍵、注音順序打錯、同一個鍵按兩次或漏打聲調時，看整句自動改成最可能的字。可透過 ↓ 選回原本打的。",
           h("span", { class: "row-warn" }, "注意：偶爾會把打對的字或數字也改掉。")),
         cfgToggle("autocorrect", "注音自動校正")),
-      row("長句選字加強", "看整句的意思選字，長句更準確。電腦較舊、打字覺得變慢時可以關閉。",
-        cfgToggle("long_sentence", "長句選字加強")),
+      ...longSentenceRows(),
       previewChoice())
   ];
+}
+
+// 長句選字加強 and, under it, 接續前文選字 (#37): greyed while 長句選字加強 is off (it reads the same model)
+function longSentenceRows() {
+  const sub = toggle(S.config.lm_context, (v) => setConfig("lm_context", v),
+    { label: "接續前文選字", disabled: !S.config.long_sentence });
+  const main = toggle(S.config.long_sentence, (v) => {
+    setConfig("long_sentence", v);
+    sub.querySelector("input").disabled = !v;
+    subRow.classList.toggle("off", !v);
+  }, { label: "長句選字加強" });
+  const subRow = row("接續前文選字", "選字時參考剛送出、游標前面的字（最多 32 字），讓接著打的句子選得更準。", sub);
+  subRow.classList.add("row-sub");
+  subRow.classList.toggle("off", !S.config.long_sentence);  // (the whole row greyed: the switch's track alone barely showed it)
+  return [row("長句選字加強", "看整句的意思選字，長句更準確。電腦較舊、打字覺得變慢時可以關閉。", main), subRow];
 }
 
 // 打字過程顯示: what an unfinished syllable shows. Two tiles, each a small text box showing it

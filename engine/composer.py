@@ -145,7 +145,7 @@ class Token:
 
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
-             taken=None, bigram=None, lm=None, sent=""):
+             taken=None, bigram=None, lm=None, sent="", context_len=None):
     """Split raw keys into the cheapest sequence of tokens.
 
     literal: raw offsets of keys that are always themselves (numpad digits and
@@ -157,7 +157,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
     taken: {start: (end, reading)} keys read as the given syllable (注音自動校正: picked from
         the list, si3 as ㄋㄧˇ); they cut the text too.
     lm: 長句選字加強's scorer (None: off), asked about digits out of order at the end of a run
-        (_check_corrections); sent: what was just sent (接續前文選字), read first (#37, #42).
+        (_check_corrections); sent: what was just sent (接續前文選字), read first (#37, #42), the last context_len
+        characters with the runs before (LM_CONTEXT if None).
     Other arguments: see _tokenize_run.
     """
     cuts = sorted([(p, p + 1, None) for p in literal if p < len(raw)] +
@@ -167,7 +168,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
     if not cuts:
         tokens = _tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese, lexicon,
                                breaks, exact)
-        return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent) if table.autocorrect else tokens
+        return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len) \
+            if table.autocorrect else tokens
     tokens, start = [], 0
     for a, b, text in cuts + [(len(raw), len(raw), None)]:
         if a < start:
@@ -190,7 +192,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
             else:
                 tokens.append(Token("fix", raw[a:b], text, a))
         start = b
-    return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent) if table.autocorrect else tokens
+    return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len) \
+        if table.autocorrect else tokens
 
 
 def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=False,
@@ -722,7 +725,7 @@ def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers
     return lm.syllable_mass_q16(before, t.value) >= threshold
 
 
-def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None, sent=""):
+def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None, sent="", context_len=None):
     """The 注音自動校正 that needs the words around a syllable, once the keys are split:
     digits read out of order (817) stay zhuyin on their own (吧) or in a word (好吧), or at the end
     of a run when 長句選字加強's model expects the syllable there (lm, _model_reads_it: 我們走吧), else they
@@ -751,7 +754,7 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
 
     def context():
         text = "".join(ch for e in earlier for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p if is_han(ch))
-        return (sent + text)[-LM_CONTEXT:]
+        return (sent + text)[-(context_len or LM_CONTEXT):]
 
     for run in _zh_runs(tokens):
         readings = [t.value for t in run]
@@ -1145,6 +1148,8 @@ def single_scores(reading, scored, lexicon, user, bigram):
 
 
 LM_CONTEXT = 32    # 接續前文選字 (#37): the Chinese characters just sent that the model reads first, at most
+LM_CONTEXT_MAX = 64  # ...kept for plus and max, which may read 64 (選字模型, #41: lm_context_len_plus / _max)
+LM_TIERS = ("light", "plus", "max")
 
 
 def is_han(ch):
@@ -1584,7 +1589,7 @@ class Composer:
     def reset(self):
         """Forget everything, including what was typed before (focus change)."""
         self.context_word = None    # last Chinese phrase committed, for the bigram
-        self.lm_context = ""        # 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT)
+        self.lm_context = ""        # 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT_MAX)
         self.after_english = False  # last commit ended with an English word
         self.commit = ""
         self.last_commit = None     # what undo_commit() can bring back
@@ -1598,7 +1603,7 @@ class Composer:
 
     def _sent(self, phrases):
         """The Traditional phrases of what was just sent: their Chinese characters go into lm_context (#37)."""
-        self.lm_context = (self.lm_context + "".join(ch for p in phrases for ch in p if is_han(ch)))[-LM_CONTEXT:]
+        self.lm_context = (self.lm_context + "".join(ch for p in phrases for ch in p if is_han(ch)))[-LM_CONTEXT_MAX:]
 
     def _clear_input(self):
         self.raw = ""
@@ -1680,7 +1685,7 @@ class Composer:
         self.tokens = tokenize(self.raw, self.table, self.user, self.english, self.forced,
                                self.after_english, self.digits_as_zhuyin, self.literal, self.chinese, self.fixed,
                                self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
-                               self._sent_context())
+                               self._sent_context(), self._context_len())
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
@@ -1729,7 +1734,25 @@ class Composer:
     def _lm(self):
         """The language model's scorer while 長句選字加強 is on (None without the model)."""
         self._lm_on = self.config.long_sentence
-        return language_model.shared(lexicon=self.lexicon) if self._lm_on else None
+        return language_model.shared(lexicon=self.lexicon, tier=self._tier()) if self._lm_on else None
+
+    def _tier(self):
+        """選字模型 (#41): the tier chosen, light for anything else."""
+        tier = self.config.lm_model
+        return tier if tier in LM_TIERS else "light"
+
+    def _context_len(self):
+        """The characters before a run the model reads: LM_CONTEXT for light, and for a tier without its own model;
+        plus and max their own setting, 32 or 64 (anything else 32)."""
+        tier = self._tier()
+        if tier == "light" or not self.config.long_sentence:
+            return LM_CONTEXT
+        # (a tier without its model file runs light's model: light's 32 too, as the settings page shows light then;
+        # asked only while 長句選字加強 is on, which reads the model anyway)
+        if language_model.shared(lexicon=self.lexicon, tier=tier) is language_model.shared(lexicon=self.lexicon):
+            return LM_CONTEXT
+        n = self.config.lm_context_len_plus if tier == "plus" else self.config.lm_context_len_max
+        return LM_CONTEXT_MAX if n == LM_CONTEXT_MAX else LM_CONTEXT
 
     def _sent_context(self):
         """What was just sent while 接續前文選字 is on (#37): read before the buffer, "" for none."""
@@ -1738,9 +1761,9 @@ class Composer:
     def _run_context(self, before):
         """What the model reads before a run of the buffer (長句選字加強 on): what was just sent while 接續前文選字 is on
         (#37), then the Chinese characters of the runs before it, as converted (before: their (start, length,
-        phrase), Traditional) - the last LM_CONTEXT characters, "" for none."""
+        phrase), Traditional) - the last _context_len() characters, "" for none."""
         earlier = "".join(ch for _, _, p in before for ch in p if is_han(ch))
-        return (self._sent_context() + earlier)[-LM_CONTEXT:]
+        return (self._sent_context() + earlier)[-self._context_len():]
 
     def _convert_all(self, overrides=None):
         """Convert each maximal run of zh tokens; returns per-syllable phrases. overrides:
@@ -2930,7 +2953,7 @@ class Composer:
         trial = tokenize(self.raw, self.table, self.user, self.english, forced, self.after_english,
                          self.digits_as_zhuyin, self.literal - set(unlit), (self.chinese - set(unchinese)) | {s},
                          {a: v for a, v in self.fixed.items() if a != unfix}, self.lexicon, self.breaks,
-                         self.exact, self.taken, self.bigram, self._lm(), self._sent_context())
+                         self.exact, self.taken, self.bigram, self._lm(), self._sent_context(), self._context_len())
         inside = [t for t in trial if s <= t.start < end]
         if not inside or inside[0].start != s or any(t.kind != "zh" for t in inside) or \
                 inside[-1].start + len(inside[-1].raw) != end:

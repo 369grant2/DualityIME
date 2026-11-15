@@ -122,6 +122,7 @@ function segments(options, value, change, label) {
     }
   }
   select(value);
+  box.select = select;  // (a row shown later measures again: 前文長度, #41)
   return box;
 }
 
@@ -394,19 +395,60 @@ function pageTyping() {
   ];
 }
 
-// 長句選字加強 and, under it, 接續前文選字 (#37): greyed while 長句選字加強 is off (it reads the same model)
+// 選字模型 (#41): the tiers released (only theirs go into the installer: installer\build.ps1) and each tier and context
+// length's median time a key on the development computer (tools/key_latency_ab.py, measured before a release and
+// written here). One tier alone: no 選字模型 row.
+const LM_TIERS_SHIPPED = ["light"];
+const LM_LATENCY_MS = { "light-32": "1.1", "plus-32": "", "plus-64": "", "max-32": "", "max-64": "" };
+const LM_TIER_NAMES = { light: "輕量", plus: "加強", max: "最強" };
+
+// 長句選字加強 and, under it, 接續前文選字 (#37), 選字模型 and, for 加強／最強, 前文長度 (#41): greyed while
+// 長句選字加強 is off (they are its settings)
 function longSentenceRows() {
   const sub = toggle(S.config.lm_context, (v) => setConfig("lm_context", v),
     { label: "接續前文選字", disabled: !S.config.long_sentence });
-  const main = toggle(S.config.long_sentence, (v) => {
-    setConfig("long_sentence", v);
-    sub.querySelector("input").disabled = !v;
-    subRow.classList.toggle("off", !v);
-  }, { label: "長句選字加強" });
   const subRow = row("接續前文選字", "選字時參考剛送出、游標前面的字（最多 32 字），讓接著打的句子選得更準。", sub);
   subRow.classList.add("row-sub");
-  subRow.classList.toggle("off", !S.config.long_sentence);  // (the whole row greyed: the switch's track alone barely showed it)
-  return [row("長句選字加強", "看整句的意思選字，長句更準確。電腦較舊、打字覺得變慢時可以關閉。", main), subRow];
+  const model = modelRows();
+  const grey = (off) => {
+    sub.querySelector("input").disabled = off;
+    for (const r of [subRow, ...model.rows]) r.classList.toggle("off", off);  // (the whole row greyed: a switch's track
+    model.disable(off);                                                         // alone barely showed it)
+  };
+  const main = toggle(S.config.long_sentence, (v) => { setConfig("long_sentence", v); grey(!v); }, { label: "長句選字加強" });
+  grey(!S.config.long_sentence);
+  return [row("長句選字加強", "看整句的意思選字，長句更準確。電腦較舊、打字覺得變慢時可以關閉。", main), subRow, ...model.rows];
+}
+
+// 選字模型 (buttons 輕量｜加強｜最強, the tiers released) and 前文長度 (32 字｜64 字, shown for 加強／最強, each tier its own
+// setting); one latency line, in 選字模型's description, for the tier and length chosen. Nothing when one tier alone.
+function modelRows() {
+  if (LM_TIERS_SHIPPED.length < 2) return { rows: [], disable() {} };
+  const lenKey = (t) => (t === "plus" ? "lm_context_len_plus" : "lm_context_len_max");
+  const lenOf = (t) => (t !== "light" && Number(S.config[lenKey(t)]) === 64 ? 64 : 32);
+  let tier = LM_TIERS_SHIPPED.includes(S.config.lm_model) ? S.config.lm_model : "light";
+  const ms = h("span", {});
+  const draw = () => {
+    ms.textContent = `每鍵約 ${LM_LATENCY_MS[`${tier}-${lenOf(tier)}`] || "—"} 毫秒（開發機量測）`;
+    lenRow.style.display = tier === "light" ? "none" : "";
+    // (the tier's own length, and measured again now it is shown: while hidden its buttons had no width)
+    if (tier !== "light") pickLen.select(lenOf(tier));
+  };
+  const pickTier = segments(LM_TIERS_SHIPPED.map((t) => [t, LM_TIER_NAMES[t]]), tier,
+    (v) => { tier = v; setConfig("lm_model", v); draw(); }, "選字模型");
+  const tierRow = row("選字模型", "-", pickTier);
+  tierRow.querySelector(".row-desc").replaceChildren("越強選字越準，每按一鍵也越慢：", ms);
+  tierRow.classList.add("row-sub");
+  const pickLen = segments([[32, "32 字"], [64, "64 字"]], lenOf(tier), (v) => {
+    S.config[lenKey(tier)] = v;  // (draw reads it before setConfig answers)
+    setConfig(lenKey(tier), v);
+    draw();
+  }, "前文長度");
+  const lenRow = row("前文長度", "看越多前文選字越準，也會越慢", pickLen);
+  lenRow.classList.add("row-sub", "row-sub2");
+  draw();
+  const disable = (off) => { for (const b of [...pickTier.querySelectorAll("button"), ...pickLen.querySelectorAll("button")]) b.disabled = off; };
+  return { rows: [tierRow, lenRow], disable };
 }
 
 // 打字過程顯示: what an unfinished syllable shows. Two tiles, each a small text box showing it

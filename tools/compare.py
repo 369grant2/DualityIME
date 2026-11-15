@@ -351,6 +351,12 @@ CONFIGS = [
      "no_quick_fill": True},  # (not a setting: no quick_fill.json, so 快速填入 lists its samples, #33)
     {"simplified": True},  # 簡體輸出 (#32): shown and sent in Simplified characters, its memory in user_simplified.json
     {"lm_context": False},  # 接續前文選字 off ({} above: on, the default; #37)
+    # 選字模型 (#41), each tier twice (the spec: its default and 接續前文選字 off); its default here reads 64 characters,
+    # plus with 注音自動校正 on too, so the order check reads 64 as well (a tier without its file uses light's model)
+    {"lm_model": "plus", "lm_context_len_plus": 64, "autocorrect": True},
+    {"lm_model": "plus", "lm_context": False},
+    {"lm_model": "max", "lm_context_len_max": 64},
+    {"lm_model": "max", "lm_context": False},
 ]
 DICTIONARY = {
     "words": [["華碩", "ㄏㄨㄚˊ ㄕㄨㄛˋ"], ["史芸", "ㄕˇㄩㄣˊ"], ["好", "ㄏㄠˇ"], ["ㄎㄎ", ""], ["Kazuma", ""],

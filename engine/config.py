@@ -7,6 +7,9 @@ DEFAULTS = {
     "autocorrect": False,       # 注音自動校正: keys next to the right one, parts out of order, a key typed twice
     "long_sentence": True,      # 長句選字加強: the language model (data/lm.bin) judges the whole run of Chinese
     "lm_context": True,         # 接續前文選字 (#37): ...after reading what was just sent (with long_sentence only)
+    "lm_model": "light",        # 選字模型 (#41): "light" (data/lm.bin), "plus" (lm_plus.bin), "max" (lm_max.bin)
+    "lm_context_len_plus": 32,  # ...the context plus reads, 32 or 64 characters (light: 32 always)
+    "lm_context_len_max": 32,   # ...the same for max
     "punctuation": "half",      # "half": , . ?   "full": ，。？
     "space": "half",            # "half" or "full" (　) when typing a space on its own
     "full_width": False,        # 全形 mode (Shift+Space): letters, digits, marks, spaces all full width

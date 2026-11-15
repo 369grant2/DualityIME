@@ -40,6 +40,9 @@ static class SettingsTest {
 
             // 接續前文選字 (#37): on as it comes, with 長句選字加強
             Check("接續前文選字 default", (bool)cfg["lm_context"] && (bool)cfg["long_sentence"], json.Serialize(cfg));
+            // 選字模型 (#41): light as it comes, plus and max each reading 32 characters (engine/config.py)
+            Check("選字模型 defaults", (string)cfg["lm_model"] == "light" && (int)cfg["lm_context_len_plus"] == 32 &&
+                  (int)cfg["lm_context_len_max"] == 32, json.Serialize(cfg));
             // 簡體輸出 (#32): off, its key off, Ctrl+F1 as it comes; a key that is no shortcut is refused
             Check("簡體輸出 defaults", !(bool)cfg["simplified"] && !(bool)cfg["simplified_hotkey"] &&
                   (string)cfg["simplified_key"] == "Ctrl+F1", json.Serialize(cfg));

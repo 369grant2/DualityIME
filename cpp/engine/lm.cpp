@@ -529,13 +529,17 @@ int64_t LmScorer::text_score(const ustr& text, const std::vector<ustr>& readings
     return sum;
 }
 
-const LmScorer* LanguageModel::get() const {
-    if (!tried_) {
-        tried_ = true;
-        model_ = CharLM::load(path_);
-        if (model_) scorer_ = std::make_unique<LmScorer>(*model_, lexicon_);
+const LmScorer* LanguageModel::get(const std::string& tier) const {
+    static const wchar_t* const files[3] = {L"lm.bin", L"lm_plus.bin", L"lm_max.bin"};  // (engine/lm.py TIER_FILES)
+    size_t k = tier == "plus" ? 1 : tier == "max" ? 2 : 0;
+    Tier& t = tiers_[k];
+    if (!t.tried) {
+        t.tried = true;
+        t.model = CharLM::load(dir_ + L"\\" + files[k]);
+        if (t.model) t.scorer = std::make_unique<LmScorer>(*t.model, lexicon_);
     }
-    return scorer_.get();
+    if (!t.scorer && k != 0) return get("light");
+    return t.scorer.get();
 }
 
 }  // namespace sz

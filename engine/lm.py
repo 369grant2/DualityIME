@@ -39,6 +39,7 @@ LN2_Q = 710                 # round(ln 2 * 1024)
 MAGIC = b"DLM1"
 VERSION = 1
 FILE_NAME = "lm.bin"
+TIER_FILES = {"light": FILE_NAME, "plus": "lm_plus.bin", "max": "lm_max.bin"}  # 選字模型 (#41): the file of each tier
 HEADER = ("version", "q", "mul_shift", "vocab", "emb", "hidden", "layers", "act_range", "exp_range", "log_bits")
 INT8 = ("emb_q", "w_ih_q", "w_hh_q", "proj_q")   # (names without a layer number end the same)
 
@@ -202,10 +203,10 @@ class CharLM:
         return (int(e[ids].sum()) << 16) // int(e.sum())
 
 
-def load(data_dir=DATA_DIR):
-    """The language model in data_dir, or None (no file, wrong format, no numpy). Never raises."""
+def load(data_dir=DATA_DIR, tier="light"):
+    """The language model of a tier (TIER_FILES) in data_dir, or None (no file, wrong format, no numpy). Never raises."""
     try:
-        path = os.path.join(data_dir, FILE_NAME)
+        path = os.path.join(data_dir or DATA_DIR, TIER_FILES.get(tier, FILE_NAME))
         if not os.path.isfile(path):
             return None
         return CharLM(path)
@@ -347,22 +348,23 @@ class Scorer:
         return sum(self.char_score(text[:k], ch, readings[k]) for k, ch in enumerate(text))
 
 
-_shared = None
-_loaded = False
+_shared = {}  # tier -> its Scorer (or the light one's, or None), made the first time the tier is asked for
 
 
-def shared(data_dir=None, lexicon=None):
-    """The Scorer of data_dir's model, loaded once for the whole process (later calls get the
-    same one, whatever they pass), or None without the model. lexicon: the one the engine uses
-    (else data_dir's is read)."""
-    global _shared, _loaded
-    if not _loaded:
-        _loaded = True
+def shared(data_dir=None, lexicon=None, tier="light"):
+    """The Scorer of a tier's model in data_dir (選字模型, #41), loaded once for the whole process (later calls get
+    the same one, whatever they pass), or None without the model. A tier whose file is missing or cannot be read, or
+    no tier at all, gives the light one's. lexicon: the one the engine uses (else data_dir's is read)."""
+    if tier not in TIER_FILES:
+        tier = "light"
+    if tier not in _shared:
         data_dir = data_dir or DATA_DIR
-        lm = load(data_dir)
-        if lm is not None:
+        lm = load(data_dir, tier)
+        if lm is None:
+            _shared[tier] = None if tier == "light" else shared(data_dir, lexicon)
+        else:
             if lexicon is None:
                 from .lexicon import Lexicon
                 lexicon = Lexicon(os.path.join(data_dir, "lexicon.txt"))
-            _shared = Scorer(lm, lexicon)
-    return _shared
+            _shared[tier] = Scorer(lm, lexicon)
+    return _shared[tier]

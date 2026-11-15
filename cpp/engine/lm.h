@@ -112,19 +112,25 @@ private:
     mutable std::unordered_map<ustr, int64_t> mass_cache_;               // before + U'\0' + syllable
 };
 
-// 長句選字加強's model and scorer, read from the file the first time they are asked for (with the
-// setting off the engine never reads it: no memory, no time). Not thread-safe, as LmScorer.
+// 長句選字加強's models and scorers, one a tier (選字模型, #41: light data/lm.bin, plus lm_plus.bin, max lm_max.bin), each
+// read from its file the first time it is asked for (with the setting off the engine never reads one: no memory, no
+// time). Not thread-safe, as LmScorer. (engine/lm.py shared)
 class LanguageModel {
 public:
-    LanguageModel(std::wstring path, const Lexicon& lexicon) : path_(std::move(path)), lexicon_(lexicon) {}
-    const LmScorer* get() const;  // nullptr without the file, or one that cannot be read
+    LanguageModel(std::wstring data_dir, const Lexicon& lexicon) : dir_(std::move(data_dir)), lexicon_(lexicon) {}
+    // the tier's scorer ("light", "plus", "max"); a tier without its file, one that cannot be read, or no tier at all
+    // gives the light one's; nullptr when light has none either
+    const LmScorer* get(const std::string& tier = "light") const;
 
 private:
-    std::wstring path_;
+    struct Tier {
+        bool tried = false;
+        std::unique_ptr<CharLM> model;
+        std::unique_ptr<LmScorer> scorer;  // (after model: it uses it)
+    };
+    std::wstring dir_;
     const Lexicon& lexicon_;
-    mutable bool tried_ = false;
-    mutable std::unique_ptr<CharLM> model_;
-    mutable std::unique_ptr<LmScorer> scorer_;  // (after model_: it uses it)
+    mutable Tier tiers_[3];
 };
 
 }  // namespace sz

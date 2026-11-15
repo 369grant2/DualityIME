@@ -118,6 +118,7 @@ h2 { margin: 22px 0 8px 4px; font-size: 14px; font-weight: 700; color: var(--sub
 :root[data-keys] .toggle input:focus-visible + .track { box-shadow: var(--focus); }
 .toggle input:disabled + .track { opacity: .45; }
 .row-sub { padding-left: 40px; }
+.row-sub2 { padding-left: 76px; }  /* (one level further in: 前文長度 under 選字模型, #41) */
 .row-sub.off { opacity: .45; pointer-events: none; }  /* (its setting is off above it: greyed, not changeable) */  /* (a setting that belongs to the one above it: 接續前文選字, #37) */
 .toggle .state { min-width: 26px; text-align: right; color: var(--sub); }
 

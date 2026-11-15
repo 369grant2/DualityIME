@@ -41,7 +41,8 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             const Fixed* taken = nullptr,  // taken: start -> (end, reading) picked (注音自動校正)
                             const BigramModel* bigram = nullptr,
                             const LmScorer* lm = nullptr,  // lm: 長句選字加強, for digits out of order at the end
-                            const ustr* sent = nullptr);   // sent: what was just sent, read first by lm (#37, #42)
+                            const ustr* sent = nullptr,    // sent: what was just sent, read first by lm (#37, #42)
+                            size_t context_len = 0);      // ...the last context_len with the runs before (0: 32)
 
 struct Segment {
     int start, length;
@@ -212,7 +213,9 @@ private:
     std::vector<Segment> convert_all(const Overrides* instead = nullptr);
     ustr run_context(const std::vector<Segment>& before) const;
     ustr sent_context() const;  // (what was just sent while 接續前文選字 is on: read before the buffer)
-    const ustr* sent_ptr() const;  // (the same for tokenize, nullptr for none: no copy)  // (#42: what the model reads before a run)
+    const ustr* sent_ptr() const;  // (the same for tokenize, nullptr for none: no copy)
+    std::string tier() const;       // (選字模型, #41: "light", "plus" or "max")
+    size_t context_len() const;     // (the characters before a run the model reads, for the tier)  // (#42: what the model reads before a run)
     const LmScorer* lm() const;  // the language model's scorer while 長句選字加強 is on, else nullptr
     void render();
     ustr as_typed(int start, const std::string& keys) const;

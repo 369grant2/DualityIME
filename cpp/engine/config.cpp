@@ -8,6 +8,9 @@ const Json& Config::defaults() {
         j["autocorrect"] = Json(false);      // 注音自動校正: keys next to the right one, parts out of order, a key typed twice
         j["long_sentence"] = Json(true);     // 長句選字加強: the language model (data/lm.bin) judges the whole run of Chinese
         j["lm_context"] = Json(true);        // 接續前文選字 (#37): ...after reading what was just sent (long_sentence only)
+        j["lm_model"] = Json("light");       // 選字模型 (#41): "light" (data/lm.bin), "plus" (lm_plus.bin), "max" (lm_max.bin)
+        j["lm_context_len_plus"] = Json(32); // ...the context plus reads, 32 or 64 characters (light: 32 always)
+        j["lm_context_len_max"] = Json(32);  // ...the same for max
         j["punctuation"] = Json("half");     // "half": , . ?   "full": ，。？
         j["space"] = Json("half");           // "half" or "full" (　) when typing a space on its own
         j["full_width"] = Json(false);       // 全形 mode (Shift+Space)

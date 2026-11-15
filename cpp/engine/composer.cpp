@@ -110,6 +110,7 @@ constexpr size_t BEAM = 12;
 constexpr size_t PER_SPAN = 8;
 constexpr double NO_CHAR_SCORE = -8.0;  // a syllable written as zhuyin: no character has it (convert)
 constexpr double DICT_FLOOR = 0.4;
+constexpr size_t LM_CONTEXT_MAX = 64;  // ...kept for plus and max, which may read 64 (選字模型, #41)
 constexpr size_t LM_CONTEXT = 32;  // 接續前文選字 (#37): the Chinese characters just sent that the model reads first, at most
 constexpr double LM_WEIGHT = 0.6;  // 長句選字加強: log10 of the model's probability counts this much against the engine's score
 constexpr double WORD_BONUS = 0.4;  // ...and each character inside a cohesive word this much (engine/composer.py)
@@ -1034,7 +1035,7 @@ bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>&
 
 std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTable& table, const Lexicon* lexicon,
                                      const UserModel* user, const std::set<int>& exact, const BigramModel* bigram,
-                                     const LmScorer* lm, const ustr& sent) {
+                                     const LmScorer* lm, const ustr& sent, size_t context_len) {
     // the 注音自動校正 that needs the words around a syllable (see engine/composer.py): digits
     // out of order stay zhuyin on their own (吧) or in a word likelier than the characters apart
     // (好吧), or at the end of a run when 長句選字加強's model expects the syllable there
@@ -1072,7 +1073,8 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
             for (auto& seg : convert(e, *lexicon, user, {}, bigram, std::nullopt))
                 for (char32_t ch : seg.phrase)
                     if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) ctx.push_back(ch);
-        if (ctx.size() > LM_CONTEXT) ctx.erase(0, ctx.size() - LM_CONTEXT);
+        size_t keep = context_len ? context_len : LM_CONTEXT;
+        if (ctx.size() > keep) ctx.erase(0, ctx.size() - keep);
         return ctx;
     };
     for (auto& run : zh_runs(tokens)) {
@@ -1274,7 +1276,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             bool digits_as_zhuyin, const std::set<int>& literal, const std::set<int>& chinese,
                             const Fixed* fixed, const Lexicon* lexicon, const std::set<int>* breaks,
                             const std::set<int>* exact, const Fixed* taken, const BigramModel* bigram,
-                            const LmScorer* lm, const ustr* sent) {
+                            const LmScorer* lm, const ustr* sent, size_t context_len) {
     // literal: raw offsets of keys that are always themselves (numpad); fixed: keys shown
     // as picked from the replacement bar (ㄏㄠˇ, clˇ); taken: keys read as a syllable picked
     // from the list (注音自動校正: si3 as ㄋㄧˇ). They cut the text in two.
@@ -1298,7 +1300,9 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
     const std::set<int>& brk = breaks ? *breaks : no_breaks;
     const std::set<int>& ex = exact ? *exact : no_breaks;
     auto checked = [&](std::vector<Token> toks) {
-        return table.autocorrect ? check_corrections(std::move(toks), table, lexicon, user, ex, bigram, lm, sent ? *sent : ustr()) : toks;
+        return table.autocorrect ? check_corrections(std::move(toks), table, lexicon, user, ex, bigram, lm, sent ? *sent : ustr(),
+                                                     context_len)
+                                 : toks;
     };
     if (cuts.empty())
         return checked(tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese,
@@ -1983,7 +1987,7 @@ Resources Resources::load(const std::wstring& data_dir) {
     r.table = std::make_unique<SyllableTable>(*r.lexicon);
     r.english = load_english({data_dir + L"\\english.txt", data_dir + L"\\english_tech.txt"});
     r.bigram = std::make_unique<BigramModel>(*r.lexicon, data_dir + L"\\bigram.bin");
-    r.lm = std::make_unique<LanguageModel>(data_dir + L"\\lm.bin", *r.lexicon);
+    r.lm = std::make_unique<LanguageModel>(data_dir, *r.lexicon);
     return r;
 }
 
@@ -2014,7 +2018,7 @@ void Composer::sent(const std::vector<ustr>& phrases) {
     for (auto& p : phrases)
         for (char32_t ch : p)
             if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) lm_context_.push_back(ch);
-    if (lm_context_.size() > LM_CONTEXT) lm_context_.erase(0, lm_context_.size() - LM_CONTEXT);
+    if (lm_context_.size() > LM_CONTEXT_MAX) lm_context_.erase(0, lm_context_.size() - LM_CONTEXT_MAX);
 }
 
 void Composer::clear_input() {
@@ -2089,12 +2093,30 @@ void Composer::settings_changed() {
 
 std::vector<Token> Composer::retokenize(const std::set<int>& chinese) const {
     return tokenize(raw, table_, &user, english_, forced_, after_english_, digits_as_zhuyin_, literal_, chinese,
-                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr());
+                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len());
 }
 
 const LmScorer* Composer::lm() const {
     lm_on_ = config.flag("long_sentence");
-    return lm_on_ && lm_ ? lm_->get() : nullptr;
+    return lm_on_ && lm_ ? lm_->get(tier()) : nullptr;
+}
+
+std::string Composer::tier() const {
+    // 選字模型 (#41): the tier chosen, light for anything else (engine/composer.py _tier)
+    const Json& v = config.get("lm_model");
+    if (v.is_string() && (v.as_string() == "plus" || v.as_string() == "max")) return v.as_string();
+    return "light";
+}
+
+size_t Composer::context_len() const {
+    // the characters before a run the model reads: LM_CONTEXT for light; plus and max their own setting, 32 or 64
+    // (anything else 32) (engine/composer.py _context_len)
+    std::string t = tier();
+    if (t == "light" || !config.flag("long_sentence")) return LM_CONTEXT;
+    // (a tier without its model file runs light's model: light's 32 too, as the settings page shows light then)
+    if (!lm_ || lm_->get(t) == lm_->get("light")) return LM_CONTEXT;
+    const Json& v = config.get(t == "plus" ? "lm_context_len_plus" : "lm_context_len_max");
+    return v.is_number() && v.as_number() == static_cast<double>(LM_CONTEXT_MAX) ? LM_CONTEXT_MAX : LM_CONTEXT;
 }
 
 void Composer::refresh() {
@@ -2205,7 +2227,8 @@ ustr Composer::run_context(const std::vector<Segment>& before) const {
     for (auto& seg : before)
         for (char32_t ch : seg.phrase)
             if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) context.push_back(ch);
-    if (context.size() > LM_CONTEXT) context.erase(0, context.size() - LM_CONTEXT);
+    size_t keep = context_len();
+    if (context.size() > keep) context.erase(0, context.size() - keep);
     return context;
 }
 
@@ -3675,7 +3698,7 @@ std::optional<std::pair<int, std::vector<ustr>>> Composer::reads_as_chinese(int 
         if (a != unfix) fixed[a] = v;
     auto trial =
         tokenize(raw, table_, &user, english_, forced, after_english_, digits_as_zhuyin_, lit, ch, &fixed, &lexicon_,
-                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr());
+                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len());
     std::vector<const Token*> inside;
     for (auto& t : trial)
         if (s <= t.start && t.start < end) inside.push_back(&t);

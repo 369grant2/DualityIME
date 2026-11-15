@@ -6766,6 +6766,101 @@ class SimplifiedMemoryTest(unittest.TestCase):
         self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+F1")
 
 
+class LmTierTest(unittest.TestCase):
+    """選字模型 (#41): 長句選字加強 in three tiers, light / plus / max (data/lm.bin, lm_plus.bin, lm_max.bin), the tier's file
+    read when it is first asked for; a tier without its file uses the light one. The context read: 32 characters for
+    light, plus and max each their own setting (32 or 64)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.assertIsNotNone(lm.shared(), "data/lm.bin or numpy missing")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def composer(self, **settings):
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS, long_sentence=True, lm_context=True)
+        c.config.values.update(settings)
+        c.settings_changed()
+        return c
+
+    def test_defaults(self):
+        self.assertEqual((DEFAULTS["lm_model"], DEFAULTS["lm_context_len_plus"], DEFAULTS["lm_context_len_max"]),
+                         ("light", 32, 32))
+
+    def test_tier_files(self):
+        self.assertEqual(lm.TIER_FILES, {"light": "lm.bin", "plus": "lm_plus.bin", "max": "lm_max.bin"})
+
+    def test_missing_tier_falls_back_to_light(self):
+        from engine.lexicon import DATA_DIR
+        self.assertIs(lm.shared(tier="unknown-tier"), lm.shared())  # (not a tier: light)
+        for tier in ("plus", "max"):
+            if os.path.exists(os.path.join(DATA_DIR, lm.TIER_FILES[tier])):
+                continue  # (shipped: its own model)
+            self.assertIsNone(lm.load(DATA_DIR, tier))
+            self.assertIs(lm.shared(tier=tier), lm.shared())  # (no file: the light one, never none)
+
+    def test_tier_switch_next_key(self):
+        c = self.composer()
+        asked = []
+        real = lm.shared
+        with unittest.mock.patch.object(lm, "shared", lambda *a, **k: asked.append(k.get("tier")) or real(*a, **k)):
+            c.key("s")
+            c.config.values["lm_model"] = "plus"
+            c.settings_changed()
+            c.key("u")
+        self.assertEqual(asked[0], "light")
+        self.assertEqual(asked[-1], "plus")
+
+    def test_context_len_unreleased_tier_is_light(self):
+        # (a tier whose model file is not there runs light's model, so it reads light's 32 too - code-reviewer
+        # 2026-11-15; the settings page shows light for it)
+        from engine.lexicon import DATA_DIR
+        if os.path.exists(os.path.join(DATA_DIR, lm.TIER_FILES["plus"])):
+            self.skipTest("plus is released")
+        c = self.composer(lm_model="plus", lm_context_len_plus=64)
+        self.assertEqual(c._context_len(), 32)
+
+    def released(self):
+        """plus and max as if released: a scorer of their own each (light's model, other objects)."""
+        real = lm.shared
+        own = {t: lm.Scorer(real().lm, real().lexicon) for t in ("plus", "max")}
+        patcher = unittest.mock.patch.object(lm, "shared", lambda data_dir=None, lexicon=None, tier="light":
+                                             own.get(tier) or real(data_dir, lexicon))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_context_len_per_tier(self):
+        self.released()
+        c = self.composer(lm_context_len_plus=64, lm_context_len_max=32)
+        self.assertEqual(c._context_len(), 32)  # (light: always 32)
+        c.config.values["lm_model"] = "plus"
+        self.assertEqual(c._context_len(), 64)
+        c.config.values["lm_model"] = "max"
+        self.assertEqual(c._context_len(), 32)
+        c.config.values["lm_model"] = "light"
+        c.config.values["lm_context_len_plus"] = 64
+        self.assertEqual(c._context_len(), 32)
+        c.config.values["lm_model"] = "plus"
+        self.assertEqual(c._context_len(), 64)  # (kept while light was chosen)
+        c.config.values["lm_context_len_plus"] = 50
+        self.assertEqual(c._context_len(), 32)  # (neither 32 nor 64: 32)
+
+    def test_sent_keeps_64_reads_by_tier(self):
+        self.released()
+        c = self.composer(lm_model="plus", lm_context_len_plus=64)
+        from engine.zhuyin import reading_to_keys
+        for _ in range(12):  # (72 characters sent)
+            for k in "".join(reading_to_keys(r) for r in "ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ".split()):
+                c.key(k)
+            c.key(special="ENTER")
+        self.assertEqual(len(c.lm_context), 64)
+        self.assertEqual(len(c._run_context([])), 64)
+        c.config.values["lm_model"] = "light"
+        self.assertEqual(c._run_context([]), c.lm_context[-32:])
+
+
 class LmContextTest(unittest.TestCase):
     """接續前文選字 (#37): the model reads what was just sent (Traditional, Chinese characters only, the last 32) before
     the run that starts the buffer."""
@@ -6849,13 +6944,15 @@ class LmContextTest(unittest.TestCase):
         self.assertEqual(c.segments, want)
 
     def test_context_kept_to_32_chinese_characters(self):
-        # (32: as good as 64 with this model, half the time added - the user's call 2026-11-15)
+        # (32: as good as 64 with this model, half the time added - the user's call 2026-11-15; 64 kept for plus and
+        # max, which may read them: #41)
         c = self.composer()
         for _ in range(12):
             self.send(c, self.keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ"))
-        self.assertEqual(len(c.lm_context), 32)
+        self.assertEqual(len(c.lm_context), 64)
+        self.assertEqual(len(c._run_context([])), 32)  # (light reads 32)
         self.send(c, "ok ")
-        self.assertEqual(len(c.lm_context), 32)  # (English sent adds nothing)
+        self.assertEqual(len(c.lm_context), 64)  # (English sent adds nothing)
 
     def test_context_cleared_on_reset_and_lost(self):
         c = self.composer()

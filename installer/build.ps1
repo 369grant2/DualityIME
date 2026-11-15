@@ -74,6 +74,11 @@ foreach ($f in @("lexicon.txt", "names.txt", "bigram.bin", "lm.bin", "english.tx
                   "opencc\TWPhrasesRev.txt", "opencc\TWPhrases.txt", "opencc\mainland_words.txt", "LICENSE-OpenCC.txt")) {
     $files["data\$f"] = "data\$f"
 }
+# 選字模型 (#41): the plus and max models go in when they are there (only the tiers released have their files; the
+# engine uses lm.bin for a tier without one)
+foreach ($f in @("lm_plus.bin", "lm_max.bin")) {
+    if (Test-Path (Join-Path $root "data\$f")) { $files["data\$f"] = "data\$f" }
+}
 foreach ($f in Get-ChildItem (Join-Path $root "settings\ui") -File) { $files["ui\$($f.Name)"] = "settings\ui\$($f.Name)" }
 
 foreach ($k in $files.Keys) {

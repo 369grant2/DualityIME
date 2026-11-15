@@ -121,6 +121,9 @@ try {
     foreach ($f in $files + @("ui\index.html")) {
         if (-not (Test-Path (Join-Path $Payload $f))) { throw "安裝內容不完整，缺少 $f，請重新下載安裝檔。" }
     }
+    # 選字模型 (#41): the plus and max models are in the payload only when that tier is released (installer\build.ps1);
+    # one an earlier version put and this one lacks goes, so the engine never reads an old model for it
+    $optional = @("data\lm_plus.bin", "data\lm_max.bin")
 
     # ---- 1. stop what runs from either install folder ----------------------------------------------
     $hadOld = [bool](Test-Path $Dst)
@@ -139,6 +142,10 @@ try {
     # what earlier updates moved aside
     Get-ChildItem $Dst -Recurse -Filter "*.old-*" -ErrorAction SilentlyContinue | ForEach-Object { Remove-OrSchedule $_.FullName }
     foreach ($f in $files) { Put-File (Join-Path $Payload $f) (Join-Path $Dst $f) }
+    foreach ($f in $optional) {
+        if (Test-Path (Join-Path $Payload $f)) { Put-File (Join-Path $Payload $f) (Join-Path $Dst $f) }
+        elseif (Test-Path (Join-Path $Dst $f)) { Remove-OrSchedule (Join-Path $Dst $f) }
+    }
     # version.txt: the version only (the updater reads its first line)
     Set-Content -Path (Join-Path $Dst "version.txt") -Value $Version -Encoding ASCII
     Ok "程式檔已放到 $Dst（$Version）"

@@ -60,6 +60,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "tools"))
 sys.path.insert(0, os.path.join(REPO, "tools", "lm"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "tools", "lm", "next"))
 sys.stdout.reconfigure(encoding="utf-8")
 
 from train import SIZES, CharLM, BOS  # noqa: E402
@@ -76,6 +77,19 @@ def arg(name, default, cast=str):
     return cast(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else default
 
 
+NEXT = "--next" in sys.argv  # (#41: the next student's vocabulary, <en> at 2, contexts as text.to_units units)
+
+
+def is_han(ch):
+    return "\u3400" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff"
+
+
+def forward(model, x):
+    """The logits of either kind of model (train.CharLM gives (logits, state); the next ones logits alone)."""
+    out = model(x)
+    return out[0] if isinstance(out, tuple) else out
+
+
 class Data:
     def __init__(self):
         from engine.lexicon import Lexicon
@@ -85,7 +99,8 @@ class Data:
         lex = Lexicon()
         self.best = best_readings(lex)
         self.reading_of = reading_of
-        self.vocab = open(os.path.join(WORK, "vocab.txt"), encoding="utf-8").read().rstrip("\n").split("\n")
+        vocab_dir = os.path.join(WORK, "next") if NEXT else WORK
+        self.vocab = open(os.path.join(vocab_dir, "vocab.txt"), encoding="utf-8").read().rstrip("\n").split("\n")
         self.ids = {ch: i for i, ch in enumerate(self.vocab)}
         self.cands = candidates_by_syllable(lex, self.vocab)
         self.index = {s: {int(i): k for k, i in enumerate(a)} for s, a in self.cands.items()}
@@ -96,6 +111,11 @@ class Data:
             return None
         n = len(rd)
         c = "" if os.environ.get("TR_NOCTX") else r.get("ctx", "")  # (TR_NOCTX: the control without contexts)
+        if NEXT:  # (the context as written -> units: Chinese characters and <en>, #41)
+            from text import EN, to_units
+            ctx_ids = [2 if u == EN else self.ids.get(u, 0) for u in to_units(c)]
+        else:  # (today's model reads the Chinese characters alone: a context as written loses the rest)
+            ctx_ids = [self.ids.get(ch, 0) for ch in c if is_han(ch)]
         hyps, eng, tgt, tch, full = [], [], [], [], []
         for t, e, _ in r["hyps"]:
             eng.append(e)
@@ -112,7 +132,7 @@ class Data:
             hyps.append(np.array(ids, dtype=np.int32))
             tgt.append(np.array(pos, dtype=np.int32))
         return {"text": r["text"], "base": r["base"], "syl": rd, "hyps": hyps, "full": full, "eng": eng,
-                "tgt": tgt, "teacher": tch, "ctx": np.array([self.ids.get(ch, 0) for ch in c], dtype=np.int32)}
+                "tgt": tgt, "teacher": tch, "ctx": np.array(ctx_ids, dtype=np.int32)}
 
 
 def score_hyps(model, rows, data, device):
@@ -147,7 +167,7 @@ def score_hyps(model, rows, data, device):
         cand[b, :n] = mats[ri]
         tgt[b, :n] = torch.from_numpy(row["tgt"][hi].astype(np.int64))
     x, at, cand, tgt = x.to(device), at.to(device), cand.to(device), tgt.to(device)
-    logits, _ = model(x)                                     # [B, C + L, V]
+    logits = forward(model, x)                               # [B, C + L, V]
     logits = logits.gather(1, at.clamp(max=C + L - 1)[..., None].expand(-1, -1, logits.size(-1)))  # [B, L, V]
     valid = cand >= 0
     g = logits.float().gather(2, cand.clamp(min=0))          # [B, L, K]
@@ -161,9 +181,11 @@ def score_hyps(model, rows, data, device):
     return out
 
 
-def evaluate(model, w, ev, data, device, label):
+def evaluate(model, w, ev, data, device, label, save=None):
+    """Accuracy on each set; save: a path for every row's result ({set: [right, ...]}, to compare two models)."""
     model.eval()
     lines = []
+    results = {}
     with torch.no_grad():
         for name, rows in ev.items():  # (teacher_rerank.SETS, and TR_EXTRA's: the sets with contexts)
             right = ship = w2r = r2w = 0
@@ -180,6 +202,7 @@ def evaluate(model, w, ev, data, device, label):
                             best, bs = t, val
                     got = best if best is not None else row["base"]
                     ok, ok_s = got == row["text"], row["shipped"] == row["text"]
+                    results.setdefault(name, []).append(bool(ok))
                     right += ok
                     ship += ok_s
                     w2r += ok and not ok_s
@@ -187,6 +210,9 @@ def evaluate(model, w, ev, data, device, label):
             lines.append(f"  {name}: {right / len(rows):.1%} (shipped {ship / len(rows):.1%})  "
                          f"wrong→right {w2r}  right→wrong {r2w}")
     model.train()
+    if save:
+        with open(save, "w", encoding="utf-8") as f:
+            json.dump(results, f)
     msg = f"[{label}] w={w:.3f}\n" + "\n".join(lines)
     print(msg, flush=True)
     return msg
@@ -206,6 +232,10 @@ def main():
     lmw = arg("--lmw", 0.0, float)
     kdw = arg("--kdw", 0.0, float)
     unkw = arg("--unkw", 0.0, float)
+    arch = arg("--arch", "gru")       # (#41: gru = train.CharLM of SIZES[size]; tf / ga = tools/lm/next/models.py)
+    tier = arg("--tier", "light")
+    eval_only = "--eval-only" in sys.argv  # (the start's evaluation alone, at --w: a model's numbers, nothing trained)
+    w0 = arg("--w", 0.5, float)
     try:  # (overrides for a run already queued: distill/overrides.json {"distill": {"x50_d500k": {"epochs": 1}}})
         with open(os.path.join(DIST, "overrides.json"), encoding="utf-8") as f:
             epochs = int(json.load(f).get("distill", {}).get(name, {}).get("epochs", epochs))
@@ -217,10 +247,10 @@ def main():
     random.seed(0)
     data = Data()
     t0 = time.time()
-    teacher = json.load(open(os.path.join(DIST, f"teacher_{tname}.json"), encoding="utf-8"))
+    teacher = {} if eval_only else json.load(open(os.path.join(DIST, f"teacher_{tname}.json"), encoding="utf-8"))
     train = []
     with open(os.path.join(DIST, dfile), encoding="utf-8") as f:
-        for k, line in enumerate(f, 1):
+        for k, line in enumerate([] if eval_only else f, 1):
             row = data.row(json.loads(line), teacher)
             if row and sum(h is not None for h in row["hyps"]) >= 2:
                 train.append(row)
@@ -241,24 +271,36 @@ def main():
         ev[tr.set_name(s)] = rows
     print("train groups", len(train), "loaded in", round(time.time() - t0), "s", flush=True)
 
-    emb, hidden, layers = SIZES[size]
-    model = CharLM(len(data.vocab), emb, hidden, layers).to(device)
+    if arch == "gru":
+        emb, hidden, layers = SIZES[size]
+
+        def make():
+            return CharLM(len(data.vocab), emb, hidden, layers).to(device)
+    else:
+        import models
+
+        def make():
+            return models.build(arch, tier, len(data.vocab)).to(device)
+    model = make()
     if init:
         model.load_state_dict(torch.load(init, map_location=device))
     ref = None
     if kdw > 0 or unkw > 0:
-        ref = CharLM(len(data.vocab), emb, hidden, layers).to(device)
+        ref = make()
         ref.load_state_dict(torch.load(init, map_location=device))
         ref.eval()
         for p in ref.parameters():
             p.requires_grad_(False)
-    wlog = nn.Parameter(torch.tensor(math.log(0.5), device=device))
+    wlog = nn.Parameter(torch.tensor(math.log(w0), device=device))
     opt = torch.optim.AdamW(list(model.parameters()) + [wlog], lr=lr, weight_decay=0.0)
-    steps = epochs * math.ceil(len(train) / groups)
+    steps = max(1, epochs * math.ceil(len(train) / groups))  # (1 with --eval-only: no rows read)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda k: min(1.0, (k + 1) / 200) * max(0.05, 1 - k / steps))
     log = open(os.path.join(DIST, f"{name}.log"), "w", encoding="utf-8")
-    log.write(evaluate(model, math.exp(wlog.item()), ev, data, device, "start") + "\n")
+    log.write(evaluate(model, math.exp(wlog.item()), ev, data, device, "start",
+                       os.path.join(DIST, f"{name}_eval_start.json")) + "\n")
     log.flush()
+    if eval_only:
+        return
     step, t0 = 0, time.time()
     for ep in range(epochs):
         random.shuffle(train)
@@ -299,7 +341,7 @@ def main():
                     xt[b, 1:len(t)] = torch.from_numpy(t[:-1])
                     yt[b, :len(t)] = torch.from_numpy(t)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    lt, _ = model(xt.to(device))
+                    lt = forward(model, xt.to(device))
                 lm_loss = nn.functional.cross_entropy(lt.float().reshape(-1, lt.size(-1)), yt.to(device).reshape(-1),
                                                       ignore_index=-100)
                 loss = loss + lmw * lm_loss
@@ -315,9 +357,9 @@ def main():
                     mask[b, :len(t)] = True
                 xt, mask = xt.to(device), mask.to(device)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    lt, _ = model(xt)
+                    lt = forward(model, xt)
                     with torch.no_grad():
-                        lo, _ = ref(xt)
+                        lo = forward(ref, xt)
                 u_new = torch.log_softmax(lt.float(), -1)[..., 0]
                 u_ref = torch.log_softmax(lo.float(), -1)[..., 0]
                 loss = loss + unkw * ((u_new - u_ref)[mask] ** 2).mean()
@@ -332,9 +374,9 @@ def main():
                     mask[b, :len(t)] = True
                 xt, mask = xt.to(device), mask.to(device)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    lt, _ = model(xt)
+                    lt = forward(model, xt)
                     with torch.no_grad():
-                        lo, _ = ref(xt)
+                        lo = forward(ref, xt)
                 p_ref = torch.log_softmax(lo.float(), -1)
                 p_new = torch.log_softmax(lt.float(), -1)
                 kl = (p_ref.exp() * (p_ref - p_new)).sum(-1)
@@ -352,13 +394,16 @@ def main():
                 print(msg, flush=True)
                 log.write(msg + "\n")
                 log.flush()
-        log.write(evaluate(model, math.exp(wlog.item()), ev, data, device, f"epoch {ep + 1}") + "\n")
+        log.write(evaluate(model, math.exp(wlog.item()), ev, data, device, f"epoch {ep + 1}",
+                           os.path.join(DIST, f"{name}_eval_ep{ep + 1}.json")) + "\n")
         log.flush()
         torch.save(model.state_dict(), os.path.join(DIST, f"{name}.pt"))
         torch.save(model.state_dict(), os.path.join(DIST, f"{name}_ep{ep + 1}.pt"))  # (each epoch kept: the best is picked)
-        json.dump({"size": size, "emb": emb, "hidden": hidden, "layers": layers, "vocab": len(data.vocab),
-                   "w": math.exp(wlog.item()), "teacher": tname, "tlam": tlam, "init": init, "data": dfile,
-                   "epochs": ep + 1}, open(os.path.join(DIST, f"{name}.json"), "w", encoding="utf-8"))
+        shape = ({"size": size, "emb": emb, "hidden": hidden, "layers": layers} if arch == "gru" else
+                 dict(model.cfg, tier=tier))
+        json.dump(dict(shape, vocab=len(data.vocab), next=NEXT, w=math.exp(wlog.item()), teacher=tname, tlam=tlam,
+                       init=init, data=dfile, epochs=ep + 1),
+                  open(os.path.join(DIST, f"{name}.json"), "w", encoding="utf-8"))
     print("saved", round(time.time() - t0), "s", flush=True)
 
 

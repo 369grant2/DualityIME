@@ -1,0 +1,14 @@
+# 接續前文選字 (#37): what was just sent is read before the next sentence while the caret is still right after it
+# (as it comes: 長句選字加強 and 接續前文選字 on; one engine for all lines)
+# sent, then typed right after it: 再 (read after 我們先去吃飯)
+ji3ap7vu0 fm4t z04{ENTER}y94fm4d042u04u/3{ENTER} => 我們先去吃飯再去看電影
+# sent, then the caret moved to the start (Home): what is before it is not what was sent, so no context: 在
+ji3ap7vu0 fm4t z04{ENTER}{HOME}y94fm4d042u04u/3{ENTER} => 在去看電影我們先去吃飯
+# a sentence started and dropped (Esc) right after it, then the caret moved: checked again at the next sentence: 在
+ji3ap7vu0 fm4t z04{ENTER}y{ESC}{HOME}y94fm4d042u04u/3{ENTER} => 在去看電影我們先去吃飯
+# sent, then Enter in the box (a new line): the line break is allowed between, the context stays: 再 (the user's call 2026-11-15)
+vu0 cjo6ru8 vu3yl3{ENTER}{ENTER}y94fm4d042u04u/3{ENTER} => 先回家洗澡{NL}再去看電影
+# sent, then a comma (, is ㄝ too: it waits in the buffer with what comes next), then typed on: the context stays: 再
+vu0 cjo6ru8 vu3yl3{ENTER},y94fm4d042u04u/3{ENTER} => 先回家洗澡,再去看電影
+# sent, then a lone mark (Ctrl+. : 。) and Enter: after a mark alone no line break is allowed between (any paragraph ending in 。 would pass): the context drops: 在
+vu0 cjo6ru8 vu3yl3{ENTER}{^.}{ENTER}y94fm4d042u04u/3{ENTER} => 先回家洗澡。{NL}在去看電影

@@ -31,7 +31,8 @@ NPM = shutil.which("npm") or "npm"
 # (relative to ROOT) doesn't exist yet is shown as SKIP, so a new project can
 # list steps before the code they check exists. None = always run.
 STEPS: list[tuple[str, list[str], Path, str | None]] = [
-    ("unittest", [PYTHON, "-m", "unittest", "tests.test_engine"], ROOT, "tests/test_engine.py"),
+    # (test_gpu: long GPU jobs watched by tools/lm/gpu_run.py, every GPU loop tidies - /collab:correct 2026-11-14)
+    ("unittest", [PYTHON, "-m", "unittest", "tests.test_engine", "tests.test_gpu"], ROOT, "tests/test_engine.py"),
     # The C++ engine (cpp\build.cmd: Visual Studio Build Tools with C++), then both engines
     # key by key: same output, same user.json and keys.json.
     ("cpp build", ["cmd", "/c", str(ROOT / "cpp" / "build.cmd")], ROOT, "cpp/build.cmd"),

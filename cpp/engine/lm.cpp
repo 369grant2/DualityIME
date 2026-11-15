@@ -376,18 +376,33 @@ LmScorer::LmScorer(const CharLM& lm, const Lexicon& lexicon) : lm_(lm), lexicon_
             if (p.size() == syls.size())
                 for (size_t k = 0; k < syls.size(); ++k) out[syls[k]].insert(lm_.id(p[k]));
     }
-    for (auto& [s, ids] : out) cands_[s] = std::vector<int>(ids.begin(), ids.end());
+    auto cands = std::make_shared<std::unordered_map<ustr, std::vector<int>>>();
+    for (auto& [s, ids] : out) (*cands)[s] = std::vector<int>(ids.begin(), ids.end());
+    cands_ = std::move(cands);
+    start_ = lm_.start();
     clear();
 }
 
+LmScorer::LmScorer(const LmScorer& base, const ustr& context)
+    : lm_(base.lm_), lexicon_(base.lexicon_), cands_(base.cands_), context_(context) {
+    start_ = lm_.start();
+    for (char32_t ch : context_) start_ = lm_.step(start_, lm_.id(ch));
+    clear();
+}
+
+const LmScorer* LmScorer::view(const ustr& context) const {
+    if (!view_ || view_->context_ != context) view_.reset(new LmScorer(*this, context));
+    return view_.get();
+}
+
 const std::vector<int>* LmScorer::candidates(const ustr& syllable) const {
-    auto it = cands_.find(syllable);
-    return it == cands_.end() ? nullptr : &it->second;
+    auto it = cands_->find(syllable);
+    return it == cands_->end() ? nullptr : &it->second;
 }
 
 void LmScorer::clear() const {
     states_.clear();
-    states_[ustr()] = lm_.start();
+    states_[ustr()] = start_;
     score_cache_.clear();
     mass_cache_.clear();
 }

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+
 #include "appearance.h"
 #include "globals.h"
 #include "langbar.h"
@@ -849,6 +850,8 @@ bool TextService::key_down(ITfContext* ctx, WPARAM vk, LPARAM lp) {
         return true;
     }
     if (ctrl_punct_key(ctx, vk, lp)) {
+        // (it sends a mark at the caret: 接續前文選字's context checked first, or the mark would pass the next check, #37)
+        if (state_.composition.empty()) check_context(ctx);
         Json req = Json::object();
         req["op"] = Json("ctrl_punct");
         req["ch"] = Json(narrow(std::wstring(1, char_of(vk, lp))));
@@ -875,6 +878,7 @@ bool TextService::key_down(ITfContext* ctx, WPARAM vk, LPARAM lp) {
     if (english_) {
         // first key after switching to English with text still being typed:
         // send that text, plus the character of this key
+        if (state_.composition.empty()) check_context(ctx);  // (a full-width character sent: as ctrl_punct, #37)
         req["op"] = Json("flush");
         req["esc"] = Json(vk == VK_ESCAPE);
         if (vk != VK_RETURN && printable(ch)) req["ch"] = Json(narrow(std::wstring(1, ch)));
@@ -890,6 +894,7 @@ bool TextService::key_down(ITfContext* ctx, WPARAM vk, LPARAM lp) {
         call(ctx, req);
         return true;
     }
+    if (state_.composition.empty()) check_context(ctx);  // (a new sentence: 接續前文選字's context still there? #37)
     const char* special = special_of(vk);
     req["op"] = Json("key");
     if (special) {
@@ -1039,6 +1044,62 @@ void TextService::sync(ITfContext* ctx, const std::wstring& commit) {
         set_text(ec, c.Get(), commit);
         place_ui(ec, c.Get());
     });
+}
+
+void TextService::check_context(ITfContext* ctx) {
+    // 接續前文選字 (#37): the engine reads what it just sent before the next sentence; at each sentence's first key,
+    // while it may hold that text, the text right before the caret must still be it (in the same field), line breaks
+    // after it allowed (Enter pressed in a document: the next line goes on from it, the user's call 2026-11-15) - the
+    // caret moved, text pasted or changed, a message sent (the box emptied), a sentence started and dropped and the
+    // caret moved after: the engine is told to drop it. Nothing typed is logged.
+    if (!engine_context_) return;
+    auto same = std::make_shared<int>(-1);  // -1: the session did not run now (then it counts as changed)
+    if (sent_range_ && sent_context_.Get() == ctx && !sent_text_.empty()) {
+        ComPtr<ITfContext> c(ctx);
+        std::wstring want_text = sent_text_;
+        edit(ctx, [c, want_text, same](TfEditCookie ec) {
+            *same = 0;
+            TF_SELECTION sel{};
+            ULONG fetched = 0;
+            if (FAILED(c->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) || !fetched) return;
+            ComPtr<ITfRange> caret;
+            caret.Attach(sel.range);
+            ComPtr<ITfRange> before;
+            if (FAILED(caret->Clone(&before))) return;
+            before->Collapse(ec, TF_ANCHOR_START);
+            // line breaks allowed between the text sent and the caret (\r\n is two) - not after a lone mark sent (Ctrl+.
+            // after a sentence): any paragraph ending in 。 would pass, the caret clicked anywhere (code-reviewer)
+            // (a word character by code point, not by locale - the DLL runs in the host program's: Han, 注音, kana,
+            // letters and digits plain or full-width; 。，？ are none of these)
+            auto word_char = [](wchar_t ch) {
+                return (ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z') ||
+                       (ch >= 0x3041 && ch <= 0x30FF) || (ch >= 0x3105 && ch <= 0x312F) ||
+                       (ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF) ||
+                       (ch >= 0xD800 && ch <= 0xDFFF) ||  // (a character beyond the BMP: Han of the extensions)
+                       (ch >= 0xFF10 && ch <= 0xFF19) || (ch >= 0xFF21 && ch <= 0xFF3A) || (ch >= 0xFF41 && ch <= 0xFF5A);
+            };
+            bool words = std::any_of(want_text.begin(), want_text.end(), word_char);
+            const LONG BREAKS = words ? 8 : 0;
+            LONG want = static_cast<LONG>(want_text.size()) + BREAKS, moved = 0;
+            before->ShiftStart(ec, -want, &moved, nullptr);
+            std::wstring buf(static_cast<size_t>(want) + 1, L'\0');
+            ULONG got = 0;
+            before->GetText(ec, 0, buf.data(), static_cast<ULONG>(buf.size()), &got);
+            std::wstring text(buf.data(), got);
+            // (\r \n, Word's \v for Shift+Enter, the Unicode line and paragraph separators)
+            size_t end = text.find_last_not_of(L"\r\n\v  ");
+            text = end == std::wstring::npos ? std::wstring() : text.substr(0, end + 1);
+            *same = text.size() >= want_text.size() &&
+                    text.compare(text.size() - want_text.size(), want_text.size(), want_text) == 0 ? 1 : 0;
+        }, false);
+    }
+    if (*same == 1) return;
+    debug("context lost");
+    engine_context_ = false;
+    Json req = Json::object();
+    req["op"] = Json("context_lost");
+    Json reply;
+    if (ask(req, reply)) read_reply(reply);  // (a changed config.json rides on the first reply: code-reviewer)
 }
 
 bool TextService::undo(ITfContext* ctx) {
@@ -1253,6 +1314,7 @@ void TextService::set_text(TfEditCookie ec, ITfContext* ctx, const std::wstring&
         comp_context_.Reset();
     }
     if (!commit.empty()) {
+        engine_context_ = true;  // (接續前文選字, #37: checked at each sentence's first key from now on)
         ComPtr<ITfRange> r;
         LONG len = static_cast<LONG>(commit.size());
         if (composition_) {

@@ -143,6 +143,7 @@ private:
     void read_reply(const Json& reply);
     void sync(ITfContext* ctx, const std::wstring& commit);
     bool undo(ITfContext* ctx);
+    void check_context(ITfContext* ctx);  // 接續前文選字 (#37): is what was sent still right before the caret?
     bool undo_by_keys();  // apps that show TSF only the composition: delete with Backspace
 
     // inside an edit session
@@ -209,6 +210,7 @@ private:
     ComPtr<ITfContext> sent_context_;
     std::wstring sent_text_;
     ULONGLONG sent_at_ = 0;
+    bool engine_context_ = false;  // (#37) the engine may hold a context: text sent and not dropped since
     bool undoing_ = false;  // our Backspaces deleting the sent text are on their way
 
     std::unique_ptr<CandidateWindow> cand_win_;

@@ -1,6 +1,14 @@
 """Teach Qwen3-1.7B Taiwan Traditional Chinese: LoRA (hand-written, no peft) on the GRU's training text.
 
-    py ft_teacher.py [--steps 3000]
+    py ft_teacher.py [--steps 3000] [--base Qwen/Qwen3-4B-Base --out qwen3-4b-zhtw] [--batch 16] [--4bit] [--log 200]
+                     [--text FILE]
+
+--base: another model to teach (#37: a stronger teacher); --out: its folder name under <WORK>\\teacher_rerank;
+--batch: rows per step (a bigger model may need fewer to fit in the GPU's memory; then also more steps).
+--4bit: the model loaded in 4 bits (bitsandbytes NF4) and only the LoRA trained (QLoRA: a 27B in 24 GB); the LoRA is
+then saved alone (<out>/lora.pt, lora.py), not merged. --log: steps between progress lines.
+--text: half the training runs from this file instead (one document a line, e.g. the Taiwan web text of #37's
+docs/superpowers/items/37/fineweb_trad.py), cut at 。！？ into runs of up to 200 characters.
 
 Text: random runs of Chinese from <WORK>\\train.u16 (tools/lm/prepare.py: the training
 files only; dev.u16 and the evaluation files are not read here except dev for the loss check).
@@ -20,26 +28,21 @@ import torch.nn as nn
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # tools/lm
 from common import WORK  # noqa: E402  (DUALITYIME_LM_WORK moves it)
-OUT = os.path.join(WORK, "teacher_rerank", "qwen3-1.7b-zhtw")
-BASE = "Qwen/Qwen3-1.7B"
-RANK, ALPHA = 16, 32
-BLOCK, BATCH, LR = 256, 16, 2e-4
-STEPS = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 3000
+from gpu import tidy  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lora  # noqa: E402
+def _arg(name, default):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 
 
-class LoRA(nn.Module):
-    def __init__(self, base):
-        super().__init__()
-        self.base = base
-        self.a = nn.Parameter(torch.randn(RANK, base.in_features, device=base.weight.device) / math.sqrt(base.in_features))
-        self.b = nn.Parameter(torch.zeros(base.out_features, RANK, device=base.weight.device))
-
-    def forward(self, x):
-        return self.base(x) + (x.float() @ self.a.t() @ self.b.t() * (ALPHA / RANK)).to(x.dtype)
-
-    def merged(self):
-        w = self.base.weight.float() + (self.b @ self.a) * (ALPHA / RANK)
-        return w.to(self.base.weight.dtype)
+OUT = os.path.join(WORK, "teacher_rerank", _arg("--out", "qwen3-1.7b-zhtw"))
+BASE = _arg("--base", "Qwen/Qwen3-1.7B")
+BLOCK, LR = 256, 2e-4
+FOUR_BIT = "--4bit" in sys.argv
+TEXT = _arg("--text", None)
+LOG = int(_arg("--log", 200))
+BATCH = int(_arg("--batch", 16))
+STEPS = int(_arg("--steps", 3000))
 
 
 def runs(path, vocab, rng, want_chars):
@@ -58,6 +61,25 @@ def runs(path, vocab, rng, want_chars):
         if total >= want_chars:
             break
     return out
+
+
+def text_runs(path, rng, want_chars):
+    """Runs of up to 200 characters from a file of one document a line, cut after 。！？, in a random order of
+    documents, until want_chars characters."""
+    with open(path, encoding="utf-8") as f:
+        docs = f.read().split("\n")
+    out, total = [], 0
+    for d in rng.permutation(len(docs)):
+        cur = ""
+        for ch in docs[d]:
+            cur += ch
+            if (ch in "。！？" and len(cur) >= 20) or len(cur) >= 200:
+                out.append(cur.strip())
+                total += len(cur)
+                cur = ""
+        if total >= want_chars:
+            break
+    return [r for r in out if len(r) >= 2]
 
 
 def blocks(texts, tok, bos):
@@ -87,24 +109,27 @@ def main():
     vocab = open(os.path.join(WORK, "vocab.txt"), encoding="utf-8").read().rstrip("\n").split("\n")
     tok = AutoTokenizer.from_pretrained(BASE)
     bos = tok.convert_tokens_to_ids("<|endoftext|>")
-    model = AutoModelForCausalLM.from_pretrained(BASE, torch_dtype=torch.bfloat16).cuda()
+    if FOUR_BIT:
+        from transformers import BitsAndBytesConfig
+        q = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(BASE, quantization_config=q, device_map="cuda")
+    else:
+        model = AutoModelForCausalLM.from_pretrained(BASE, torch_dtype=torch.bfloat16).cuda()
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
     for p in model.parameters():
         p.requires_grad_(False)
-    adapters = []
-    for layer in model.model.layers:
-        for parent, names in ((layer.self_attn, ("q_proj", "k_proj", "v_proj", "o_proj")),
-                              (layer.mlp, ("gate_proj", "up_proj", "down_proj"))):
-            for n in names:
-                lora = LoRA(getattr(parent, n))
-                setattr(parent, n, lora)
-                adapters.append(lora)
-    params = [p for a in adapters for p in (a.a, a.b)]
+    adapters = lora.attach(model)
+    params = [p for a in adapters.values() for p in (a.a, a.b)]
     print("trainable", sum(p.numel() for p in params) / 1e6, "M", flush=True)
     model.enable_input_require_grads()
 
-    train = blocks(runs(os.path.join(WORK, "train.u16"), vocab, rng, STEPS * BATCH * BLOCK * 1.1), tok, bos)
+    want = STEPS * BATCH * BLOCK * 1.1
+    if TEXT:  # (half of it from --text, shuffled together)
+        mixed = runs(os.path.join(WORK, "train.u16"), vocab, rng, want / 2) + text_runs(TEXT, rng, want / 2)
+        train = blocks([mixed[i] for i in rng.permutation(len(mixed))], tok, bos)
+    else:
+        train = blocks(runs(os.path.join(WORK, "train.u16"), vocab, rng, want), tok, bos)
     dev = blocks(runs(os.path.join(WORK, "dev.u16"), vocab, np.random.default_rng(1), 200_000), tok, bos)[:256]
     print("train rows", len(train), "dev rows", len(dev), flush=True)
 
@@ -128,23 +153,22 @@ def main():
         opt.step()
         sched.step()
         opt.zero_grad(set_to_none=True)
-        if step % 200 == 0 or step == STEPS - 1:
+        tidy()  # (tools/lm/gpu.py: without it the GPU spills into system memory and the job crawls)
+        if step % LOG == 0 or step == STEPS - 1:
             print(f"step {step} loss {loss.item():.4f} {time.time() - t0:.0f}s", flush=True)
         if step and step % 1000 == 0:
             print("dev loss", round(dev_loss(), 4), flush=True)
     print("dev loss after", round(dev_loss(), 4), flush=True)
-    # merge and save
-    with torch.no_grad():
-        for layer in model.model.layers:
-            for parent, names in ((layer.self_attn, ("q_proj", "k_proj", "v_proj", "o_proj")),
-                                  (layer.mlp, ("gate_proj", "up_proj", "down_proj"))):
-                for n in names:
-                    lora = getattr(parent, n)
-                    lora.base.weight.copy_(lora.merged())
-                    setattr(parent, n, lora.base)
-    model.config.use_cache = True
-    model.save_pretrained(OUT)
-    tok.save_pretrained(OUT)
+    if FOUR_BIT:  # (4-bit weights cannot take the LoRA merged in: saved alone, with the base it belongs to)
+        os.makedirs(OUT, exist_ok=True)
+        lora.save(adapters, os.path.join(OUT, "lora.pt"))
+        with open(os.path.join(OUT, "base.txt"), "w", encoding="utf-8") as f:
+            f.write(BASE + "\n")
+    else:  # merge and save
+        lora.detach_merged(model)
+        model.config.use_cache = True
+        model.save_pretrained(OUT)
+        tok.save_pretrained(OUT)
     print("saved", OUT, flush=True)
 
 

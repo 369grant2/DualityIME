@@ -1,16 +1,19 @@
 """Checks that the C++ engine gives exactly the same results as the Python one.
 
-    python tools/compare.py [count] [seed]
+    python tools/compare.py [count] [seed] [--lm-plus <file>]
 
 Types the same key scripts into both (tools/trace.py and cpp's sz_trace.exe):
 hand-written cases plus `count` random ones (sentences from the dictionary,
 English words, punctuation, numbers, candidate picks, Tab, undo, Caps Lock,
 the symbol keyboard and random keys), and compares the state after every key.
+--lm-plus: every setting with 選字模型 plus reading that model file (a version 2 file, #41: engine/lm_next.py), both
+engines (C++ on a copy of data/ with it as lm_plus.bin).
 Build the C++ side first: cpp\\build.cmd
 """
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +42,10 @@ CASES = [
     # a pick in the first run read by the second
     "{CL}ji356ru, 5k4u;4283cjo41o4Github1u04g4t/6tj/6zj4a87{ENTER}",
     "{CL}ji3m/4Githubck6Gitlab1u3rul4{ENTER}",
+    # #41: a run ending in digits out of order that became a number, then a run after it (the order check reads the
+    # number's mark with what follows it: 824 ok two runs of letters and digits, 824 one)
+    "{CL}ji3ap7y.3824 ok ji3ap7y.3824{ENTER}{CL}ji3ap7y.3824 ji3ap7y.3824{ENTER}",
+    "{CL}ji3m/4Qwen3-1.7B cl3{ENTER}ji3ap7y.3824{ENTER}",
     "{CL}ji3ap7vu0 fm4t z04,y94fm4{ENTER}",
     "{CL}ji3ap7vu0 fm4t z04{ENTER}Githuby94fm4{ENTER}",
     "{CL}g4ok y94fm4{HOME}{DOWN}2{ENTER}",
@@ -395,6 +402,10 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, check=True).stdout.decode("utf-8").split("\n")
 
 
+LM_PLUS = None  # (--lm-plus: the model file; the C++ side's data folder then)
+DATA = os.path.join(ROOT, "data")
+
+
 def compare(cases, config, tmp):
     script = os.path.join(tmp, "script.txt")
     with open(script, "w", encoding="utf-8", newline="\n") as f:
@@ -418,8 +429,8 @@ def compare(cases, config, tmp):
             with open(os.path.join(tmp, side, name), "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
     py = run([sys.executable, os.path.join(ROOT, "tools", "trace.py"), os.path.join(tmp, "py", "user.json"), script,
-              os.path.join(tmp, "py", "config.json")])
-    cc = run([EXE, os.path.join(ROOT, "data"), os.path.join(tmp, "cpp", "user.json"), script,
+              os.path.join(tmp, "py", "config.json")] + (["--lm-plus", LM_PLUS] if LM_PLUS else []))
+    cc = run([EXE, DATA, os.path.join(tmp, "cpp", "user.json"), script,
               os.path.join(tmp, "cpp", "config.json")])
     case, keys = None, 0
     for i, (a, b) in enumerate(zip(py, cc)):
@@ -498,8 +509,18 @@ def compare_frames():
 
 
 def main(count=2000, seed=1):
+    global DATA
     if not os.path.exists(EXE):
         sys.exit(f"build the C++ engine first: {EXE} not found")
+    configs = CONFIGS
+    lm_dir = None
+    if LM_PLUS:
+        # (every setting on the plus model: its 64 characters where a setting has none, long_sentence as the setting)
+        configs = [{"lm_context_len_plus": 64, **c, "lm_model": "plus"} for c in CONFIGS]
+        lm_dir = tempfile.TemporaryDirectory()
+        DATA = os.path.join(lm_dir.name, "data")
+        shutil.copytree(os.path.join(ROOT, "data"), DATA)
+        shutil.copyfile(LM_PLUS, os.path.join(DATA, "lm_plus.bin"))
     frames = compare_frames()
     lexicon = Lexicon()
     ranks = load_english()
@@ -507,13 +528,21 @@ def main(count=2000, seed=1):
     pool = readings_pool(lexicon)
     total, cases_run = 0, 0
     with tempfile.TemporaryDirectory() as tmp:
-        for config in CONFIGS:
+        for config in configs:
             rng = random.Random(seed)
             cases = CASES + [random_case(rng, pool, english) for _ in range(count)]
             total += compare(cases, config, tmp)
             cases_run += len(cases)
-    print(f"same: {cases_run} cases, {total} keys, {len(CONFIGS)} settings, {frames} photo frames")
+    print(f"same: {cases_run} cases, {total} keys, {len(configs)} settings, {frames} photo frames"
+          + (f", 選字模型 plus {os.path.basename(LM_PLUS)}" if LM_PLUS else ""))
+    if lm_dir:
+        lm_dir.cleanup()
 
 
 if __name__ == "__main__":
-    main(*(int(a) for a in sys.argv[1:3]))
+    args = sys.argv[1:]
+    if "--lm-plus" in args:
+        i = args.index("--lm-plus")
+        LM_PLUS = os.path.abspath(args[i + 1])
+        del args[i:i + 2]
+    main(*(int(a) for a in args[:2]))

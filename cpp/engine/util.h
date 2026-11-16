@@ -23,6 +23,9 @@ inline bool is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <
 inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
 inline bool is_alpha(char32_t c) { return c < 128 && is_alpha(static_cast<char>(c)); }
 inline bool is_digit(char32_t c) { return c < 128 && is_digit(static_cast<char>(c)); }
+// a Chinese character as the engine counts one: the ranges the language model's training text keeps
+// (tools/lm/prepare.py RANGES: 㐀-鿿, 豈-﫿; engine/lexicon.py is_han)
+inline bool is_han(char32_t c) { return (c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF); }
 template <class S> bool all_alpha(const S& s) {  // str.isalpha(): non-empty, letters only
     if (s.empty()) return false;
     for (auto c : s) if (!is_alpha(c)) return false;

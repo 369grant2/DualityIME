@@ -10,9 +10,15 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 
 
+def is_han(ch):
+    """A Chinese character as the engine counts one: the ranges the language model's training text keeps
+    (tools/lm/prepare.py RANGES: 㐀-鿿, 豈-﫿; cpp/engine/util.h is_han)."""
+    return "㐀" <= ch <= "鿿" or "豈" <= ch <= "﫿"
+
+
 def _is_han(text):
     """Chinese characters only (肯德基)."""
-    return bool(text) and all("㐀" <= ch <= "鿿" or "豈" <= ch <= "﫿" for ch in text)
+    return bool(text) and all(is_han(ch) for ch in text)
 
 def _toneless(reading_key):
     """ㄒㄧㄚˋ-ㄗㄞˋ -> ㄒㄧㄚ-ㄗㄞ"""

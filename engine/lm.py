@@ -40,6 +40,7 @@ MAGIC = b"DLM1"
 VERSION = 1
 FILE_NAME = "lm.bin"
 TIER_FILES = {"light": FILE_NAME, "plus": "lm_plus.bin", "max": "lm_max.bin"}  # 選字模型 (#41): the file of each tier
+EN_MARK = "\ue000"  # (#41) one English or letters-and-digits run in a context, for a model that knows English
 HEADER = ("version", "q", "mul_shift", "vocab", "emb", "hidden", "layers", "act_range", "exp_range", "log_bits")
 INT8 = ("emb_q", "w_ih_q", "w_hh_q", "proj_q")   # (names without a layer number end the same)
 
@@ -87,6 +88,11 @@ def act(table, x):
 
 
 class CharLM:
+    knows_english = False   # (#41: a version 2 model, engine/lm_next.py, reads EN_MARK; this one never sees it)
+    lm_weight = None        # (...and brings its own weight and order thresholds; this one has the engine's)
+    order_thresholds = None
+    context_max = None      # (...and the context it was made for: the engine reads no more, #41)
+
     def __init__(self, path=None):
         """Reads lm.bin; raises ValueError (or OSError) when it cannot. IntLM fills self.t itself."""
         _numpy()
@@ -209,6 +215,11 @@ def load(data_dir=DATA_DIR, tier="light"):
         path = os.path.join(data_dir or DATA_DIR, TIER_FILES.get(tier, FILE_NAME))
         if not os.path.isfile(path):
             return None
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        if magic == b"DLM2":  # (#41: the next student, engine/lm_next.py)
+            from .lm_next import NextLM
+            return NextLM(path)
         return CharLM(path)
     except Exception:
         return None

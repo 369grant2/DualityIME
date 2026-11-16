@@ -69,11 +69,15 @@ static std::string state(const Composer& c, const std::string& extra) {
 }
 
 // Each line of the file: character ids, "|", candidate ids. Prints for each line the scores of the
-// candidates after <s> and after each character, one line each, the scores separated by spaces.
-static int lm_check(const char* ids_path, const char* data_dir) {
-    auto lm = CharLM::load(widen(data_dir) + L"\\lm.bin");
+// candidates after <s> and after each character, one line each, the scores separated by spaces, then " | " and the
+// Q16 mass of the candidates but <unk> (mass_q16). model: a data folder (its lm.bin) or a model file (*.bin, version 1
+// or 2).
+static int lm_check(const char* ids_path, const char* model) {
+    std::wstring path = widen(model);
+    if (path.size() < 4 || _wcsicmp(path.c_str() + path.size() - 4, L".bin") != 0) path += L"\\lm.bin";
+    auto lm = LmModel::load(path);
     if (!lm) {
-        std::fprintf(stderr, "no language model in %s\n", data_dir);
+        std::fprintf(stderr, "no language model in %s\n", model);
         return 1;
     }
     std::fprintf(stderr, "path: %s\n", lm->avx2() ? "avx2" : "scalar");
@@ -106,11 +110,14 @@ static int lm_check(const char* ids_path, const char* data_dir) {
             if (c < 0 || c >= lm->vocab()) return 3;
         for (int c : cands)
             if (c < 0 || c >= lm->vocab()) return 3;
-        CharLM::State st = lm->start();
+        std::vector<int> known;
+        for (int c : cands)
+            if (c > 0) known.push_back(c);
+        LmState st = lm->start();
         for (size_t k = 0; k <= ids.size(); ++k) {
             auto sc = lm->scores(st, cands);
             for (size_t i = 0; i < sc.size(); ++i) out += (i ? " " : "") + std::to_string(sc[i]);
-            out += "\n";
+            out += " | " + std::to_string(known.empty() ? 0 : lm->mass_q16(st, known)) + "\n";
             if (k < ids.size()) st = lm->step(st, ids[k]);
         }
     }

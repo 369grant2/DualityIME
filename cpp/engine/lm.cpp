@@ -1,97 +1,24 @@
 #include "lm.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <set>
 #include <unordered_set>
 
-#if defined(_M_X64) || defined(_M_IX86)
-#include <immintrin.h>
-#include <intrin.h>
-#define SZ_LM_X86 1
-#endif
-
 #include "lexicon.h"
+#include "lm_detail.h"
 
 namespace sz {
 
+using namespace lmq;
+
 namespace {
 
-// the same constants as engine/lm.py (the file must have been made for them)
-constexpr int Q = 10;
-constexpr int64_t ONE = int64_t(1) << Q;
-constexpr int MUL_SHIFT = 24;
-constexpr int64_t ACT_RANGE = 8 * ONE;
-constexpr int64_t EXP_RANGE = 16 * ONE;
-constexpr int LOG_BITS = 10;
-constexpr int64_t LOG_SIZE = int64_t(1) << LOG_BITS;
-constexpr int64_t LN2_Q = 710;
 constexpr uint32_t VERSION = 1;
 constexpr int64_t EMBED_MAX = 4096;  // tools/lm/export.py's bounds: the int32 sums cannot overflow
-constexpr int64_t INT32_LIMIT = int64_t(1) << 31;
-
-// int64 accumulators times row multipliers -> Q10 (round half up), engine/lm.py requant
-inline int64_t requant(int64_t acc, int64_t m) { return (acc * m + (int64_t(1) << (MUL_SHIFT - 1))) >> MUL_SHIFT; }
-
-inline int64_t act(const std::vector<int32_t>& table, int64_t x) {
-    return table[static_cast<size_t>(std::clamp(x, -ACT_RANGE, ACT_RANGE) + ACT_RANGE)];
-}
-
-int32_t dot_scalar(const int8_t* w, const int16_t* x, int n) {
-    int32_t acc = 0;
-    for (int j = 0; j < n; ++j) acc += static_cast<int32_t>(w[j]) * static_cast<int32_t>(x[j]);
-    return acc;
-}
 
 #ifdef SZ_LM_X86
-// (the same exact integer sum in another order: identical while nothing overflows)
-int32_t dot_avx2(const int8_t* w, const int16_t* x, int n) {
-    __m256i acc = _mm256_setzero_si256();
-    int j = 0;
-    for (; j + 16 <= n; j += 16) {
-        __m256i w16 = _mm256_cvtepi8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + j)));
-        __m256i x16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + j));
-        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(w16, x16));
-    }
-    __m128i s = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
-    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0x4E));
-    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0xB1));
-    int32_t r = _mm_cvtsi128_si32(s);
-    for (; j < n; ++j) r += static_cast<int32_t>(w[j]) * static_cast<int32_t>(x[j]);
-    return r;
-}
-
-inline int32_t hsum(__m256i v) {
-    __m128i s = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
-    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0x4E));
-    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0xB1));
-    return _mm_cvtsi128_si32(s);
-}
-
-// four rows by one vector: each piece of the vector loaded once (the same sums as dot_avx2)
-void dot4_avx2(const int8_t* w, size_t stride, const int16_t* x, int n, int32_t* out) {
-    __m256i a0 = _mm256_setzero_si256(), a1 = a0, a2 = a0, a3 = a0;
-    int j = 0;
-    for (; j + 16 <= n; j += 16) {
-        __m256i x16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + j));
-        auto row = [&](size_t r) {
-            return _mm256_cvtepi8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + r * stride + j)));
-        };
-        a0 = _mm256_add_epi32(a0, _mm256_madd_epi16(row(0), x16));
-        a1 = _mm256_add_epi32(a1, _mm256_madd_epi16(row(1), x16));
-        a2 = _mm256_add_epi32(a2, _mm256_madd_epi16(row(2), x16));
-        a3 = _mm256_add_epi32(a3, _mm256_madd_epi16(row(3), x16));
-    }
-    out[0] = hsum(a0);
-    out[1] = hsum(a1);
-    out[2] = hsum(a2);
-    out[3] = hsum(a3);
-    for (; j < n; ++j)
-        for (size_t r = 0; r < 4; ++r) out[r] += static_cast<int32_t>(w[r * stride + j]) * static_cast<int32_t>(x[j]);
-}
-
 bool cpu_has_avx2() {
     int info[4];
     __cpuid(info, 0);
@@ -104,7 +31,9 @@ bool cpu_has_avx2() {
 }
 #endif
 
-bool use_avx2() {
+}  // namespace
+
+bool lmq::use_avx2() {
     const char* forced = std::getenv("DUALITYIME_LM_SCALAR");
     if (forced && std::strcmp(forced, "1") == 0) return false;
 #ifdef SZ_LM_X86
@@ -114,22 +43,24 @@ bool use_avx2() {
 #endif
 }
 
-struct File {
-    FILE* f = nullptr;
-    ~File() {
-        if (f) std::fclose(f);
+std::unique_ptr<LmModel> LmModel::load(const std::wstring& path) {
+    char magic[4] = {};
+    {
+        File file;
+        file.f = _wfopen(path.c_str(), L"rb");
+        if (!file.f || !file.read(magic, 4)) return nullptr;
     }
-    bool read(void* p, size_t n) { return n == 0 || std::fread(p, 1, n, f) == n; }
-    bool u32(uint32_t& v) { return read(&v, 4); }
-    template <class T> bool array(std::vector<T>& out, uint64_t count) {
-        uint32_t n = 0;
-        if (!u32(n) || n != count) return false;
-        out.resize(n);
-        return read(out.data(), static_cast<size_t>(n) * sizeof(T));
-    }
-};
+    if (std::memcmp(magic, "DLM1", 4) == 0) return CharLM::load(path);
+    if (std::memcmp(magic, "DLM2", 4) == 0) return NextLM::load(path);
+    return nullptr;
+}
 
-}  // namespace
+std::vector<LmState> LmModel::steps(const std::vector<const LmState*>& states, const std::vector<int>& cs) const {
+    std::vector<LmState> out;
+    out.reserve(states.size());
+    for (size_t b = 0; b < states.size(); ++b) out.push_back(step(*states[b], cs[b]));
+    return out;
+}
 
 std::unique_ptr<CharLM> CharLM::load(const std::wstring& path) {
     File file;
@@ -194,10 +125,9 @@ std::unique_ptr<CharLM> CharLM::load(const std::wstring& path) {
          file.array(lm->exp_, EXP_RANGE + 1) && file.array(lm->log_, LOG_SIZE);
     if (!ok) return nullptr;
     // int8 weights within -127..127 (the bounds behind the int32 sums; engine/lm.py checks the same)
-    auto full_range = [](const std::vector<int8_t>& w) { return std::find(w.begin(), w.end(), -128) != w.end(); };
-    if (full_range(lm->emb_q_) || full_range(lm->proj_q_)) return nullptr;
+    if (has_minus_128(lm->emb_q_) || has_minus_128(lm->proj_q_)) return nullptr;
     for (auto& y : lm->layer_)
-        if (full_range(y.w_ih_q) || full_range(y.w_hh_q)) return nullptr;
+        if (has_minus_128(y.w_ih_q) || has_minus_128(y.w_hh_q)) return nullptr;
     // what keeps the sums in 32 bits and the states within -1..1: embedded characters within
     // EMBED_MAX, gates within 0..1, tanh within -1..1; and the best candidate's exp() above 0
     for (size_t c = 0; c < static_cast<size_t>(V); ++c)
@@ -205,13 +135,7 @@ std::unique_ptr<CharLM> CharLM::load(const std::wstring& path) {
             int64_t x = requant(lm->emb_q_[c * static_cast<size_t>(E) + j] * ONE, lm->emb_m_[c]);
             if (x > EMBED_MAX || x < -EMBED_MAX) return nullptr;
         }
-    for (int32_t v : lm->sigmoid_)
-        if (v < 0 || v > ONE) return nullptr;
-    for (int32_t v : lm->tanh_)
-        if (v < -ONE || v > ONE) return nullptr;
-    for (int32_t v : lm->exp_)
-        if (v < 0 || v > 65536) return nullptr;
-    if (lm->exp_[0] < 1) return nullptr;
+    if (!tables_ok(lm->sigmoid_, lm->tanh_, lm->exp_)) return nullptr;
     lm->avx2_ = use_avx2();
     return lm;
 }
@@ -221,12 +145,7 @@ int CharLM::id(char32_t ch) const {
     return it == ids_.end() ? 0 : it->second;
 }
 
-int32_t CharLM::dot(const int8_t* row, const int16_t* x, int n) const {
-#ifdef SZ_LM_X86
-    if (avx2_) return dot_avx2(row, x, n);
-#endif
-    return dot_scalar(row, x, n);
-}
+int32_t CharLM::dot(const int8_t* row, const int16_t* x, int n) const { return lmq::dot(avx2_, row, x, n); }
 
 void CharLM::matvec(const std::vector<int8_t>& w, const std::vector<int32_t>& m, const int16_t* x, int rows, int n,
                     std::vector<int64_t>& out) const {
@@ -257,25 +176,30 @@ void CharLM::matvecs(const std::vector<int8_t>& w, const std::vector<int32_t>& m
     }
 }
 
-CharLM::State CharLM::start() const { return step(State(static_cast<size_t>(layers_) * H_, 0), 1); }
+LmState CharLM::start() const {
+    LmState zero;
+    zero.h.assign(static_cast<size_t>(layers_) * H_, 0);
+    return step(zero, 1);
+}
 
-CharLM::State CharLM::step(const State& state, int c) const { return std::move(steps({&state}, {c})[0]); }
+LmState CharLM::step(const LmState& state, int c) const { return std::move(steps({&state}, {c})[0]); }
 
-std::vector<CharLM::State> CharLM::steps(const std::vector<const State*>& states, const std::vector<int>& cs) const {
+std::vector<LmState> CharLM::steps(const std::vector<const LmState*>& states, const std::vector<int>& cs) const {
     const int H = H_;
     const size_t B = states.size();
     std::vector<std::vector<int16_t>> x(B, std::vector<int16_t>(E_));
     for (size_t b = 0; b < B; ++b)
         for (int j = 0; j < E_; ++j)
             x[b][j] = static_cast<int16_t>(requant(emb_q_[static_cast<size_t>(cs[b]) * E_ + j] * ONE, emb_m_[cs[b]]));
-    std::vector<State> out(B, State(static_cast<size_t>(layers_) * H));
+    std::vector<LmState> out(B);
+    for (auto& o : out) o.h.resize(static_cast<size_t>(layers_) * H);
     std::vector<std::vector<int64_t>> gi, gh;
     std::vector<const int16_t*> xs(B), hs(B);
     for (int l = 0; l < layers_; ++l) {
         const Layer& y = layer_[l];
         for (size_t b = 0; b < B; ++b) {
             xs[b] = x[b].data();
-            hs[b] = states[b]->data() + static_cast<size_t>(l) * H;
+            hs[b] = states[b]->h.data() + static_cast<size_t>(l) * H;
         }
         matvecs(y.w_ih_q, y.w_ih_m, xs, 3 * H, y.n_in, gi);
         matvecs(y.w_hh_q, y.w_hh_m, hs, 3 * H, H, gh);
@@ -287,7 +211,7 @@ std::vector<CharLM::State> CharLM::steps(const std::vector<const State*>& states
                 k[j] += y.b_hh[j];
             }
             const int16_t* h = hs[b];
-            int16_t* o = out[b].data() + static_cast<size_t>(l) * H;
+            int16_t* o = out[b].h.data() + static_cast<size_t>(l) * H;
             for (int j = 0; j < H; ++j) {
                 int64_t r = act(sigmoid_, g[j] + k[j]);
                 int64_t z = act(sigmoid_, g[H + j] + k[H + j]);
@@ -301,9 +225,9 @@ std::vector<CharLM::State> CharLM::steps(const std::vector<const State*>& states
     return out;
 }
 
-std::vector<int64_t> CharLM::logits(const State& state, const std::vector<int>& cands) const {
+std::vector<int64_t> CharLM::logits(const LmState& state, const std::vector<int>& cands) const {
     std::vector<int64_t> p;
-    matvec(proj_q_, proj_m_, state.data() + static_cast<size_t>(layers_ - 1) * H_, E_, H_, p);
+    matvec(proj_q_, proj_m_, state.h.data() + static_cast<size_t>(layers_ - 1) * H_, E_, H_, p);
     int64_t total = 0, top = 0;
     for (int j = 0; j < E_; ++j) {
         p[j] += proj_b_[j];
@@ -331,7 +255,7 @@ std::vector<int64_t> CharLM::logits(const State& state, const std::vector<int>& 
     return out;
 }
 
-std::vector<int64_t> CharLM::scores(const State& state, const std::vector<int>& cands) const {
+std::vector<int64_t> CharLM::scores(const LmState& state, const std::vector<int>& cands) const {
     std::vector<int64_t> d = logits(state, cands);
     if (d.empty()) return d;
     int64_t top = *std::max_element(d.begin(), d.end());
@@ -340,15 +264,12 @@ std::vector<int64_t> CharLM::scores(const State& state, const std::vector<int>& 
         v -= top;  // <= 0
         s += exp_[static_cast<size_t>(std::min(-v, EXP_RANGE))];  // Q16
     }
-    int k = 0;  // 2^k <= s < 2^(k+1)
-    while ((s >> (k + 1)) != 0) ++k;
-    int64_t frac = ((s - (int64_t(1) << k)) << LOG_BITS) >> k;  // the top LOG_BITS bits under the leading one
-    int64_t log_s = (k - 16) * LN2_Q + log_[static_cast<size_t>(frac)];  // ln(s / 65536), Q10
+    int64_t log_s = log_q10(s, log_);  // ln(s / 65536), Q10
     for (auto& v : d) v -= log_s;
     return d;
 }
 
-int64_t CharLM::mass_q16(const State& state, const std::vector<int>& ids) const {
+int64_t CharLM::mass_q16(const LmState& state, const std::vector<int>& ids) const {
     if (all_.empty()) {
         all_.resize(static_cast<size_t>(V_));
         for (int i = 0; i < V_; ++i) all_[static_cast<size_t>(i)] = i;
@@ -367,7 +288,7 @@ int64_t CharLM::mass_q16(const State& state, const std::vector<int>& ids) const 
 
 // ---- LmScorer ----
 
-LmScorer::LmScorer(const CharLM& lm, const Lexicon& lexicon) : lm_(lm), lexicon_(lexicon) {
+LmScorer::LmScorer(const LmModel& lm, const Lexicon& lexicon) : lm_(lm), lexicon_(lexicon) {
     // (at load, not on the first key: it walks the whole dictionary, 60 ms)
     std::unordered_map<ustr, std::set<int>> out;
     for (auto& [reading, lst] : lexicon_.entries()) {
@@ -379,12 +300,13 @@ LmScorer::LmScorer(const CharLM& lm, const Lexicon& lexicon) : lm_(lm), lexicon_
     auto cands = std::make_shared<std::unordered_map<ustr, std::vector<int>>>();
     for (auto& [s, ids] : out) (*cands)[s] = std::vector<int>(ids.begin(), ids.end());
     cands_ = std::move(cands);
+    kept_ = std::max<size_t>(64, std::min(LM_STATES_KEPT, LM_STATES_BYTES / std::max<size_t>(1, lm_.state_bytes())));
     start_ = lm_.start();
     clear();
 }
 
 LmScorer::LmScorer(const LmScorer& base, const ustr& context)
-    : lm_(base.lm_), lexicon_(base.lexicon_), cands_(base.cands_), context_(context), base_(&base) {
+    : lm_(base.lm_), lexicon_(base.lexicon_), cands_(base.cands_), context_(context), base_(&base), kept_(base.kept_) {
     start_ = lm_.start();
     for (char32_t ch : context_) start_ = lm_.step(start_, lm_.id(ch));
     clear();
@@ -417,8 +339,7 @@ void LmScorer::clear() const {
 
 void LmScorer::room() const {
     if (!base_) {
-        if (states_.size() >= LM_STATES_KEPT || score_cache_.size() >= LM_STATES_KEPT ||
-            mass_cache_.size() >= LM_STATES_KEPT)
+        if (states_.size() >= kept_ || score_cache_.size() >= LM_STATES_KEPT || mass_cache_.size() >= LM_STATES_KEPT)
             clear();
         return;
     }
@@ -431,7 +352,7 @@ void LmScorer::room() const {
         masses += v->mass_cache_.size();
         listed = listed || v.get() == this;
     }
-    if (states >= LM_STATES_KEPT || scores >= LM_STATES_KEPT || masses >= LM_STATES_KEPT) {
+    if (states >= kept_ || scores >= LM_STATES_KEPT || masses >= LM_STATES_KEPT) {
         for (auto& v : base_->views_) v->clear();
         if (!listed) clear();  // (a view already dropped from the list, still in use by its caller)
     }
@@ -456,28 +377,28 @@ void LmScorer::prepare(const std::vector<ustr>& texts) const {
     for (auto& level : by_len) count += level.size();
     size_t scored = 0;  // (the scores text_score keeps next, at most one per character)
     for (const ustr& t : texts) scored += t.size();
-    if (states_.size() + count >= LM_STATES_KEPT || score_cache_.size() + scored >= LM_STATES_KEPT) {
+    if (states_.size() + count >= kept_ || score_cache_.size() + scored >= LM_STATES_KEPT) {
         // (now, not part way through text_score: room() would drop the states kept or just
         // stepped, and each would be stepped again alone; the states and scores are the same either way)
         clear();
         by_len = missing();
     }
     for (auto& level : by_len) {
-        std::vector<const CharLM::State*> parents;
+        std::vector<const LmState*> parents;
         std::vector<int> ids;
         for (const ustr& p : level) {
             parents.push_back(&states_.at(p.substr(0, p.size() - 1)));  // (nodes stay put as the map grows)
             ids.push_back(lm_.id(p.back()));
         }
-        std::vector<CharLM::State> next = lm_.steps(parents, ids);
+        std::vector<LmState> next = lm_.steps(parents, ids);
         for (size_t k = 0; k < level.size(); ++k) states_[level[k]] = std::move(next[k]);
     }
 }
 
-CharLM::State LmScorer::state(const ustr& text) const {
+LmState LmScorer::state(const ustr& text) const {
     size_t k = text.size();
     while (!states_.count(text.substr(0, k))) --k;
-    CharLM::State st = states_.at(text.substr(0, k));
+    LmState st = states_.at(text.substr(0, k));
     for (size_t j = k; j < text.size(); ++j) {
         st = lm_.step(st, lm_.id(text[j]));
         room();
@@ -535,7 +456,7 @@ const LmScorer* LanguageModel::get(const std::string& tier) const {
     Tier& t = tiers_[k];
     if (!t.tried) {
         t.tried = true;
-        t.model = CharLM::load(dir_ + L"\\" + files[k]);
+        t.model = LmModel::load(dir_ + L"\\" + files[k]);
         if (t.model) t.scorer = std::make_unique<LmScorer>(*t.model, lexicon_);
     }
     if (!t.scorer && k != 0) return get("light");

@@ -2,7 +2,9 @@
 key, in the same format as cpp/tools/trace.cpp (see there), so
 tools/compare.py can diff the two engines.
 
-    python tools/trace.py <user.json> <script file> [config.json]
+    python tools/trace.py <user.json> <script file> [config.json] [--lm-plus <file>]
+
+--lm-plus: 選字模型 plus reads that model file (tools/compare.py --lm-plus, #41).
 """
 import os
 import sys
@@ -79,4 +81,10 @@ def main(user_path, script_path, config_path=None):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    args = sys.argv[1:]
+    if "--lm-plus" in args:
+        i = args.index("--lm-plus")
+        from engine import lm
+        lm.TIER_FILES["plus"] = os.path.abspath(args[i + 1])  # (an absolute path: os.path.join keeps it as it is)
+        del args[i:i + 2]
+    main(*args[:3])

@@ -11,6 +11,7 @@
 #include <tuple>
 #include <unordered_set>
 
+#include "nfkc_units.h"
 #include "symbols.h"
 
 namespace sz {
@@ -1014,8 +1015,12 @@ bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>&
                     const BigramModel* bigram, const LmScorer* lm, const std::set<size_t>& numbers,
                     const std::function<ustr()>& context) {
     const Token& t = tokens[run[k]];
-    auto threshold = ORDER_LM_THRESHOLDS_Q16.find(t.value);
-    if (!lm || !lexicon || threshold == ORDER_LM_THRESHOLDS_Q16.end() || k + 1 != run.size()) return false;
+    if (!lm || !lexicon || k + 1 != run.size()) return false;
+    // (a version 2 model's own table, #41; else the engine's)
+    const auto* own = lm->model().order_thresholds();
+    const auto& table = own ? *own : ORDER_LM_THRESHOLDS_Q16;
+    auto threshold = table.find(t.value);
+    if (threshold == table.end()) return false;
     size_t first = 0;
     for (size_t j = 0; j < k; ++j)
         if (numbers.count(run[j])) first = j + 1;
@@ -1033,9 +1038,84 @@ bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>&
     return lm->syllable_mass_q16(before, t.value) >= threshold->second;
 }
 
+// (after NFKC: full-width letters and digits are ASCII by then)
+static bool unit_char(char32_t ch) {
+    return (ch >= U'0' && ch <= U'9') || (ch >= U'A' && ch <= U'Z') || (ch >= U'a' && ch <= U'z');
+}
+
+// #41: what a model that knows English reads of a text (engine/composer.py context_units): each character as its NFKC
+// first (the training text's, tools/lm/next/text.py: １．５ one run, ⼀ is 一; nfkc_units.h), then each Chinese
+// character, and one EN_MARK for each run of letters and digits (single - . _ between them in the run); everything
+// else dropped, not cutting the text
+ustr context_units(const ustr& raw) {
+    ustr text;
+    for (char32_t ch : raw) {
+        if (ch < 0x80) {
+            text.push_back(ch);
+            continue;
+        }
+        auto it = std::lower_bound(std::begin(NFKC_UNITS), std::end(NFKC_UNITS), ch,
+                                   [](const NfkcUnit& u, char32_t c) { return u.cp < c; });
+        if (it != std::end(NFKC_UNITS) && it->cp == ch)
+            text += it->to;
+        else
+            text.push_back(ch);
+    }
+    ustr out;
+    size_t i = 0;
+    const size_t n = text.size();
+    while (i < n) {
+        char32_t ch = text[i];
+        if (is_han(ch)) {
+            out.push_back(ch);
+            ++i;
+        } else if (unit_char(ch)) {
+            size_t j = i;
+            while (j < n && unit_char(text[j])) ++j;
+            while (j + 1 < n && (text[j] == U'-' || text[j] == U'.' || text[j] == U'_') && unit_char(text[j + 1])) {
+                ++j;
+                while (j < n && unit_char(text[j])) ++j;
+            }
+            out.push_back(EN_MARK);
+            i = j;
+        } else {
+            ++i;
+        }
+    }
+    return out;
+}
+
+// a token that is no syllable as text for context_units, as it is sent: a mark its mark, a key string picked from the
+// bar what it shows, English and digits as typed (engine/composer.py _gap_text)
+// (lit_keys: punctuation is sent as the key typed, half width - abc.def one run then)
+static ustr gap_text(const Token& t, bool lit_keys) {
+    if (t.kind == Kind::Lit && lit_keys) return U(t.raw);
+    return t.kind == Kind::Fix || t.kind == Kind::Lit ? t.value : U(t.raw);
+}
+
+// each run of syllables' first token (index) -> the text of the tokens between the run before it (or the buffer's
+// start) and it, as sent (engine/composer.py _gap_texts)
+static std::map<size_t, ustr> gap_texts(const std::vector<Token>& tokens, bool lit_keys) {
+    std::map<size_t, ustr> texts;
+    ustr between;
+    bool prev_zh = false;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i].kind == Kind::Zh) {
+            if (!prev_zh) texts[i] = between;
+            between.clear();
+            prev_zh = true;
+        } else {
+            between += gap_text(tokens[i], lit_keys);
+            prev_zh = false;
+        }
+    }
+    return texts;
+}
+
 std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTable& table, const Lexicon* lexicon,
                                      const UserModel* user, const std::set<int>& exact, const BigramModel* bigram,
-                                     const LmScorer* lm, const ustr& sent, size_t context_len) {
+                                     const LmScorer* lm, const ustr& sent, size_t context_len, bool marks,
+                                     bool lit_keys) {
     // the 注音自動校正 that needs the words around a syllable (see engine/composer.py): digits
     // out of order stay zhuyin on their own (吧) or in a word likelier than the characters apart
     // (好吧), or at the end of a run when 長句選字加強's model expects the syllable there
@@ -1066,13 +1146,24 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
     std::set<size_t> numbers;
     // (the readings of the runs before: model_reads_it's context is what was sent, then the engine's own choice for
     // them, as its text before - worked out only when asked for)
-    std::vector<std::vector<ustr>> earlier;
+    std::vector<std::pair<ustr, std::vector<ustr>>> earlier;  // (each the EN_MARKs before it - marks only, #41)
+    std::map<size_t, ustr> gaps;
+    if (marks) gaps = gap_texts(tokens, lit_keys);
+    ustr current;  // (the marks before the run being checked: read last, as convert reads them before the run)
+    // (the text sent since the last syllable that stays Chinese: digits that became a number at the end of a run, then
+    // what lies before the next run; its marks are worked out together, as convert sees the number next to it - 824ok
+    // is one run of letters and digits)
+    ustr pending;
+    auto units = [&](const ustr& text) { return marks ? context_units(text) : ustr(); };
     auto context = [&]() {
         ustr ctx = sent;
-        for (auto& e : earlier)
+        for (auto& [m, e] : earlier) {
+            ctx += m;
             for (auto& seg : convert(e, *lexicon, user, {}, bigram, std::nullopt))
                 for (char32_t ch : seg.phrase)
-                    if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) ctx.push_back(ch);
+                    if (is_han(ch)) ctx.push_back(ch);
+        }
+        ctx += current;
         size_t keep = context_len ? context_len : LM_CONTEXT;
         if (ctx.size() > keep) ctx.erase(0, ctx.size() - keep);
         return ctx;
@@ -1080,6 +1171,8 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
     for (auto& run : zh_runs(tokens)) {
         std::vector<ustr> rds;
         for (size_t i : run) rds.push_back(tokens[i].value);
+        if (auto g = gaps.find(run[0]); g != gaps.end()) pending += g->second;
+        current = units(pending);
         for (size_t k = 0; k < run.size(); ++k) {
             if (tokens[run[k]].corrected != "order") continue;
             if (auto c = picked(tokens[run[k]]); c && (c->empty() || *c == AS_ENGLISH)) {
@@ -1097,13 +1190,20 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
         std::vector<ustr> part;
         for (size_t k = 0; k < run.size(); ++k) {
             if (numbers.count(run[k])) {
-                if (!part.empty()) earlier.push_back(part);
-                part.clear();
+                if (!part.empty()) {
+                    earlier.emplace_back(units(pending), part);
+                    part.clear();
+                    pending.clear();
+                }
+                pending += U(tokens[run[k]].raw);  // (the number: digits before what follows it)
             } else {
                 part.push_back(rds[k]);
             }
         }
-        if (!part.empty()) earlier.push_back(part);
+        if (!part.empty()) {
+            earlier.emplace_back(units(pending), part);
+            pending.clear();
+        }
     }
     if (!numbers.empty()) {
         std::vector<Token> out;
@@ -1276,7 +1376,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             bool digits_as_zhuyin, const std::set<int>& literal, const std::set<int>& chinese,
                             const Fixed* fixed, const Lexicon* lexicon, const std::set<int>* breaks,
                             const std::set<int>* exact, const Fixed* taken, const BigramModel* bigram,
-                            const LmScorer* lm, const ustr* sent, size_t context_len) {
+                            const LmScorer* lm, const ustr* sent, size_t context_len, bool marks, bool lit_keys) {
     // literal: raw offsets of keys that are always themselves (numpad); fixed: keys shown
     // as picked from the replacement bar (ㄏㄠˇ, clˇ); taken: keys read as a syllable picked
     // from the list (注音自動校正: si3 as ㄋㄧˇ). They cut the text in two.
@@ -1301,7 +1401,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
     const std::set<int>& ex = exact ? *exact : no_breaks;
     auto checked = [&](std::vector<Token> toks) {
         return table.autocorrect ? check_corrections(std::move(toks), table, lexicon, user, ex, bigram, lm, sent ? *sent : ustr(),
-                                                     context_len)
+                                                     context_len, marks, lit_keys)
                                  : toks;
     };
     if (cuts.empty())
@@ -1684,9 +1784,10 @@ ustr text_of(const std::vector<Segment>& path) {
     return text;
 }
 
-// LM_WEIGHT * the model's log10 probability of the text
+// the weight (the model's own, a version 2 file, #41; else LM_WEIGHT) * the model's log10 probability of the text
 double lm_term(const LmScorer& lm, const ustr& text, const std::vector<ustr>& readings) {
-    return LM_WEIGHT * (static_cast<double>(lm.text_score(text, readings)) / (1024 * LN10));
+    const double own = lm.model().lm_weight();
+    return (own >= 0 ? own : LM_WEIGHT) * (static_cast<double>(lm.text_score(text, readings)) / (1024 * LN10));
 }
 
 // phrase occurs in the corpus far more often than its characters would meet by chance
@@ -2007,18 +2108,55 @@ Composer::Composer(SyllableTable& table, const Lexicon& lexicon, const English& 
 void Composer::reset() {
     context_word_.reset();
     lm_context_.clear();
+    lm_units_.clear();
     after_english_ = false;
     commit.clear();
     last_commit_.reset();
     clear_input();
 }
 
-void Composer::sent(const std::vector<ustr>& phrases) {
-    // the Chinese characters the model's training text kept (tools/lm/prepare.py RANGES: 㐀-鿿, 豈-﫿)
-    for (auto& p : phrases)
+void Composer::sent(const std::vector<ustr>& phrases, const ustr* units) {
+    // the Chinese characters the model's training text kept (is_han); units: what was sent as context_units (#41), else
+    // those of the phrases
+    ustr all;
+    for (auto& p : phrases) {
+        all += p;
         for (char32_t ch : p)
-            if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) lm_context_.push_back(ch);
+            if (is_han(ch)) lm_context_.push_back(ch);
+    }
     if (lm_context_.size() > LM_CONTEXT_MAX) lm_context_.erase(0, lm_context_.size() - LM_CONTEXT_MAX);
+    lm_units_ += units ? *units : context_units(all);
+    if (lm_units_.size() > LM_CONTEXT_MAX) lm_units_.erase(0, lm_units_.size() - LM_CONTEXT_MAX);
+}
+
+ustr Composer::token_units(std::optional<int> end) const {
+    // context_units of the buffer's tokens before raw offset end (all: none): the syllables their phrases
+    // (Traditional, whole at their first syllable, as lm_context_: 5G手機 for two syllables), the others their text as
+    // sent (gap_text; keys being typed as shown), side by side as sent, as gap_texts reads the buffer
+    // (engine/composer.py _token_units)
+    ustr parts;
+    const bool zhuyin_preview = config.text("preview") == "zhuyin";
+    const bool keys = lit_keys();
+    std::map<int, const ustr*> phrase_at;
+    for (auto& seg : segments_) phrase_at[seg.start] = &seg.phrase;
+    int idx = 0;
+    for (auto& t : tokens) {
+        if (end && t.start >= *end) break;
+        if (t.kind == Kind::Zh) {
+            if (auto it = phrase_at.find(idx); it != phrase_at.end()) parts += *it->second;
+            ++idx;
+        } else if (t.kind == Kind::Partial) {  // (as shown: zhuyin symbols with that preview, read as nothing)
+            parts += zhuyin_preview ? t.value : U(t.raw);
+        } else {
+            parts += gap_text(t, keys);
+        }
+    }
+    return context_units(parts);
+}
+
+bool Composer::lit_keys() const {
+    // punctuation is sent as the key typed (half width, lit_text), for what the model reads (#41)
+    return !config.flag("full_width") && config.text("punctuation") == "half";
 }
 
 void Composer::clear_input() {
@@ -2093,7 +2231,14 @@ void Composer::settings_changed() {
 
 std::vector<Token> Composer::retokenize(const std::set<int>& chinese) const {
     return tokenize(raw, table_, &user, english_, forced_, after_english_, digits_as_zhuyin_, literal_, chinese,
-                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len());
+                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(),
+                    knows_english(), lit_keys());
+}
+
+bool Composer::knows_english() const {
+    // #41: the model in use reads EN_MARK (a version 2 file)
+    const LmScorer* m = lm();
+    return m && m->model().knows_english();
 }
 
 const LmScorer* Composer::lm() const {
@@ -2109,8 +2254,17 @@ std::string Composer::tier() const {
 }
 
 size_t Composer::context_len() const {
-    // the characters before a run the model reads: LM_CONTEXT for light; plus and max their own setting, 32 or 64
-    // (anything else 32) (engine/composer.py _context_len)
+    // the characters before a run the model reads, never more than the model was made for (a version 2 file's
+    // context_max, #41) (engine/composer.py _context_len)
+    size_t n = setting_context_len();
+    if (config.flag("long_sentence"))
+        if (const LmScorer* m = lm(); m && m->model().context_max() > 0)
+            n = std::min(n, static_cast<size_t>(m->model().context_max()));
+    return n;
+}
+
+size_t Composer::setting_context_len() const {
+    // LM_CONTEXT for light; plus and max their own setting, 32 or 64 (anything else 32)
     std::string t = tier();
     if (t == "light" || !config.flag("long_sentence")) return LM_CONTEXT;
     // (a tier without its model file runs light's model: light's 32 too, as the settings page shows light then)
@@ -2213,23 +2367,45 @@ ustr Composer::shown_phrase(int s, int l, const ustr& p) const {
 }
 
 ustr Composer::sent_context() const {
-    return config.flag("lm_context") ? lm_context_ : ustr();
+    // (as units, EN_MARK too, for a model that knows English, #41)
+    if (!config.flag("lm_context")) return ustr();
+    return knows_english() ? lm_units_ : lm_context_;
 }
 
 const ustr* Composer::sent_ptr() const {
-    return config.flag("lm_context") && !lm_context_.empty() ? &lm_context_ : nullptr;
+    if (!config.flag("lm_context")) return nullptr;
+    const ustr& s = knows_english() ? lm_units_ : lm_context_;
+    return s.empty() ? nullptr : &s;
 }
 
-ustr Composer::run_context(const std::vector<Segment>& before) const {
+ustr Composer::run_context(const std::vector<Segment>& before, const ustr* earlier) const {
     // what the model reads before a run of the buffer (engine/composer.py _run_context): what was just sent while
-    // 接續前文選字 is on, then the Chinese characters of the runs before it as converted, the last LM_CONTEXT
+    // 接續前文選字 is on, then the Chinese characters of the runs before it as converted, the last LM_CONTEXT;
+    // earlier: those runs as units with EN_MARK where English came before one (a model that knows English, #41)
     ustr context = sent_context();
-    for (auto& seg : before)
-        for (char32_t ch : seg.phrase)
-            if ((ch >= 0x3400 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)) context.push_back(ch);
+    if (earlier)
+        context += *earlier;
+    else
+        for (auto& seg : before)
+            for (char32_t ch : seg.phrase)
+                if (is_han(ch)) context.push_back(ch);
     size_t keep = context_len();
     if (context.size() > keep) context.erase(0, context.size() - keep);
     return context;
+}
+
+std::map<int, ustr> Composer::english_gaps() const {
+    // each run's start (index of its first syllable) -> the EN_MARKs of what came between the run before it (or the
+    // buffer's start) and it: one a run of letters and digits (engine/composer.py _english_gaps, #41)
+    std::map<size_t, ustr> by_token = gap_texts(tokens, lit_keys());
+    std::map<int, ustr> gaps;
+    int idx = 0;
+    for (size_t i = 0; i < tokens.size(); ++i)
+        if (tokens[i].kind == Kind::Zh) {
+            if (auto it = by_token.find(i); it != by_token.end()) gaps[idx] = context_units(it->second);
+            ++idx;
+        }
+    return gaps;
 }
 
 std::vector<Segment> Composer::convert_all(const Overrides* instead) {
@@ -2255,6 +2431,10 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     // The model reads each run after what comes before it (run_context): what was just sent (接續前文選字, #37) and
     // the Chinese of the runs before it in the buffer, across English, digits and punctuation (#42). The word sent
     // last (prev) stays for the buffer's very start only.
+    const bool en = model && model->model().knows_english();
+    std::map<int, ustr> gap;  // (run start -> the EN_MARKs of what came before it, en only)
+    if (en) gap = english_gaps();
+    ustr earlier;  // (the runs before as units, en only)
     for (auto [a, b] : runs) {
         std::map<std::pair<int, int>, ustr> ov;
         for (auto& [span, v] : overrides)
@@ -2267,12 +2447,18 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
         for (auto& t : tokens)
             if (t.kind == Kind::En) alone = false;
         const LmScorer* run_model = model;
+        if (en)
+            if (auto g = gap.find(a); g != gap.end()) earlier += g->second;
         if (model) {
-            ustr context = run_context(out);
+            ustr context = run_context(out, en ? &earlier : nullptr);
             if (!context.empty()) run_model = model->view(context);
         }
-        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, run_model, alone))
+        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, run_model, alone)) {
             out.push_back(Segment{a + seg.start, seg.length, seg.phrase});
+            if (en)
+                for (char32_t ch : seg.phrase)
+                    if (is_han(ch)) earlier.push_back(ch);
+        }
     }
     runs_ = runs;
     return out;
@@ -3698,7 +3884,7 @@ std::optional<std::pair<int, std::vector<ustr>>> Composer::reads_as_chinese(int 
         if (a != unfix) fixed[a] = v;
     auto trial =
         tokenize(raw, table_, &user, english_, forced, after_english_, digits_as_zhuyin_, lit, ch, &fixed, &lexicon_,
-                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len());
+                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(), knows_english(), lit_keys());
     std::vector<const Token*> inside;
     for (auto& t : trial)
         if (s <= t.start && t.start < end) inside.push_back(&t);
@@ -5014,6 +5200,7 @@ void Composer::do_commit() {
               fixed_, breaks_};
     undo.exact = exact_;
     undo.lm_context = lm_context_;
+    undo.lm_units = lm_units_;
     undo.taken = taken_;
     undo.pending = pending_;
     undo.term_picks = term_picks_;
@@ -5053,7 +5240,8 @@ void Composer::do_commit() {
     {  // (接續前文選字, #37)
         std::vector<ustr> phrases;
         for (auto& seg : segments_) phrases.push_back(seg.phrase);
-        sent(phrases);
+        ustr units = token_units();
+        sent(phrases, &units);
     }
     undo.corrected = learn_corrections(static_cast<int>(raw.size()));
     undo.dropped = user.simp_dropped;
@@ -5326,6 +5514,7 @@ ustr Composer::undo_commit() {
     digits_as_zhuyin_ = undo.digits_as_zhuyin;
     context_word_ = undo.context_word;
     lm_context_ = undo.lm_context;
+    lm_units_ = undo.lm_units;
     after_english_ = undo.after_english;
     term_picks_ = undo.term_picks;
     if (!undo.learned.empty() || !undo.dropped.empty()) {  // picked by mistake: nothing learned or forgotten after all
@@ -5469,7 +5658,8 @@ void Composer::commit_head() {
         std::vector<ustr> phrases;
         for (auto& seg : segments_)
             if (seg.start + seg.length <= b) phrases.push_back(seg.phrase);
-        sent(phrases);
+        ustr units = token_units(tok_start);
+        sent(phrases, &units);
     }
     after_english_ = false;
     commit = composition.substr(0, syl_offset(b));

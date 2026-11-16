@@ -60,8 +60,6 @@ Lexicon::Lexicon(const std::wstring& path) {
     ok_ = true;
 }
 
-static bool name_han(char32_t c) { return (c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF); }
-
 // the units of a name as written in names.txt (#14): its characters with their readings, · (lit), letters; the |
 // between a Japanese family and given name is none (see engine/lexicon.py _name_units)
 static std::vector<CustomUnit> name_units(const std::vector<ustr>& syls, const ustr& written) {
@@ -71,7 +69,7 @@ static std::vector<CustomUnit> name_units(const std::vector<ustr>& syls, const u
         if (c == U'|') continue;
         CustomUnit u;
         u.ch = c;
-        if (name_han(c)) {
+        if (is_han(c)) {
             u.zh = true;
             u.reading = n < syls.size() ? syls[n] : ustr();
             ++n;
@@ -130,7 +128,7 @@ void Lexicon::add_names(std::string_view text) {
         ustr typed;
         for (size_t k = 0; k + 1 < parts.size(); ++k) {  // the first k + 1 parts typed
             const ustr& part = parts[k];
-            if (part.empty() || !std::all_of(part.begin(), part.end(), name_han)) break;
+            if (part.empty() || !std::all_of(part.begin(), part.end(), is_han)) break;
             done += part.size();
             typed += part;
             if (typed.size() < 2) continue;
@@ -172,7 +170,7 @@ std::vector<NameStart> Lexicon::name_prefixes(const std::vector<ustr>& readings,
         name_prefix_.clear();
         for (size_t row = 0; row < name_rows_.size(); ++row) {
             std::vector<ustr> syls = split(name_rows_[row].first, U'-');
-            size_t han = std::count_if(name_rows_[row].second.begin(), name_rows_[row].second.end(), name_han);
+            size_t han = std::count_if(name_rows_[row].second.begin(), name_rows_[row].second.end(), is_han);
             for (size_t k = 2; k < std::min(han, syls.size()); ++k)
                 name_prefix_[key_of(syls, k)].emplace_back(static_cast<int>(row), static_cast<int>(k));
         }
@@ -764,7 +762,6 @@ double UserModel::faded(double count, const int* day) const {
 }
 
 static bool alnum(char32_t c) { return is_alpha(c) || is_digit(c); }
-static bool han(char32_t c) { return (c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF); }
 
 bool is_custom_english(const std::string& word) {
     // an English word for 自訂詞彙: a letter first, letters and digits, - or ' between them (Kazuma, e-sports,
@@ -790,14 +787,14 @@ bool is_custom_mixed(const ustr& word) {
     if (word.empty() || word.size() > 32 || word.front() == U' ' || word.back() == U' ' ||
         word.find(U"  ") != ustr::npos)
         return false;
-    size_t chinese = std::count_if(word.begin(), word.end(), han);
+    size_t chinese = std::count_if(word.begin(), word.end(), is_han);
     if (chinese == 0 || chinese > static_cast<size_t>(MAX_PHRASE_LEN) || std::none_of(word.begin(), word.end(), alnum))
         return false;
     for (size_t i = 0; i < word.size(); ++i) {
         char32_t c = word[i];
         if (c == U'-' || c == U'\'') {
             if (i == 0 || i + 1 >= word.size() || !alnum(word[i - 1]) || !alnum(word[i + 1])) return false;
-        } else if (!alnum(c) && c != U' ' && !han(c)) {
+        } else if (!alnum(c) && c != U' ' && !is_han(c)) {
             return false;
         }
     }
@@ -831,9 +828,7 @@ const std::unordered_set<std::string>& UserModel::sure_english() const {
 
 // Chinese characters only (肯德基): a side of 映射詞彙 found in the text shown
 static bool is_han_text(const ustr& s) {
-    return !s.empty() && std::all_of(s.begin(), s.end(), [](char32_t c) {
-        return (c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF);
-    });
+    return !s.empty() && std::all_of(s.begin(), s.end(), [](char32_t c) { return is_han(c); });
 }
 
 bool UserModel::reload_quick_fill() {
@@ -906,13 +901,13 @@ bool UserModel::reload_custom() {
                     size_t syls = syllables.size();
                     if (is_custom_mixed(phrase)) {
                         // (its 注音 is of the Chinese characters alone: a version before skips the row)
-                        if (static_cast<size_t>(std::count_if(phrase.begin(), phrase.end(), han)) == syls) {
+                        if (static_cast<size_t>(std::count_if(phrase.begin(), phrase.end(), is_han)) == syls) {
                             std::vector<CustomUnit> units;
                             size_t k = 0;
                             for (char32_t ch : phrase) {
                                 CustomUnit u;
                                 u.ch = ch;
-                                if (han(ch)) {
+                                if (is_han(ch)) {
                                     u.zh = true;
                                     u.reading = syllables[k++];
                                 }
@@ -925,7 +920,7 @@ bool UserModel::reload_custom() {
                     if (!phrase.empty() && phrase.size() == syls && syls <= MAX_PHRASE_LEN) {
                         if (!c.count(key)) order.push_back(key);
                         c[key].push_back(phrase);
-                        if (std::all_of(phrase.begin(), phrase.end(), han)) {
+                        if (std::all_of(phrase.begin(), phrase.end(), is_han)) {
                             std::vector<CustomUnit> units;
                             for (size_t k = 0; k < syls; ++k) units.push_back(CustomUnit{true, phrase[k], syllables[k]});
                             entries.push_back({phrase, units});

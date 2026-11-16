@@ -42,7 +42,9 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             const BigramModel* bigram = nullptr,
                             const LmScorer* lm = nullptr,  // lm: 長句選字加強, for digits out of order at the end
                             const ustr* sent = nullptr,    // sent: what was just sent, read first by lm (#37, #42)
-                            size_t context_len = 0);      // ...the last context_len with the runs before (0: 32)
+                            size_t context_len = 0,       // ...the last context_len with the runs before (0: 32)
+                            bool marks = false,           // marks: EN_MARK where English came before a run (#41)
+                            bool lit_keys = false);       // ...punctuation sent as the key typed (half width)
 
 struct Segment {
     int start, length;
@@ -116,9 +118,16 @@ public:
     void reset();
     // 接續前文選字 (#37): what is before the caret is no longer what was sent (the front end checks it): the model
     // reads no context until something is sent again
-    void context_lost() { lm_context_.clear(); }
-    void keep_context(const ustr& context) { lm_context_ = context; }  // (engine_main's flush, after reset)
+    void context_lost() {
+        lm_context_.clear();
+        lm_units_.clear();
+    }
+    void keep_context(const ustr& context, const ustr& units) {  // (engine_main's flush, after reset)
+        lm_context_ = context;
+        lm_units_ = units;
+    }
     const ustr& lm_context() const { return lm_context_; }
+    const ustr& lm_units() const { return lm_units_; }  // (the same as units: EN_MARK too, #41)
     bool toggle_full_width();
     bool toggle_simplified();  // 簡體輸出 (#32): Traditional <-> Simplified, remembered in the settings
     void settings_changed();
@@ -206,12 +215,18 @@ private:
         std::vector<TermChange> terms;  // what 簡體輸出 learned of the Mainland words (#32)
         std::vector<UserModel::SimpDrop> dropped;  // what a pick in Traditional mode took of Simplified mode's memory
         ustr lm_context;  // what 接續前文選字 read before this commit (#37)
+        ustr lm_units;    // ...as units (#41)
     };
 
     void clear_input();
     void refresh();
     std::vector<Segment> convert_all(const Overrides* instead = nullptr);
-    ustr run_context(const std::vector<Segment>& before) const;
+    ustr run_context(const std::vector<Segment>& before, const ustr* earlier = nullptr) const;
+    std::map<int, ustr> english_gaps() const;  // (#41: run start -> the EN_MARKs before it)
+    bool knows_english() const;                // (#41: the model in use reads EN_MARK)
+    ustr token_units(std::optional<int> end = std::nullopt) const;  // (#41: the buffer before end as units)
+    bool lit_keys() const;  // (#41: punctuation is sent as the key typed: half width)
+    size_t setting_context_len() const;  // (context_len before the model's own context_max)
     ustr sent_context() const;  // (what was just sent while 接續前文選字 is on: read before the buffer)
     const ustr* sent_ptr() const;  // (the same for tokenize, nullptr for none: no copy)
     std::string tier() const;       // (選字模型, #41: "light", "plus" or "max")
@@ -349,7 +364,9 @@ private:
 
     std::optional<ustr> context_word_;
     ustr lm_context_;  // 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT characters)
-    void sent(const std::vector<ustr>& phrases);  // their Chinese characters into lm_context_
+    ustr lm_units_;    // ...the same as units (context_units: EN_MARK too), for a model that knows English (#41)
+    // their Chinese characters into lm_context_, units (else the phrases' context_units) into lm_units_
+    void sent(const std::vector<ustr>& phrases, const ustr* units = nullptr);
     bool after_english_ = false;
     std::optional<std::pair<ustr, Undo>> last_commit_;
     Overrides overrides_;

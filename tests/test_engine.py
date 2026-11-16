@@ -6766,6 +6766,232 @@ class SimplifiedMemoryTest(unittest.TestCase):
         self.assertEqual(DEFAULTS["simplified_key"], "Ctrl+F1")
 
 
+class LmNextEngineTest(unittest.TestCase):
+    """#41 Task 14: the engine on a version 2 model (engine/lm_next.py): what was sent kept also as units (Chinese
+    characters and EN_MARK for each English or letters-and-digits run) for a model that knows English; the runs after
+    English read the mark; the weight and the order thresholds from the file. A version 1 model reads as before."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import torch
+        except ImportError:
+            raise unittest.SkipTest("no torch")
+        import importlib.util
+        here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "lm", "next")
+
+        def load(name):
+            spec = importlib.util.spec_from_file_location(f"lm_next_{name}", os.path.join(here, f"{name}.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        models, qn = load("models"), load("quantize_next")
+        base = lm.shared()
+        if base is None:
+            raise unittest.SkipTest("data/lm.bin or numpy missing")
+        vocab = list(base.lm.vocab[:2]) + ["<en>"] + list(base.lm.vocab[2:])  # (the characters the engine writes)
+        torch.manual_seed(0)
+        model = models.TinyTransformer(len(vocab), d=16, layers=1, heads=2, ffn=32)
+        h, t = qn.quantize(model, weight=0.7, context_max=64)
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.path = os.path.join(cls.tmp.name, "lm_plus.bin")
+        qn.export(h, t, vocab, {"ㄅㄚ˙": 100}, cls.path)
+        cls.next_scorer = lm.Scorer(lm.load(cls.tmp.name, "plus"), base.lexicon)
+        # (the same model whose order thresholds no probability reaches: digits out of order always become a number)
+        os.makedirs(os.path.join(cls.tmp.name, "numbers"))
+        qn.export(h, t, vocab, {"ㄉㄚˋ": 70000, "ㄅㄚ˙": 70000}, os.path.join(cls.tmp.name, "numbers", "lm_plus.bin"))
+        cls.numbers_scorer = lm.Scorer(lm.load(os.path.join(cls.tmp.name, "numbers"), "plus"), base.lexicon)
+        # (the same model made for 4 characters of context: the engine reads no more)
+        os.makedirs(os.path.join(cls.tmp.name, "short"))
+        qn.export(dict(h, context_max=4), t, vocab, {"ㄅㄚ˙": 100}, os.path.join(cls.tmp.name, "short", "lm_plus.bin"))
+        cls.short_scorer = lm.Scorer(lm.load(os.path.join(cls.tmp.name, "short"), "plus"), base.lexicon)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def composer(self, next_model, **settings):
+        c = create_composer(os.path.join(self.dir.name, "user.json"))
+        c.config.values = dict(DEFAULTS, long_sentence=True, lm_context=True)
+        c.config.values.update(settings)
+        c.settings_changed()
+        if next_model:
+            patcher = unittest.mock.patch.object(lm, "shared", lambda *a, **k: self.next_scorer)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return c
+
+    def send(self, c, raw):
+        for k in raw:
+            c.key(k)
+        c.key(special="ENTER")
+
+    def test_load_reads_version_2(self):
+        from engine import lm_next
+        model = lm.load(self.tmp.name, "plus")
+        self.assertIsInstance(model, lm_next.NextLM)
+        self.assertTrue(model.knows_english)
+        self.assertEqual((model.lm_weight, model.order_thresholds), (0.7, {"ㄅㄚ˙": 100}))
+        self.assertEqual(model.ids[lm.EN_MARK], lm_next.EN_ID)
+        self.assertFalse(lm.shared().lm.knows_english)  # (data/lm.bin: version 1)
+
+    def test_units_kept_with_marks(self):
+        c = self.composer(False)
+        self.send(c, keys("ㄨㄛˇ ㄩㄥˋ") + "Github")
+        self.assertEqual(c.lm_context, "我用")
+        self.assertEqual(c.lm_units, "我用" + lm.EN_MARK)
+        self.send(c, "Qwen3-1.7B " + keys("ㄏㄠˇ"))
+        self.assertEqual(c.lm_units, "我用" + lm.EN_MARK + lm.EN_MARK + "好")
+
+    def test_version_1_reads_no_marks(self):
+        c = self.composer(False)
+        self.send(c, keys("ㄨㄛˇ ㄩㄥˋ") + "Github")
+        self.assertEqual(c._sent_context(), "我用")
+
+    def test_version_2_reads_marks(self):
+        c = self.composer(True)
+        self.send(c, keys("ㄨㄛˇ ㄩㄥˋ") + "Github")
+        self.assertEqual(c._sent_context(), "我用" + lm.EN_MARK)
+        seen = []
+        real = lm.Scorer.view
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
+            for k in keys("ㄏㄠˇ") + "ok" + keys("ㄗㄞˋ"):
+                c.key(k)
+        # (the run after ok reads what was sent, 好, the mark of ok)
+        self.assertIn("我用" + lm.EN_MARK + "好" + lm.EN_MARK, seen)
+
+    def test_marks_one_per_run_while_typing_as_sent(self):
+        # (two English runs between two runs of Chinese: two marks, while typing as once sent - the training text's
+        # rule, code-reviewer 2026-11-15)
+        c = self.composer(True)
+        seen = []
+        real = lm.Scorer.view
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: seen.append(ctx) or real(s, ctx)):
+            for k in keys("ㄨㄛˇ ㄩㄥˋ") + "Github Gitlab " + keys("ㄅㄧˇ ㄐㄧㄠˋ"):
+                c.key(k)
+        self.assertIn("我用" + lm.EN_MARK * 2, [s[-4:] for s in seen])
+        c.key(special="ENTER")
+        self.assertTrue(c.lm_units.startswith("我用" + lm.EN_MARK * 2), c.lm_units)
+
+    def test_order_check_reads_what_the_run_reads(self):
+        # (digits out of order at the end of a run after English: the model asked about 吧 reads what the run's
+        # conversion reads, the mark of the English too - code-reviewer 2026-11-15)
+        c = self.composer(True, autocorrect=True)
+        self.send(c, keys("ㄨㄛˇ ㄇㄣ˙"))
+        views, asked = [], []
+        real_view, real_mass = lm.Scorer.view, lm.Scorer.syllable_mass_q16
+        with unittest.mock.patch.object(lm.Scorer, "view", lambda s, ctx: views.append(ctx) or real_view(s, ctx)), \
+                unittest.mock.patch.object(lm.Scorer, "syllable_mass_q16", lambda s, before, syl:
+                                           asked.append(getattr(s, "_context", "")) or real_mass(s, before, syl)):
+            for k in "Github " + keys("ㄨㄛˇ ㄇㄣ˙ ㄗㄡˇ") + "817":  # (Github 我們走吧: the model asked about 吧)
+                c.key(k)
+        self.assertTrue(asked)
+        self.assertIn("我們" + lm.EN_MARK, views)  # (the run after Github reads what was sent and its mark...)
+        self.assertEqual(set(asked), {"我們" + lm.EN_MARK})  # (...and so does the check, from the run's start)
+
+    def test_order_check_after_a_number_ending_a_run(self):
+        # (a run's digits out of order at its end became a number: the next run's check reads its mark, worked out with
+        # what follows it - "824 ok" two runs of letters and digits, "824 " one - as the conversion does; code-reviewer
+        # 2026-11-15)
+        for typed, before in (("ji3ap7y.3824 ok ji3ap7y.3824", "我們走" + lm.EN_MARK * 2),
+                              ("ji3ap7y.3824 ji3ap7y.3824", "我們走" + lm.EN_MARK)):
+            with self.subTest(typed=typed):
+                c = create_composer(os.path.join(self.dir.name, "user.json"))
+                c.config.values = dict(DEFAULTS, long_sentence=True, lm_context=True, autocorrect=True)
+                c.settings_changed()
+                with unittest.mock.patch.object(lm, "shared", lambda *a, **k: self.numbers_scorer):
+                    for k in typed[:-1]:
+                        c.key(k)
+                    views, asked = [], []
+                    real_view, real_mass = lm.Scorer.view, lm.Scorer.syllable_mass_q16
+                    with unittest.mock.patch.object(lm.Scorer, "view",
+                                                    lambda s, ctx: views.append(ctx) or real_view(s, ctx)), \
+                            unittest.mock.patch.object(lm.Scorer, "syllable_mass_q16", lambda s, b, syl:
+                                                       asked.append(getattr(s, "_context", "")) or real_mass(s, b, syl)):
+                        c.key(typed[-1])
+                self.assertTrue(c.composition.startswith("我們走824"), c.composition)
+                self.assertIn(before, views)       # (the second run's conversion...)
+                self.assertEqual(asked[-1], before)  # (...and its check of 824)
+
+    def test_punctuation_read_as_sent(self):
+        # (half-width punctuation sends the key: abc.def is one run of letters and digits, as the training text reads
+        # what was sent; full width sends 。, which cuts it - /code-review high 2026-11-16)
+        for punctuation, marks in (("half", 1), ("full", 2)):
+            with self.subTest(punctuation=punctuation):
+                c = self.composer(True, punctuation=punctuation)
+                self.send(c, "ji3abc.def ji3")
+                self.assertEqual(c.lm_units, "我" + lm.EN_MARK * marks + "我", c.commit)
+
+    def test_context_at_most_the_models(self):
+        # (a model made for 4 characters of context reads no more, whatever the setting - /code-review high 2026-11-16)
+        c = create_composer(os.path.join(self.dir.name, "user.json"))
+        c.config.values = dict(DEFAULTS, long_sentence=True, lm_context=True, lm_model="plus", lm_context_len_plus=64)
+        c.settings_changed()
+        with unittest.mock.patch.object(lm, "shared", lambda *a, tier="light", **k:
+                                        self.short_scorer if tier == "plus" else self.next_scorer):
+            self.assertEqual(c._context_len(), 4)
+            self.send(c, keys("ㄨㄛˇ ㄇㄣ˙ ㄒㄧㄢ ㄑㄩˋ ㄔ ㄈㄢˋ"))
+            self.assertEqual(len(c._sent_context()), len(c.lm_units))  # (kept whole: read last 4)
+            self.assertEqual(c._run_context([]), c.lm_units[-4:])
+
+    def test_weight_from_the_model(self):
+        self.assertEqual(composer._lm_weight(self.next_scorer), 0.7)
+        self.assertEqual(composer._lm_weight(lm.shared()), composer.LM_WEIGHT)
+
+
+class NfkcUnitsTest(unittest.TestCase):
+    """#41: a context is read as the training text is (tools/lm/next/text.py to_units: NFKC first), character by
+    character in both engines: the C++ engine's table (cpp/engine/nfkc_units.h) is this Python's unicodedata."""
+
+    def test_header_matches_unicodedata(self):
+        import importlib.util
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("make_nfkc_units",
+                                                      os.path.join(root, "tools", "lm", "next", "make_nfkc_units.py"))
+        make = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(make)
+        with open(os.path.join(root, "cpp", "engine", "nfkc_units.h"), encoding="ascii") as f:
+            rows = [(int(cp, 16), "".join(chr(int(x, 16)) for x in re.findall(r"\\U([0-9A-F]{8})", to)))
+                    for cp, to in re.findall(r'\{0x([0-9A-F]+), U"([^"]*)"\}', f.read())]
+        self.assertEqual(rows, make.table(), "run py -3 tools/lm/next/make_nfkc_units.py (another Unicode version)")
+        # (and the table covers every character whose own NFKC changes what context_units reads: the C++ engine, the
+        # table or the character as it is, against this engine's NFKC - not the generator's own rule, which once missed
+        # U+FA6C and six more, code-reviewer 2026-11-16)
+        import unicodedata
+        table = dict(rows)
+
+        def scan(text):  # (context_units after its NFKC: what each engine scans)
+            return "".join(m if len(m) == 1 and composer.is_han(m) else lm.EN_MARK for m in composer._UNIT.findall(text))
+        for cp in range(0x110000):
+            if 0xD800 <= cp <= 0xDFFF:
+                continue
+            ch = chr(cp)
+            nfkc = unicodedata.normalize("NFKC", ch)
+            if nfkc != ch:
+                self.assertEqual(scan("a" + table.get(cp, ch) + "b"), scan("a" + nfkc + "b"), hex(cp))
+
+    def test_units_as_the_training_text(self):
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("lm_next_text", os.path.join(root, "tools", "lm", "next", "text.py"))
+        text = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(text)
+        E = lm.EN_MARK
+        for s, want in (("１．５倍", E + "倍"), ("v３．２．６版", E + "版"), ("⼀天", "一天"), ("Qwen3-1.7B 好", E + "好"),
+                        ("ＡＢＣ，ｄ", E + E), ("1.5", E), ("a-.b", E + E), ("我𤋮好", "我好")):
+            got = composer.context_units(s)
+            self.assertEqual(got, want, s)
+            self.assertEqual(got, "".join(E if u == text.EN else u for u in text.to_units(s)), s)
+
+
 class LmTierTest(unittest.TestCase):
     """選字模型 (#41): 長句選字加強 in three tiers, light / plus / max (data/lm.bin, lm_plus.bin, lm_max.bin), the tier's file
     read when it is first asked for; a tier without its file uses the light one. The context read: 32 characters for

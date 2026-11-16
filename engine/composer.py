@@ -1,14 +1,16 @@
 """Mixed Zhuyin/English composition: tokenizing raw keys, converting
 syllables to characters, and the key-handling state machine."""
 import copy
+import functools
 import math
 import re
+import unicodedata
 
 from . import lm as language_model
 from . import symbols
 from .config import Config
 from . import candlayout
-from .lexicon import AS_ENGLISH, MAX_PHRASE_LEN, ZHUYIN_TEXT, is_code, is_email, is_zhuyin_text
+from .lexicon import AS_ENGLISH, MAX_PHRASE_LEN, ZHUYIN_TEXT, is_code, is_email, is_han, is_zhuyin_text
 from .zhuyin import FINALS
 
 # keys that become full-width punctuation outside English words
@@ -145,7 +147,7 @@ class Token:
 
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
-             taken=None, bigram=None, lm=None, sent="", context_len=None):
+             taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False):
     """Split raw keys into the cheapest sequence of tokens.
 
     literal: raw offsets of keys that are always themselves (numpad digits and
@@ -158,7 +160,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
         the list, si3 as ㄋㄧˇ); they cut the text too.
     lm: 長句選字加強's scorer (None: off), asked about digits out of order at the end of a run
         (_check_corrections); sent: what was just sent (接續前文選字), read first (#37, #42), the last context_len
-        characters with the runs before (LM_CONTEXT if None).
+        characters with the runs before (LM_CONTEXT if None); marks: EN_MARK where English came before a run (a
+        model that knows English, #41); lit_keys: punctuation is sent as the key typed (half width), read so.
     Other arguments: see _tokenize_run.
     """
     cuts = sorted([(p, p + 1, None) for p in literal if p < len(raw)] +
@@ -168,8 +171,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
     if not cuts:
         tokens = _tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese, lexicon,
                                breaks, exact)
-        return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len) \
-            if table.autocorrect else tokens
+        return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
+                                  lit_keys) if table.autocorrect else tokens
     tokens, start = [], 0
     for a, b, text in cuts + [(len(raw), len(raw), None)]:
         if a < start:
@@ -192,8 +195,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
             else:
                 tokens.append(Token("fix", raw[a:b], text, a))
         start = b
-    return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len) \
-        if table.autocorrect else tokens
+    return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
+                              lit_keys) if table.autocorrect else tokens
 
 
 def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=False,
@@ -706,8 +709,11 @@ def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers
     after 我們走吧個, which the user never sees). From the start of the run the model reads context() first: what was
     just sent and the Chinese of the runs before, as convert reads them (#42)."""
     t = run[k]
-    threshold = ORDER_LM_THRESHOLDS_Q16.get(t.value)
-    if lm is None or lexicon is None or threshold is None or k != len(run) - 1:
+    if lm is None or lexicon is None or k != len(run) - 1:
+        return False
+    table = getattr(getattr(lm, "lm", None), "order_thresholds", None)  # (a version 2 model's own, #41; else the engine's)
+    threshold = (table if table is not None else ORDER_LM_THRESHOLDS_Q16).get(t.value)
+    if threshold is None:
         return False
     first = max((j + 1 for j in range(k) if id(run[j]) in numbers), default=0)
     if first == k:
@@ -725,7 +731,8 @@ def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers
     return lm.syllable_mass_q16(before, t.value) >= threshold
 
 
-def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None, sent="", context_len=None):
+def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None, sent="", context_len=None,
+                       marks=False, lit_keys=False):
     """The 注音自動校正 that needs the words around a syllable, once the keys are split:
     digits read out of order (817) stay zhuyin on their own (吧) or in a word (好吧), or at the end
     of a run when 長句選字加強's model expects the syllable there (lm, _model_reads_it: 我們走吧), else they
@@ -750,14 +757,23 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
     numbers = set()
     # (the readings of the runs before: _model_reads_it's context is what was sent, then the engine's own choice for
     # them, as its text before - worked out only when asked for)
-    earlier = []
+    earlier = []  # (each the EN_MARKs before it - marks only, #41 - and its readings)
+    gap_texts = _gap_texts(tokens, lit_keys) if marks else {}
+    current = [""]  # (the marks before the run being checked: read last, as convert reads them before the run)
+    # (the text sent since the last syllable that stays Chinese: digits that became a number at the end of a run, then
+    # what lies before the next run; its marks are worked out together, as convert sees the number next to it - 824ok
+    # is one run of letters and digits)
+    pending = ""
 
     def context():
-        text = "".join(ch for e in earlier for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p if is_han(ch))
-        return (sent + text)[-(context_len or LM_CONTEXT):]
+        text = "".join(m + "".join(ch for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p if is_han(ch))
+                       for m, e in earlier)
+        return (sent + text + current[0])[-(context_len or LM_CONTEXT):]
 
     for run in _zh_runs(tokens):
         readings = [t.value for t in run]
+        pending += gap_texts.get(id(run[0]), "")
+        current[0] = context_units(pending) if marks else ""
         for k, t in enumerate(run):
             if t.corrected == "order" and picked(t) in ("", AS_ENGLISH):
                 numbers.add(id(t))  # (picked as a number twice)
@@ -770,12 +786,14 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
         for t in run:
             if id(t) in numbers:
                 if part:
-                    earlier.append(part)
-                part = []
+                    earlier.append((context_units(pending) if marks else "", part))
+                    part, pending = [], ""
+                pending += t.raw  # (the number: digits before what follows it)
             else:
                 part.append(t.value)
         if part:
-            earlier.append(part)
+            earlier.append((context_units(pending) if marks else "", part))
+            pending = ""
     if numbers:
         out = []
         for t in tokens:
@@ -1152,9 +1170,61 @@ LM_CONTEXT_MAX = 64  # ...kept for plus and max, which may read 64 (選字模型
 LM_TIERS = ("light", "plus", "max")
 
 
-def is_han(ch):
-    """A character the model's training text kept (tools/lm/prepare.py RANGES: 㐀-鿿, 豈-﫿)."""
-    return "㐀" <= ch <= "鿿" or "豈" <= ch <= "﫿"
+_UNIT = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]|[A-Za-z0-9]+(?:[-._][A-Za-z0-9]+)*")  # (after NFKC: ASCII letters, digits)
+
+
+@functools.lru_cache(maxsize=4096)
+def _nfkc(ch):
+    return unicodedata.normalize("NFKC", ch)
+
+
+def context_units(text):
+    """#41: what a model that knows English reads of a text (tools/lm/next/text.py to_units): each character as its
+    NFKC first (the training text's: １．５ is one run, ⼀ is 一; character by character, as the C++ engine's table
+    cpp/engine/nfkc_units.h), then each Chinese character, and one EN_MARK for each run of letters and digits (single
+    - . _ between them in the run); everything else dropped, not cutting the text."""
+    text = "".join(ch if ch < "\x80" else _nfkc(ch) for ch in text)
+    return "".join(m if len(m) == 1 and is_han(m) else language_model.EN_MARK for m in _UNIT.findall(text))
+
+
+def _gap_text(t, lit_keys=False):
+    """A token that is no syllable as text for context_units, as it is sent: a mark its mark (。 for . in full width;
+    lit_keys: the key as typed, half-width punctuation - abc.def is one run then), a key string picked from the bar
+    what it shows, English and digits as typed."""
+    if t.kind == "lit" and lit_keys:
+        return t.raw
+    return t.value if t.kind in ("fix", "lit") else t.raw
+
+
+def _gap_texts(tokens, lit_keys=False):
+    """Each run of syllables' first token (id) -> the text of the tokens between the run before it (or the buffer's
+    start) and it, as sent (_gap_text)."""
+    texts, between, prev_zh = {}, [], False
+    for t in tokens:
+        if t.kind == "zh":
+            if not prev_zh:
+                texts[id(t)] = "".join(between)
+            between, prev_zh = [], True
+        else:
+            between.append(_gap_text(t, lit_keys))
+            prev_zh = False
+    return texts
+
+
+def _gap_marks(tokens, lit_keys=False):
+    """Each run of syllables' first token (id) -> the EN_MARKs of the tokens between the run before it (or the buffer's
+    start) and it: one for each run of letters and digits, as the training text (#41)."""
+    return {k: context_units(v) for k, v in _gap_texts(tokens, lit_keys).items()}
+
+
+def _lm_weight(lm):
+    """The weight of the model's log10 probability: the model's own (a version 2 file), else LM_WEIGHT."""
+    w = getattr(getattr(lm, "lm", None), "lm_weight", None)
+    return w if w is not None else LM_WEIGHT
+
+
+def _knows_english(lm):
+    return getattr(getattr(lm, "lm", None), "knows_english", False)
 
 
 LM_WEIGHT = 0.6  # 長句選字加強: log10 of the model's probability counts this much against the engine's score
@@ -1239,7 +1309,8 @@ def _with_lm(score, path, readings, lexicon, user, overrides, bigram, prev_word,
     # (and a word around a pick: 適時 for 時 picked in 事實, which 事 + 時 would carry the pick too)
     kept = [(i, l, p) for i, l, p in path if l > 1 and (_taught("-".join(readings[i:i + l]), p, user)
                                                          or any(a < i + l and i < a + b for a, b in overrides))]
-    best, best_score = path, score + LM_WEIGHT * (lm.text_score(text, readings) / (1024 * LN10)) + \
+    weight = _lm_weight(lm)
+    best, best_score = path, score + weight * (lm.text_score(text, readings) / (1024 * LN10)) + \
         WORD_BONUS * _word_chars(path, bigram)
     seen = {text}
     for s, hyp in nbest(readings, options, bigram, prev_word, NBEST_K, NBEST_N):
@@ -1250,7 +1321,7 @@ def _with_lm(score, path, readings, lexicon, user, overrides, bigram, prev_word,
         seen.add(text)
         if len(text) != n or any(text[i:i + l] != p for i, l, p in kept):
             continue
-        s = s + LM_WEIGHT * (lm.text_score(text, readings) / (1024 * LN10)) + WORD_BONUS * _word_chars(hyp, bigram)
+        s = s + weight * (lm.text_score(text, readings) / (1024 * LN10)) + WORD_BONUS * _word_chars(hyp, bigram)
         if s > best_score:
             best, best_score = hyp, s
     return best
@@ -1590,6 +1661,7 @@ class Composer:
         """Forget everything, including what was typed before (focus change)."""
         self.context_word = None    # last Chinese phrase committed, for the bigram
         self.lm_context = ""        # 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT_MAX)
+        self.lm_units = ""          # ...the same as units (context_units: EN_MARK too), for a model that knows English
         self.after_english = False  # last commit ended with an English word
         self.commit = ""
         self.last_commit = None     # what undo_commit() can bring back
@@ -1600,10 +1672,40 @@ class Composer:
         """接續前文選字 (#37): what is before the caret is no longer what was sent (the caret moved, text pasted or
         changed: the front end checks it): the model reads no context until something is sent again."""
         self.lm_context = ""
+        self.lm_units = ""
 
-    def _sent(self, phrases):
-        """The Traditional phrases of what was just sent: their Chinese characters go into lm_context (#37)."""
+    def _sent(self, phrases, units=None):
+        """The Traditional phrases of what was just sent: their Chinese characters go into lm_context (#37); units:
+        what was sent as context_units (#41), else those of the phrases."""
+        phrases = list(phrases)
         self.lm_context = (self.lm_context + "".join(ch for p in phrases for ch in p if is_han(ch)))[-LM_CONTEXT_MAX:]
+        if units is None:
+            units = context_units("".join(phrases))
+        self.lm_units = (self.lm_units + units)[-LM_CONTEXT_MAX:]
+
+    def _token_units(self, end=None):
+        """context_units of the buffer's tokens before raw offset end (all: None): the syllables their phrases
+        (Traditional, whole at their first syllable, as lm_context: 5G手機 for two syllables), the others their text as
+        sent (_gap_text; keys being typed as shown), side by side as sent, as _gap_marks reads the buffer."""
+        parts = []
+        phrase_at = {s: p for s, _, p in self.segments}
+        idx = 0
+        lit_keys = self._lit_keys()
+        for t in self.tokens:
+            if end is not None and t.start >= end:
+                break
+            if t.kind == "zh":
+                parts.append(phrase_at.get(idx, ""))
+                idx += 1
+            elif t.kind == "partial":  # (as shown: zhuyin symbols with that preview, read as nothing)
+                parts.append(t.value if self.config.preview == "zhuyin" else t.raw)
+            else:
+                parts.append(_gap_text(t, lit_keys))
+        return context_units("".join(parts))
+
+    def _lit_keys(self):
+        """Punctuation is sent as the key typed (half width, _lit_text), for what the model reads (#41)."""
+        return not self.config.full_width and self.config.punctuation == "half"
 
     def _clear_input(self):
         self.raw = ""
@@ -1685,7 +1787,8 @@ class Composer:
         self.tokens = tokenize(self.raw, self.table, self.user, self.english, self.forced,
                                self.after_english, self.digits_as_zhuyin, self.literal, self.chinese, self.fixed,
                                self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
-                               self._sent_context(), self._context_len())
+                               self._sent_context(), self._context_len(), _knows_english(self._lm()),
+                               self._lit_keys())
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
@@ -1743,7 +1846,13 @@ class Composer:
 
     def _context_len(self):
         """The characters before a run the model reads: LM_CONTEXT for light, and for a tier without its own model;
-        plus and max their own setting, 32 or 64 (anything else 32)."""
+        plus and max their own setting, 32 or 64 (anything else 32); never more than the model was made for (a version
+        2 file's context_max, #41)."""
+        n = self._setting_context_len()
+        cap = getattr(getattr(self._lm(), "lm", None), "context_max", None) if self.config.long_sentence else None
+        return min(n, cap) if cap else n
+
+    def _setting_context_len(self):
         tier = self._tier()
         if tier == "light" or not self.config.long_sentence:
             return LM_CONTEXT
@@ -1755,15 +1864,32 @@ class Composer:
         return LM_CONTEXT_MAX if n == LM_CONTEXT_MAX else LM_CONTEXT
 
     def _sent_context(self):
-        """What was just sent while 接續前文選字 is on (#37): read before the buffer, "" for none."""
-        return self.lm_context if self.config.lm_context else ""
+        """What was just sent while 接續前文選字 is on (#37): read before the buffer, "" for none; as units (EN_MARK
+        too) for a model that knows English (#41)."""
+        if not self.config.lm_context:
+            return ""
+        return self.lm_units if _knows_english(self._lm()) else self.lm_context
 
-    def _run_context(self, before):
+    def _run_context(self, before, earlier=None):
         """What the model reads before a run of the buffer (長句選字加強 on): what was just sent while 接續前文選字 is on
         (#37), then the Chinese characters of the runs before it, as converted (before: their (start, length,
-        phrase), Traditional) - the last _context_len() characters, "" for none."""
-        earlier = "".join(ch for _, _, p in before for ch in p if is_han(ch))
+        phrase), Traditional) - the last _context_len() characters, "" for none. earlier: those runs as units with
+        EN_MARK where English came before one (a model that knows English, #41), in place of their Chinese alone."""
+        if earlier is None:
+            earlier = "".join(ch for _, _, p in before for ch in p if is_han(ch))
         return (self._sent_context() + earlier)[-self._context_len():]
+
+    def _english_gaps(self):
+        """Each run's start (index of its first syllable) -> the EN_MARKs of what came between the run before it (or the
+        buffer's start) and it (_gap_marks: one a run of letters and digits, #41)."""
+        by_token = _gap_marks(self.tokens, self._lit_keys())
+        gaps, idx = {}, 0
+        for t in self.tokens:
+            if t.kind == "zh":
+                if id(t) in by_token:
+                    gaps[idx] = by_token[id(t)]
+                idx += 1
+        return gaps
 
     def _convert_all(self, overrides=None):
         """Convert each maximal run of zh tokens; returns per-syllable phrases. overrides:
@@ -1789,16 +1915,23 @@ class Composer:
         # The model reads each run after what comes before it (_run_context): what was just sent (接續前文選字, #37) and
         # the Chinese of the runs before it in the buffer, across English, digits and punctuation (#42). The word sent
         # last (prev) stays for the buffer's very start only.
+        en = _knows_english(lm)
+        gap = self._english_gaps() if en else {}  # (run start -> the EN_MARKs of what came before it)
+        earlier = ""                              # (the runs before as units, en only)
         for a, b in runs:
             ov = {(s - a, l): v[1] for (s, l), v in overrides.items() if a <= s and s + l <= b}
             prev = self.context_word if a == 0 and starts_buffer else None
             # (one syllable and no English word: punctuation, or the next syllable being typed, do
             # not make it a sentence - 輸, is as picked)
             alone = len(self.readings) == 1 and all(t.kind != "en" for t in self.tokens)
-            context = self._run_context(out) if lm is not None else ""
+            if en:
+                earlier += gap.get(a, "")
+            context = (self._run_context(out, earlier if en else None)) if lm is not None else ""
             run_lm = lm.view(context) if context else lm
             for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, run_lm, alone):
                 out.append((a + s, l, p))
+                if en:
+                    earlier += "".join(ch for ch in p if is_han(ch))
         self.runs = runs
         return out
 
@@ -2953,7 +3086,8 @@ class Composer:
         trial = tokenize(self.raw, self.table, self.user, self.english, forced, self.after_english,
                          self.digits_as_zhuyin, self.literal - set(unlit), (self.chinese - set(unchinese)) | {s},
                          {a: v for a, v in self.fixed.items() if a != unfix}, self.lexicon, self.breaks,
-                         self.exact, self.taken, self.bigram, self._lm(), self._sent_context(), self._context_len())
+                         self.exact, self.taken, self.bigram, self._lm(), self._sent_context(), self._context_len(),
+                         _knows_english(self._lm()), self._lit_keys())
         inside = [t for t in trial if s <= t.start < end]
         if not inside or inside[0].start != s or any(t.kind != "zh" for t in inside) or \
                 inside[-1].start + len(inside[-1].raw) != end:
@@ -3659,7 +3793,8 @@ class Composer:
                     fixed=dict(self.fixed), taken=dict(self.taken), pending=dict(self.pending),
                     literal=set(self.literal), caps=set(self.caps), overrides=dict(self.overrides),
                     digits_as_zhuyin=self.digits_as_zhuyin,
-                    context_word=self.context_word, after_english=self.after_english, lm_context=self.lm_context)
+                    context_word=self.context_word, after_english=self.after_english, lm_context=self.lm_context,
+                    lm_units=self.lm_units)
         learned = []  # what this commit taught, as it was before: for undo_commit to put back
         self.user.simp_dropped = []  # (what a pick in Traditional mode takes of Simplified mode's memory, #32)
         terms = self._learn_terms(save=False)  # (saved with the picks below: one save a commit, #32)
@@ -3689,7 +3824,7 @@ class Composer:
         # then co nk4 is 黑色, not co 色; look up 還是 reads its look within the sentence)
         self.after_english = False
         self.context_word = self.segments[-1][2] if last and last.kind == "zh" and self.segments else None
-        self._sent(p for _, _, p in self.segments)  # (接續前文選字, #37)
+        self._sent((p for _, _, p in self.segments), self._token_units())  # (接續前文選字, #37)
         corrected = self._learn_corrections(len(self.raw))
         self._clear_input()
         self.commit = text
@@ -3983,7 +4118,7 @@ class Composer:
         self.taken = {a - tok.start: (b - tok.start, r) for a, (b, r) in self.taken.items() if a >= tok.start}
         self.pending = {x - tok.start: v for x, v in self.pending.items() if x >= tok.start}
         self.context_word = next(p for s, l, p in self.segments if s + l == b)
-        self._sent(p for s, l, p in self.segments if s + l <= b)  # (接續前文選字, #37)
+        self._sent((p for s, l, p in self.segments if s + l <= b), self._token_units(tok.start))  # (#37)
         self.after_english = False
         self.commit = self.composition[:self._syl_offset(b)]
         # what is sent may teach an English word (mochi, sent the second time): the rest may read

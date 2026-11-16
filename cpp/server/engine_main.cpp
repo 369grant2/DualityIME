@@ -271,9 +271,9 @@ Json handle(Session& s, const Json& req) {
             if (auto ch = one_char(req.get("ch")))
                 out += c.config.flag("full_width") ? to_full_width(ustr(1, *ch)) : ustr(1, *ch);
         }
-        ustr context = c.lm_context();  // (what was just sent stays right before the caret: #37)
+        ustr context = c.lm_context(), units = c.lm_units();  // (what was just sent stays right before the caret: #37)
         c.reset();
-        c.keep_context(context);
+        c.keep_context(context, units);
         c.commit = out;
     }
     Json o = state(s, handled);

@@ -1,9 +1,9 @@
 """The training text of the next student model (#41): Chinese characters with English kept as one mark.
 
-    py -3 tools/lm/next/prepare_next.py [--limit-million N] [--jobs N]
+    py -3 tools/lm/next/prepare_next.py [--limit-million N] [--jobs N] [--more] [--out NAME]
 
-Reads common.TRAIN (never common.EVAL) and common.WORK/vocab.txt (tools/lm/prepare.py: the characters the model
-knows). Writes common.WORK/next/:
+Reads common.TRAIN (never common.EVAL; --more: common.train_more() too) and common.WORK/vocab.txt (tools/lm/prepare.py:
+the characters the model knows). Writes common.WORK/next/ (--out: common.WORK/<NAME>/):
   vocab.txt   <unk> (0), <s> (1), <en> (2), then the characters of WORK/vocab.txt in their order
   train.u16, dev.u16   each paragraph (a line of a text) with 2+ units as <s> + its units (text.to_units: English and
               letters-and-digits runs one <en>, punctuation and spaces dropped without cutting the text), the last
@@ -71,11 +71,12 @@ def encode_job(job):
 def main(argv):
     _tools()
     sys.stdout.reconfigure(encoding="utf-8")
-    from common import TRAIN, EVAL, WORK
+    from common import TRAIN, EVAL, WORK, train_more
     from prepare import groups
     limit = float(argv[argv.index("--limit-million") + 1]) if "--limit-million" in argv else 0
     jobs = int(argv[argv.index("--jobs") + 1]) if "--jobs" in argv else max(1, (os.cpu_count() or 2) // 2)
-    assert not set(TRAIN) & set(EVAL.values())
+    files = TRAIN + (train_more() if "--more" in argv else [])
+    assert not set(files) & set(EVAL.values())
     old = open(os.path.join(WORK, "vocab.txt"), encoding="utf-8").read().rstrip("\n").split("\n")
     assert old[:2] == ["<unk>", "<s>"], "WORK/vocab.txt: run tools/lm/prepare.py first"
     vocab = ["<unk>", "<s>", "<en>"] + old[2:]
@@ -83,12 +84,13 @@ def main(argv):
     for i, ch in enumerate(vocab[3:], 3):
         lut[ord(ch)] = i
     lut[ord(MARK)] = EN_ID
-    out_dir = os.path.join(WORK, "next")
+    out_dir = os.path.join(WORK, argv[argv.index("--out") + 1] if "--out" in argv else "next")
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "vocab.txt"), "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(vocab) + "\n")
     work = []
-    for path in TRAIN:
+    print(f"{len(files)} files", flush=True)
+    for path in files:
         gs = groups(path)
         if limit:  # (a quick run: the first groups of each file, and its development groups)
             train = [g for g in gs if not g[1]][:max(1, int(limit))]

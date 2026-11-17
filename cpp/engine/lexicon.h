@@ -58,8 +58,14 @@ public:
     // Longer phrases whose readings start with `readings`: ㄕㄣˊ -> 神奇, 神經...
     std::vector<const Completion*> completions(const std::vector<ustr>& readings) const;
 
-    // phrase is the dictionary's for these readings
+    // (phrase, score) the dictionary has under these readings with 不 typed ㄅㄨˋ or 一 typed ㄧ in its changed tone (不對
+    // ㄅㄨˊ ㄉㄨㄟˋ for ㄅㄨˋ ㄉㄨㄟˋ; 一年一度: two positions at once at most), 2+ syllables (engine/lexicon.py sandhi_lookup)
+    std::vector<Scored> sandhi_lookup(const std::vector<ustr>& readings) const;
+    // phrase is the dictionary's for these readings (不 / 一 typed in their own tone too: sandhi_lookup)
     bool has(const std::vector<ustr>& readings, const ustr& phrase) const;
+    // Of the dictionary's words of two characters or more with a, the share also written with b in its place (same
+    // syllables): 你 -> 妳 0.31, 業 -> 頁 0.0 (#47; engine/lexicon.py variant_share)
+    double variant_share(char32_t a, char32_t b) const;
     // The dictionary has phrase under readings that differ from these only in tones (下載 is
     // ㄒㄧㄚˋ ㄗㄞˇ there; 教育部 reads ㄒㄧㄚˋ ㄗㄞˋ), and each character of it has its syllable here
     // (載 is a ㄗㄞˋ too). Words of 2+ syllables only.
@@ -98,6 +104,10 @@ private:
     std::vector<const ustr*> other_tones(const std::vector<ustr>& readings) const;
     mutable bool by_toneless_built_ = false;
     mutable std::unordered_map<ustr, std::vector<ustr>> by_toneless_;  // readings without tones -> reading keys
+    // character -> (reading key, word of 2+ characters with it), on first use; the shares worked out (variant_share)
+    mutable bool with_char_built_ = false;
+    mutable std::unordered_map<char32_t, std::vector<std::pair<const ustr*, const ustr*>>> with_char_;
+    mutable std::map<std::pair<char32_t, char32_t>, double> variant_shares_;
 };
 
 // {word: rank}, most common first; english_tech.txt ranked after english.txt
@@ -217,6 +227,7 @@ public:
     std::vector<std::pair<ustr, ustr>> quick_fill;
     bool reload_quick_fill();  // re-read it if it changed (see engine/lexicon.py reload_quick_fill)
     double bonus(const ustr& reading_key, const ustr& phrase) const;
+    double pick_bonus(const ustr& reading_key, const ustr& phrase) const;  // the part of bonus the picks give
     void learn_phrase(const ustr& reading_key, const ustr& phrase);
     bool learned(const ustr& reading_key, const ustr& phrase) const;  // a whole pick at least (faded or not), not a half
     void learn_half(const ustr& reading_key, const ustr& phrase);     // half a pick (a pair: Composer::learn_pairs)

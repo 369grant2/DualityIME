@@ -3412,6 +3412,158 @@ class LearnedSinglesTest(Base):
         for _ in range(times):
             self.c.user.learn_phrase(reading, phrase)
 
+    def test_more_picked_word_wins_over_less_picked_homophone(self):
+        # (#47, the user 2026-11-16: 不對 picked 4 times lost to 部隊 picked once - typed ㄅㄨˋ ㄉㄨㄟˋ, where the dictionary
+        # has 部隊 and keeps 不對 under ㄅㄨˊ, so 不對 started from the user phrase score and log10 of the picks never
+        # caught up. Of two words picked, one picked clearly more - twice as often and two picks more - comes first,
+        # whichever it is; picks close together leave it to the corpus (試用 5 and 是用 3 are both written: lifting the
+        # one picked more made 統計是用字典 試用); a word never picked keeps its place (去試 picked once must not take
+        # every 去世) - docs/superpowers/items/47-learned-word-loses.md)
+        for more, n_more, less, n_less, want in (("不對", 4, "部隊", 1, "不對"), ("部隊", 4, "不對", 1, "部隊"),
+                                                 ("不對", 2, "部隊", 1, "部隊")):
+            with self.subTest(more=more, picks=(n_more, n_less)):
+                self.c.user.phrases.clear()
+                self.c.user.phrase_used.clear()
+                self.learn("ㄅㄨˋ-ㄉㄨㄟˋ", more, n_more)
+                self.learn("ㄅㄨˋ-ㄉㄨㄟˋ", less, n_less)
+                for long_sentence in (True, False):
+                    self.c.config.values = dict(DEFAULTS, long_sentence=long_sentence)
+                    self.c.settings_changed()
+                    self.assertEqual(self.type(keys("ㄅㄨˋ ㄉㄨㄟˋ")), want, long_sentence)
+
+    def test_picking_a_word_never_makes_it_lose(self):
+        # (#47, code-reviewer 2026-11-17: the first form of the rule above lifted a word picked more over any other
+        # picked, so 代表 picked once after 戴錶 3 times - 代表 still first then, by the corpus - handed every 代表 to
+        # 戴錶; and lifting the one picked more lost a word the sentence put first (關住 3 times, 我們的關注: 關注 picked
+        # once made 我們的關住): the one picked less is held down instead, never under its score before its picks)
+        for reading, more, less, typed, want in (("ㄉㄞˋ-ㄅㄧㄠˇ", "戴錶", "代表", "ㄨㄛˇ ㄇㄣ˙ ㄉㄜ˙ ㄉㄞˋ ㄅㄧㄠˇ", "我們的代表"),
+                                                 ("ㄅㄢˇ-ㄅㄣˇ", "板本", "版本", "ㄒㄧㄣ ㄉㄜ˙ ㄅㄢˇ ㄅㄣˇ", "新的版本"),
+                                                 ("ㄍㄨㄢ-ㄓㄨˋ", "關住", "關注", "ㄨㄛˇ ㄇㄣ˙ ㄉㄜ˙ ㄍㄨㄢ ㄓㄨˋ", "我們的關注"),
+                                                 ("ㄈㄨˋ-ㄎㄨㄢˇ", "附款", "付款", "ㄗㄞˋ ㄈㄨˋ ㄎㄨㄢˇ", "在付款")):
+            with self.subTest(less=less):
+                self.c.user.phrases.clear()
+                self.c.user.phrase_used.clear()
+                self.learn(reading, more, 3)
+                for long_sentence in (True, False):
+                    self.c.config.values = dict(DEFAULTS, long_sentence=long_sentence)
+                    self.c.settings_changed()
+                    self.assertEqual(self.type(keys(typed)), want, ("before", long_sentence))
+                self.learn(reading, less, 1)
+                for long_sentence in (True, False):
+                    self.c.config.values = dict(DEFAULTS, long_sentence=long_sentence)
+                    self.c.settings_changed()
+                    self.assertEqual(self.type(keys(typed)), want, ("after", long_sentence))
+
+    def test_picking_a_word_never_makes_it_lose_beyond_its_picks(self):
+        # (#47, code-reviewer 2026-11-17: the word's score had it never been picked is worked out as it was made, not as
+        # the score less its whole bonus: a name of 個人詞庫 keeps that bonus (家豪 there, 佳豪 picked 3 times: 家豪
+        # picked once made 我的佳豪), and a word of 3 whose shorter word was picked more carried that bonus already, so
+        # its own first pick lifted it no further (雞蛋 10 times, 肌蛋白 3: 雞蛋白 picked once made 肌蛋白))
+        c = self.c
+        saved = c.user.custom
+        try:
+            c.user.custom = {"ㄐㄧㄚ-ㄏㄠˊ": ["家豪"]}
+            c.table.set_custom(c.user.custom)
+            self.learn("ㄐㄧㄚ-ㄏㄠˊ", "佳豪", 3)
+            for long_sentence in (True, False):
+                c.config.values = dict(DEFAULTS, long_sentence=long_sentence)
+                c.settings_changed()
+                self.assertEqual(self.type(keys("ㄨㄛˇ ㄉㄜ˙ ㄐㄧㄚ ㄏㄠˊ")), "我的家豪", ("before", long_sentence))
+            self.learn("ㄐㄧㄚ-ㄏㄠˊ", "家豪", 1)
+            for long_sentence in (True, False):
+                c.config.values = dict(DEFAULTS, long_sentence=long_sentence)
+                c.settings_changed()
+                self.assertEqual(self.type(keys("ㄨㄛˇ ㄉㄜ˙ ㄐㄧㄚ ㄏㄠˊ")), "我的家豪", ("after", long_sentence))
+        finally:
+            c.user.custom = saved
+            c.table.set_custom(saved)
+        c.user.phrases.clear()
+        c.user.phrase_used.clear()
+        self.learn("ㄐㄧ-ㄉㄢˋ", "雞蛋", 10)
+        self.learn("ㄐㄧ-ㄉㄢˋ-ㄅㄞˊ", "肌蛋白", 3)
+        for long_sentence in (True, False):
+            c.config.values = dict(DEFAULTS, long_sentence=long_sentence)
+            c.settings_changed()
+            before = self.type(keys("ㄐㄧ ㄉㄢˋ ㄅㄞˊ ㄏㄣˇ ㄏㄠˇ"))
+            self.learn("ㄐㄧ-ㄉㄢˋ-ㄅㄞˊ", "雞蛋白", 1)
+            self.assertEqual(self.type(keys("ㄐㄧ ㄉㄢˋ ㄅㄞˊ ㄏㄣˇ ㄏㄠˇ")), "雞蛋白很好", (before, long_sentence))
+            c.user.phrases["ㄐㄧ-ㄉㄢˋ-ㄅㄞˊ"].pop("雞蛋白")
+
+    def test_bu_and_yi_typed_in_their_own_tone(self):
+        # (#47: the dictionary writes 不 and 一 with the tone they change to before others (不對 ㄅㄨˊ ㄉㄨㄟˋ, 辦不到
+        # ㄅㄢˋ ㄅㄨˊ ㄉㄠˋ, 別樹一幟 ㄅㄧㄝˊ ㄕㄨˋ ㄧˊ ㄓˋ); people type the dictionary's own ㄅㄨˋ / ㄧ, which gave 這樣部隊, 半步道,
+        # 別墅一致)
+        for readings, want in (("ㄓㄜˋ ㄧㄤˋ ㄅㄨˋ ㄉㄨㄟˋ", "這樣不對"), ("ㄅㄢˋ ㄅㄨˋ ㄉㄠˋ", "辦不到"),
+                               ("ㄅㄧㄝˊ ㄕㄨˋ ㄧ ㄓˋ", "別樹一幟")):
+            with self.subTest(readings=readings):
+                self.assertEqual(self.type(keys(readings)), want)
+
+    def test_bu_and_yi_changed_twice_in_one_word(self):
+        # (#47, /code-review: 一年一度 is ㄧˋ ㄋㄧㄢˊ ㄧˊ ㄉㄨˋ in the dictionary, 天不怕地不怕 has two ㄅㄨˊ: one change at a time
+        # found neither)
+        lexicon = self.c.lexicon
+        for readings, word in (("ㄧ ㄋㄧㄢˊ ㄧ ㄉㄨˋ", "一年一度"), ("ㄊㄧㄢ ㄅㄨˋ ㄆㄚˋ ㄉㄧˋ ㄅㄨˋ ㄆㄚˋ", "天不怕地不怕")):
+            with self.subTest(word=word):
+                rd = readings.split()
+                self.assertIn(word, [p for p, _ in composer.phrase_candidates(rd, lexicon)])
+                self.assertTrue(lexicon.has(rd, word))
+
+    def test_dictionary_lookups_know_bu_and_yi_typed_in_their_own_tone(self):
+        # (#47, /code-review: phrase_candidates found 不對 for ㄅㄨˋ ㄉㄨㄟˋ, but has() still called it the user's own word
+        # - the learning took it for one only the user taught - and the next character after 不 never came from 不是,
+        # 不要: the dictionary writes them ㄅㄨˊ)
+        lexicon = self.c.lexicon
+        self.assertTrue(lexicon.has(["ㄅㄨˋ", "ㄉㄨㄟˋ"], "不對"))
+        self.assertFalse(lexicon.has(["ㄅㄨˋ", "ㄉㄨㄟˋ"], "部對"))
+        words = lexicon.completions(["ㄅㄨˋ"])
+        self.assertIn("不是", [p for _, p, _ in words])
+        self.assertTrue(all(syls[0] == "ㄅㄨˋ" or p[0] == "不" for syls, p, _ in words))
+        self.assertEqual([s for _, _, s in words], sorted((s for _, _, s in words), reverse=True))
+
+    def test_three_picked_homophones_keep_the_order_of_their_picks(self):
+        # (#47, /code-review: 適用 8, 是用 3, 試用 1 picks - 是用 held under 適用, then 試用 under 是用's score before
+        # that hold: the two tied. Each is held under the one over it as that one ends up. Scores made up through
+        # corpus_unigram: without the picks 試用 0.2, 是用 0.0, 適用 -2.9)
+        rd = ["ㄕˋ", "ㄩㄥˋ"]
+        for p, n in (("適用", 8), ("是用", 3), ("試用", 1)):
+            self.learn("-".join(rd), p, n)
+        lex = dict(self.c.lexicon.lookup(rd))
+        base = {"是用": 0.0, "試用": 0.2, "適用": -2.9}
+
+        def fake(bigram, lexicon, p, s):
+            return s - lex[p] + base[p] if p in base else s - 20.0
+
+        with unittest.mock.patch.object(composer, "corpus_unigram", fake):
+            u = dict(composer._search(rd, self.c.lexicon, self.c.user, {}, self.c.bigram, None)[1][(0, 2)])
+        self.assertGreater(u["適用"], u["是用"])
+        self.assertGreater(u["是用"], u["試用"])
+        self.assertGreaterEqual(u["試用"], 0.2)  # (never under its score without its pick)
+
+    def test_variant_share_is_each_dictionarys_own(self):
+        # (#47, /code-review: the shares were kept per pair for the whole program, so another dictionary - a test's, a
+        # tool's - got the first one's)
+        main = self.c.lexicon.variant_share("你", "妳")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "lexicon.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("ㄋㄧˇ-ㄇㄣ˙\t你們\t-3\nㄋㄧˇ-ㄇㄣ˙\t妳們\t-4\nㄋㄧˇ-ㄏㄠˇ\t你好\t-3\n")
+            own = Lexicon(path)
+        self.assertEqual(own.variant_share("你", "妳"), 0.5)
+        self.assertAlmostEqual(main, 0.3059, places=3)
+        self.assertEqual(self.c.lexicon.variant_share("你", "妳"), main)
+
+    def test_char_picked_often_does_not_make_up_words(self):
+        # (#47: 頁 picked 5 times - for 網頁, 第3頁 - made 專業 專頁, a written form the dictionary does not have; one
+        # it has (謝謝妳 for 妳 picked 10 times) still comes, and a word the user picked (專頁) is kept)
+        self.learn("ㄧㄝˋ", "頁", 5)
+        self.learn("ㄧㄝˋ", "夜", 1)
+        self.assertEqual(self.type(keys("ㄋㄧˇ ㄧˊ ㄉㄧㄥˋ ㄅㄧˇ ㄨㄛˇ ㄓㄨㄢ ㄧㄝˋ")), "你一定比我專業")
+        self.assertEqual(self.type(keys("ㄉㄧˋ ㄙㄢ ㄧㄝˋ")), "第三頁")
+        self.learn("ㄓㄨㄢ-ㄧㄝˋ", "專頁", 2)
+        self.assertEqual(self.type(keys("ㄈㄣˇ ㄙ ㄓㄨㄢ ㄧㄝˋ")), "粉絲專頁")
+        self.learn("ㄋㄧˇ", "妳", 10)
+        self.assertEqual(self.type(keys("ㄒㄧㄝˋ ㄒㄧㄝ˙ ㄋㄧˇ")), "謝謝妳")
+
     def test_learned_singles_do_not_outvote_a_learned_word(self):
         self.learn("ㄒㄧㄢˋ", "線")
         self.learn("ㄗㄞˋ", "在")
@@ -3650,11 +3802,12 @@ class LearnedSinglesTest(Base):
 
     def test_a_character_picked_inside_a_word_changes_only_itself(self):
         # the rest of the word stays as it was (什麽, not 神麽), unless the dictionary has the word
-        # with the pick in it (紀錄); what stays is not learned as picked
+        # with the pick in it (紀錄; 不對 for ㄅㄨˋ ㄉㄨㄟˋ since #47 finds 不 typed in its own tone - before, 不隊);
+        # what stays is not learned as picked
         c = self.c
         for typed, picks, want in [("ㄕㄣˊ ㄇㄜ˙", [(1, "麽")], "什麽"), ("ㄐㄧㄣ ㄊㄧㄢ", [(1, "添")], "今添"),
                                    ("ㄍㄨㄥ ㄗㄨㄛˋ", [(1, "做")], "工做"), ("ㄐㄧˋ ㄌㄨˋ", [(0, "紀")], "紀錄"),
-                                   ("ㄅㄨˋ ㄉㄨㄟˋ", [(0, "不")], "不隊")]:
+                                   ("ㄅㄨˋ ㄉㄨㄟˋ", [(0, "不")], "不對")]:
             with self.subTest(want):
                 self.assertEqual(self.correct(typed, picks), want)
         self.assertEqual(c.user.phrase_count("ㄕㄣˊ", "什"), 0)

@@ -42,6 +42,10 @@ CASES = [
     # a pick in the first run read by the second
     "{CL}ji356ru, 5k4u;4283cjo41o4Github1u04g4t/6tj/6zj4a87{ENTER}",
     "{CL}ji3m/4Githubck6Gitlab1u3rul4{ENTER}",
+    # #47: 不對 over 部隊 when picked clearly more (the import_memory setting), 專業 kept with 頁 picked often, 妳 made
+    # 妳說 with 妳 picked for good; 不 / 一 typed in their own tone (這樣不對, 辦不到, 一起)
+    "{CL}1j42jo4{ENTER}{CL}su3u62u/41u3ji35j0 u,4{ENTER}{CL}2u4n0 u,4{ENTER}{CL}vu,4vu,7su3gji {ENTER}",
+    "{CL}5k4u;41j42jo4{ENTER}{CL}1041j42l4{ENTER}{CL}ji3ap7u fu3y.3{ENTER}",
     # #41: a run ending in digits out of order that became a number, then a run after it (the order check reads the
     # number's mark with what follows it: 824 ok two runs of letters and digits, 824 one)
     "{CL}ji3ap7y.3824 ok ji3ap7y.3824{ENTER}{CL}ji3ap7y.3824 ji3ap7y.3824{ENTER}",
@@ -294,6 +298,9 @@ CASES = [
     "ji3` em{#1}{ENTER}` {^,}ji3` {^.}",
     # the particles of everyday talk, and the keys next to them
     "cl3xji7{ENTER}2jo4u,7{ENTER}c9 su3cl3{ENTER}i7 97 o7 core i7 {ENTER}",
+    # (#47) 不 / 一 typed in their own tone: the next character from the words the dictionary writes with the changed
+    # one (不是), two changed in one word (一年一度, 天不怕地不怕), three homophones picked 8 / 3 / 1 times (imported)
+    "1j4{TAB}{ENTER}u {TAB}{ENTER}u su06u 2j4{ENTER}wu0 1j4q842u41j4q84{ENTER}g4m/4{ENTER}g4m/4{DOWN}{ENTER}",
 ]
 
 PUNCT = list(",.;?!:\"'[]()<>-_=+/\\|@#$%^&*")
@@ -389,7 +396,10 @@ AUTOCORRECT = {"format": 1, "standard": {"picks": {"si3": {"ㄋㄧˇ": 3}, "817"
                "eten": {"picks": {"cl3": {"": 5}}, "used": {"cl3": {"": 20000}}}}
 
 # (字 and 像 written for good: repick may not put them into 自由, 現象 - variant_is_written, VARIANT_PAIR)
-IMPORTED = {"phrases": {"ㄊㄞˊ-ㄨㄢ": {"臺灣": 30}, "ㄋㄧˇ-ㄏㄠˇ": {"妳好": 12}, "ㄗˋ": {"字": 7}, "ㄒㄧㄤˋ": {"像": 8}},
+IMPORTED = {"phrases": {"ㄊㄞˊ-ㄨㄢ": {"臺灣": 30}, "ㄋㄧˇ-ㄏㄠˇ": {"妳好": 12}, "ㄗˋ": {"字": 7}, "ㄒㄧㄤˋ": {"像": 8},
+                        # (#47: 不對 picked clearly more than 部隊; 頁 picked often, 妳 for good)
+                        "ㄅㄨˋ-ㄉㄨㄟˋ": {"不對": 4, "部隊": 1}, "ㄧㄝˋ": {"頁": 5, "夜": 1}, "ㄋㄧˇ": {"妳": 10},
+                        "ㄕˋ-ㄩㄥˋ": {"適用": 8, "是用": 3, "試用": 1}},
             "english": ["up", "t"],
             "words": {"python": 5}, "emails": {"kazumasan@example.com": 3},
             # 簡體輸出's own memory (#32): merged into user_simplified.json (compared below)

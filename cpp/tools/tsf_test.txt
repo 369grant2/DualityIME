@@ -66,6 +66,16 @@ yk3ai7{ENTER}104{ENTER} => 怎麼辦
 su3{^,} => 你，
 {^:} => ：
 {^^,}su3{ENTER} => 你
+# ...but a key of typing not let go yet (typing fast: Ctrl+[ then Ctrl+] with [ still down) is no shortcut: both
+# marks come (#46, Issue #6: only 「 came)
+{^[]} => 「」
+su3{^,.} => 你，。
+# 不 typed in its own tone finds the words the dictionary writes with ㄅㄨˊ (#47: 這樣部隊, 半步道 before)
+5k4u;41j42jo4{ENTER} => 這樣不對
+1041j42l4{ENTER} => 辦不到
+# ...two of them changed in one word (一年一度 ㄧˋ ㄋㄧㄢˊ ㄧˊ ㄉㄨˋ, 天不怕地不怕)
+u su06u 2j4{ENTER} => 一年一度
+wu0 1j4q842u41j4q84{ENTER} => 天不怕地不怕
 # like the ASUS IME: the sentence waits for Enter; look up stays English
 look up {ENTER} => look up 
 su3cl3hello ji3{ESC} => 

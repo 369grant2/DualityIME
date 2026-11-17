@@ -814,23 +814,22 @@ bool TextService::ctrl_punct_key(ITfContext* ctx, WPARAM vk, LPARAM lp) {
     // ...but in a terminal Ctrl + [ ] \ ^ _ are control characters (Ctrl+[ is Esc, Ctrl+] telnet's escape)
     static const wchar_t CONTROL_KEYS[] = L"[]\\^_";
     if (!cfg_.ctrl_punct || !down(VK_CONTROL) || down(VK_MENU)) return false;
-    // only Ctrl (and Shift) with the one key: any other key of the keyboard held as well (Win, Caps
-    // Lock, a letter...) makes it some program's shortcut (Win+Ctrl+, , Ctrl+CapsLock+.). Only real keys
-    // count: the keyboard state can show a key code no key sends as held for good (0xF1, one of the
+    // only Ctrl (and Shift) with the one key: a key of a shortcut held as well (Win, Caps Lock, Esc, F1-F24,
+    // the arrows...) makes it some program's shortcut (Win+Ctrl+, , Ctrl+CapsLock+.). A key of typing still
+    // held - a letter, a digit, a mark, space: the one before, not let go yet when typing fast - does not:
+    // Ctrl+[ then Ctrl+] typed quickly gave 「 alone, and the ] went to the program (#46, Issue #6). Only real
+    // keys count: the keyboard state can show a key code no key sends as held for good (0xF1, one of the
     // Japanese IME's, on a machine with it installed), which turned the setting off everywhere
-    auto real_key = [](int k) {
+    auto shortcut_key = [](int k) {
         return k == VK_BACK || k == VK_TAB || k == VK_RETURN || k == VK_CAPITAL || k == VK_ESCAPE ||
-               (k >= VK_SPACE && k <= VK_HELP) ||        // space, Page Up/Down, End, Home, arrows, Insert, Delete...
-               (k >= '0' && k <= '9') || (k >= 'A' && k <= 'Z') ||
+               (k > VK_SPACE && k <= VK_HELP) ||         // Page Up/Down, End, Home, arrows, Insert, Delete...
                (k >= VK_LWIN && k <= VK_APPS) ||         // Win, the menu key
-               (k >= VK_NUMPAD0 && k <= VK_F24) ||       // the number pad, F1-F24
-               (k >= VK_OEM_1 && k <= VK_OEM_3) ||       // ; = , - . / `
-               (k >= VK_OEM_4 && k <= VK_OEM_8) || k == VK_OEM_102;  // [ \ ] ' and the extra key of some keyboards
+               (k >= VK_NUMPAD0 && k <= VK_F24);         // the number pad, F1-F24
     };
     BYTE ks[256];
     if (!GetKeyboardState(ks)) return false;
     for (int k = 0; k < 256; ++k)
-        if ((ks[k] & 0x80) && k != static_cast<int>(vk) && real_key(k)) return false;
+        if ((ks[k] & 0x80) && k != static_cast<int>(vk) && shortcut_key(k)) return false;
     wchar_t ch = char_of(vk, lp);
     if (!ch || !wcschr(KEYS, ch)) return false;
     return !(wcschr(CONTROL_KEYS, ch) && in_terminal(ctx));
@@ -1361,6 +1360,17 @@ bool TextService::text_rect(TfEditCookie ec, ITfContext* ctx, ITfRange* range, R
     return rc.bottom > rc.top;
 }
 
+bool TextService::selection_rect(TfEditCookie ec, ITfContext* ctx, RECT& rc) {
+    // the selection (the caret) as the app reports it through TSF: Chromium (Chrome, Edge) draws its own caret and has
+    // no system caret, so caret_rect finds nothing there (#45)
+    TF_SELECTION sel{};
+    ULONG fetched = 0;
+    if (FAILED(ctx->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) || !fetched || !sel.range) return false;
+    ComPtr<ITfRange> r;
+    r.Attach(sel.range);
+    return text_rect(ec, ctx, r.Get(), rc);
+}
+
 namespace {
 // Java (AWT / Swing) draws its own caret and tells TSF nothing about where the text is; it says
 // so through IMM32 only when told a candidate list opens (as Windows tells it for the Microsoft
@@ -1411,15 +1421,19 @@ void TextService::ask_position(ITfContext* ctx) {
         SendMessageW(hwnd, WM_IME_NOTIFY, IMN_OPENCANDIDATE, 1);
 }
 
+static bool system_caret_rect(RECT& rc) {
+    // the system caret of this thread, on screen (an app drawing its own caret has none: Chromium)
+    GUITHREADINFO gti{sizeof gti};
+    if (!GetGUIThreadInfo(GetCurrentThreadId(), &gti) || !gti.hwndCaret) return false;
+    rc = gti.rcCaret;
+    MapWindowPoints(gti.hwndCaret, nullptr, reinterpret_cast<POINT*>(&rc), 2);
+    return rc.bottom > rc.top;
+}
+
 bool TextService::caret_rect(ITfContext*, RECT& rc) {
     // apps that tell TSF nothing: the system caret, else where it said through IMM32, else the
     // bottom of the window
-    GUITHREADINFO gti{sizeof gti};
-    if (GetGUIThreadInfo(GetCurrentThreadId(), &gti) && gti.hwndCaret) {
-        rc = gti.rcCaret;
-        MapWindowPoints(gti.hwndCaret, nullptr, reinterpret_cast<POINT*>(&rc), 2);
-        if (rc.bottom > rc.top) return true;
-    }
+    if (system_caret_rect(rc)) return true;
     if (imm_rect(rc)) return true;  // (0-5 us here)
     HWND fg = GetForegroundWindow();
     if (fg && GetWindowRect(fg, &rc)) {
@@ -1528,7 +1542,13 @@ void TextService::place_ui(TfEditCookie ec, ITfContext* ctx) {
             }
         }
     }
-    if (!have_comp && !caret_rect(ctx, comp_rc)) comp_rc = RECT{100, 100, 101, 120};
+    // nothing being typed (快速填入 opened, the symbol keyboard): the system caret as before (Notepad), else where the app
+    // says the caret is through TSF (#45: Chrome and Edge have no system caret, and the box went to the window's bottom
+    // left), else IMM32 and the window's bottom (caret_rect). While typing with no place for the text: as before #45
+    // (caret_rect, the system caret first)
+    if (!have_comp && !system_caret_rect(comp_rc) && (composition_ || !selection_rect(ec, ctx, comp_rc)) &&
+        !caret_rect(ctx, comp_rc))
+        comp_rc = RECT{100, 100, 101, 120};
     if (!have_end) end_rc = comp_rc;
     // Older apps (through the IMM32 layer) report from the caret to the end of the line,
     // not the character: no character is that wide, so the caret is its left edge.

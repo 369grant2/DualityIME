@@ -358,6 +358,22 @@ int wmain(int argc, wchar_t** argv) {
                     WORD vk = static_cast<WORD>(VK_F1 + std::atoi(name.c_str() + 2) - 1);
                     send({{VK_LCONTROL, false}, {vk, false}, {vk, true}, {VK_LCONTROL, true}});
                 }
+                else if (name.size() == 3 && name[0] == '^' && name[1] != '^') {
+                    // {^[]}: Ctrl held, the first key pressed and, before it is let go, the second (typing fast, #46)
+                    SHORT va = VkKeyScanW(static_cast<unsigned char>(name[1]));
+                    SHORT vb = VkKeyScanW(static_cast<unsigned char>(name[2]));
+                    WORD a = static_cast<WORD>(LOBYTE(va)), b = static_cast<WORD>(LOBYTE(vb));
+                    bool shift = ((HIBYTE(va) | HIBYTE(vb)) & 1) != 0;
+                    std::vector<std::pair<WORD, bool>> ev{{static_cast<WORD>(VK_LCONTROL), false}};
+                    if (shift) ev.push_back({static_cast<WORD>(VK_LSHIFT), false});
+                    ev.push_back({a, false});
+                    ev.push_back({b, false});
+                    ev.push_back({a, true});
+                    ev.push_back({b, true});
+                    if (shift) ev.push_back({static_cast<WORD>(VK_LSHIFT), true});
+                    ev.push_back({static_cast<WORD>(VK_LCONTROL), true});
+                    send(ev);
+                }
                 else if (name.size() >= 2 && name[0] == '^') {
                     // {^,}: Ctrl + the key (Shift too if the character needs it); {^^,}: F13 held as
                     // well (any other key held: the program's shortcut, not the input method's)

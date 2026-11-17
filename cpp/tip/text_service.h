@@ -154,6 +154,7 @@ private:
     void set_attribute(TfEditCookie ec, ITfContext* ctx, ITfRange* range, bool on);
     void set_caret(TfEditCookie ec, ITfContext* ctx, ITfRange* range, LONG offset);
     bool text_rect(TfEditCookie ec, ITfContext* ctx, ITfRange* range, RECT& rc);
+    bool selection_rect(TfEditCookie ec, ITfContext* ctx, RECT& rc);  // where the app says the caret is (TSF)
     void place_ui(TfEditCookie ec, ITfContext* ctx);
     bool char_rect(TfEditCookie ec, ITfContext* ctx, int at, RECT& rc);
     bool in_terminal(ITfContext* ctx);

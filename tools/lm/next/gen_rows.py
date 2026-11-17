@@ -2,8 +2,10 @@
 context as written (English and all), so the teacher reads the real text and the student its units.
 
     py -3 tools/lm/next/gen_rows.py [--count 500000] [--zai 0.2] [--mixed 0.2] [--out train_next_500k.jsonl] [--jobs N]
+                                    [--seed 11] [--more]
 
-Reads the corpus texts of common.TRAIN (never common.EVAL), NFKC. A run is a stretch of Chinese characters between
+Reads the corpus texts of common.TRAIN (never common.EVAL; --more: common.train_more() alone, texts the rows of TRAIN
+never came from, to add rows to them), NFKC. A run is a stretch of Chinese characters between
 anything else (the engine converts each such run on its own); runs of 6-40 characters, a window of 15-40 from a longer
 one, at most 2 per text. "ctx": the text before the run in the same text, cut at a unit boundary so it holds L units
 (text.to_units): L 0 for 3 rows in 10, else 1-64 at random. Shares: rows whose run holds 在 or 再 (--zai) and rows whose
@@ -43,9 +45,10 @@ def context(before, want):
     return before[starts[-want]:] if len(starts) >= want else before[starts[0]:] if starts else ""
 
 
-def samples(count, zai_share, mixed_share, seed=11):
+def samples(count, zai_share, mixed_share, seed=11, more=False):
     import pyarrow.parquet as pq
-    from common import TRAIN, text_column
+    from common import TRAIN, text_column, train_more
+    files = train_more() if more else TRAIN
     from engine.lexicon import Lexicon
     from evaluate import reading_of
     from evaluate_lm import best_readings
@@ -54,7 +57,7 @@ def samples(count, zai_share, mixed_share, seed=11):
     want = {"zai": int(count * zai_share), "mixed": int(count * mixed_share)}
     want["plain"] = count - want["zai"] - want["mixed"]
     got = {k: [] for k in want}
-    groups = [(p, g) for p in TRAIN for g in range(pq.ParquetFile(p).num_row_groups)]
+    groups = [(p, g) for p in files for g in range(pq.ParquetFile(p).num_row_groups)]
     rng.shuffle(groups)
     seen = 0
     for path, g in groups:
@@ -118,7 +121,7 @@ def main():
     count = arg("--count", 500000, int)
     out = os.path.join(tr.OUT, "distill", arg("--out", "train_next_500k.jsonl", str))
     jobs = arg("--jobs", max(1, (os.cpu_count() or 2) // 2), int)
-    todo = samples(count, arg("--zai", 0.2, float), arg("--mixed", 0.2, float))
+    todo = samples(count, arg("--zai", 0.2, float), arg("--mixed", 0.2, float), arg("--seed", 11, int), "--more" in sys.argv)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with multiprocessing.Pool(processes=jobs, initializer=tr._init) as pool, \
             open(out, "w", encoding="utf-8", newline="\n") as f:

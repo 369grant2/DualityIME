@@ -1023,6 +1023,10 @@ def phrase_candidates(readings, lexicon, user=None, names=False):
     converting and the candidate list only."""
     reading_key = "-".join(readings)
     scored = {p: s for p, s in lexicon.lookup(readings)}
+    # (#47 C: 不 and 一 change their tone before others - the dictionary writes the changed one (不對 ㄅㄨˊ ㄉㄨㄟˋ),
+    # people type the dictionary's own (ㄅㄨˋ, ㄧ): the words with 不 / 一 there are found that way too)
+    for p, s in lexicon.sandhi_lookup(readings):
+        scored[p] = max(scored.get(p, s), s)
     mine = []  # the user's words: learned ones not yet faded away, then 個人詞庫's
     if user:
         mine = [p for p in user.phrases.get(reading_key, ()) if user.phrase_count(reading_key, p) >= 1]
@@ -1379,6 +1383,13 @@ def inherited_bonus(rds, phrase, user):
     n = len(phrase)
     if n < 3 or n != len(rds):
         return 0.0
+    return max(0.0, inherited_best(rds, phrase, user) - user.bonus("-".join(rds), phrase))
+
+
+def inherited_best(rds, phrase, user):
+    """inherited_bonus before what phrase carries itself is taken off: the best sum of the bonuses of the shorter words
+    in it (len(phrase) == len(rds) >= 3)."""
+    n = len(phrase)
     best = [0.0] * (n + 1)
     for b in range(1, n + 1):
         best[b] = best[b - 1]
@@ -1387,7 +1398,7 @@ def inherited_bonus(rds, phrase, user):
                 w = user.bonus("-".join(rds[a:b]), phrase[a:b])
                 if w and best[a] + w > best[b]:
                     best[b] = best[a] + w
-    return max(0.0, best[n] - user.bonus("-".join(rds), phrase))
+    return best[n]
 
 
 def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, bare=False):
@@ -1433,6 +1444,43 @@ def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, b
                 options[span] = single_scores(r, options[span], lexicon, user, bigram)
             elif cands:
                 options[span] = [(p, corpus_unigram(bigram, lexicon, p, s)) for p, s in cands[:PER_SPAN]]
+                if user and l >= 2:
+                    # (#47: of two words of these syllables the user picked, the one picked clearly less - half as often
+                    # and two picks fewer (部隊 1, 不對 4) - goes below the other when its own picks put it ahead (the
+                    # corpus ranks 部隊 far ahead of 不對, but not of 不對 picked 4 times): it is held down, never under its
+                    # score before its picks, so picking a word never makes it lose, alone or in a sentence (代表 picked
+                    # once after 戴錶 3 times stays 代表; lifting the other instead lost to the context that gave B the
+                    # place: 我們的關注 -> 關住 - code-reviewer). Picks close together leave it to the corpus and the
+                    # sentence (試用 5, 是用 3: both are written); a word never picked keeps its place (去試 picked once
+                    # must not take every 去世))
+                    key = "-".join(readings[i:i + l])
+                    picked = [(p, u, user.phrase_count(key, p)) for p, u in options[span] if user.learned(key, p)]
+                    if len(picked) >= 2:
+                        made = dict(cands[:PER_SPAN])
+                        inherits = l >= 3 and span not in overrides and not inside
+
+                        def unpicked(p):
+                            # p's unigram had it never been picked, made as it was: its picks out of the bonus (個人詞庫
+                            # kept: 家豪 there), the inherited bonus as it would be then (雞蛋白 with 雞蛋 picked: its own
+                            # first pick lifted it no further), the corpus again
+                            own, bonus, s = user.pick_bonus(key, p), user.bonus(key, p), made[p]
+                            if inherits and len(p) == l:  # (inherited_bonus gives the others nothing)
+                                best = inherited_best(readings[i:i + l], p, user)
+                                s = s - own - max(0.0, best - bonus) + max(0.0, best - (bonus - own))
+                            else:
+                                s = s - own
+                            return corpus_unigram(bigram, lexicon, p, s)
+
+                        before = {p: unpicked(p) for p, u, cnt in picked}
+                        # (most picked first: a word over this one is held already - 適用 5 over 是用 2 over 試用 1 keeps
+                        # them in that order - code-review)
+                        held = {}
+                        for p2, u2, cnt2 in sorted(picked, key=lambda x: -x[2]):
+                            over = [held.get(p, u) for p, u, cnt in picked
+                                    if cnt >= 2 * cnt2 and cnt - cnt2 >= 2 and held.get(p, u) > before[p2]]
+                            if over:
+                                held[p2] = max(before[p2], min(u2, min(over) - 0.01))
+                        options[span] = [(p, held.get(p, u)) for p, u in options[span]]
             elif bare and l == 1 and span not in overrides and not inside:
                 options[span] = [(readings[i], NO_CHAR_SCORE)]
 
@@ -1511,7 +1559,10 @@ def strongly_picked(reading, ch, user, lexicon):
     return ch == usual or n >= 2 * user.phrase_count(reading, usual)
 
 
-def variant_is_written(rds, phrase, variant, user, bigram):
+VARIANT_SHARE = 0.2  # (#47) of the words with a character, written with its homophone too: a variant (你 妳 31%)
+
+
+def variant_is_written(rds, phrase, variant, user, bigram, lexicon=None):
     """Whether repick may offer variant, the word with the user's strong homophones put in: it
     takes the word's own score and the homophones' bonus on top, so whatever it is it wins (字己
     for 自己 with 字 picked 6 times). Only one the user picked (repick then keeps the one picked
@@ -1523,6 +1574,12 @@ def variant_is_written(rds, phrase, variant, user, bigram):
     if user.bonus(key, variant):
         return True
     if user.bonus(key, phrase) or bigram is None:
+        return False
+    # (#47 S2: a written form the dictionary does not have is made only with a homophone that is the other's variant - in
+    # the dictionary, words with one have the other written too (你/妳: 你們 妳們, 謝謝你 謝謝妳: 31%; 他/她 32%) - or
+    # one of the personal dictionary; 頁 picked 5 times for 網頁 made 專業 專頁 (業/頁: 0%; 時/實 2%, 是/事 4%))
+    if any(ch != phrase[j] and ch not in user.custom.get(rds[j], ()) and
+           (lexicon is None or lexicon.variant_share(phrase[j], ch) < VARIANT_SHARE) for j, ch in enumerate(variant)):
         return False
     word = None  # (whether phrase is cohesive, worked out once if needed)
     for j, ch in enumerate(variant):
@@ -1594,7 +1651,7 @@ def repick(path, readings, lexicon, options, full, user, bigram, prev_word, over
                 variant = "".join(ch if strongly_picked(readings[i + j], ch, user, lexicon) else strong[readings[i + j]] or ch
                                   for j, ch in enumerate(phrase))
                 if variant != phrase and all(p != variant for p, _ in cands) and \
-                        variant_is_written(readings[i:i + l], phrase, variant, user, bigram):
+                        variant_is_written(readings[i:i + l], phrase, variant, user, bigram, lexicon):
                     u = next(u for p, u in options[(i, l)] if p == phrase)
                     cands.append((variant, u + char_bonus(i, l, variant)))
             # (of two words the user picked, the one picked more, not the homophones' bonus:

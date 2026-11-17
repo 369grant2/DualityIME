@@ -35,6 +35,15 @@ EVAL = {
 assert not set(TRAIN) & set(EVAL.values()), "an evaluation file among the training ones"
 
 
+def train_more():
+    """The files of CC-100 zh-Hant downloaded besides TRAIN and EVAL (#41, the user 2026-11-17: more text for the larger
+    students): tools/lm/next/prepare_next.py --more trains on TRAIN and these, gen_rows.py --more draws its rows from
+    these alone. Never an evaluation file."""
+    import glob
+    taken = {os.path.basename(p) for p in TRAIN + list(EVAL.values())}
+    return sorted(p for p in glob.glob(os.path.join(WEB, "train-*.parquet")) if os.path.basename(p) not in taken)
+
+
 def text_column(pf):
     """The column with the text in a corpus parquet (text for the encyclopedia, line for the web)."""
     names = pf.schema_arrow.names

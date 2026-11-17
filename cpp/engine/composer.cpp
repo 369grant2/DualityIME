@@ -1453,6 +1453,12 @@ std::vector<Scored> phrase_candidates(const std::vector<ustr>& readings, const L
     ustr key = join(readings, U'-');
     OrderedMap<ustr, double> scored;
     for (auto& [p, s] : lexicon.lookup(readings)) scored.set(p, s);
+    // (#47: 不 and 一 change their tone before others - the dictionary writes the changed one (不對 ㄅㄨˊ ㄉㄨㄟˋ), people
+    // type the dictionary's own (ㄅㄨˋ, ㄧ): the words with 不 / 一 there are found that way too)
+    for (auto& [p, sc] : lexicon.sandhi_lookup(readings)) {
+        double* have = scored.find(p);
+        scored.set(p, have ? std::max(*have, sc) : sc);
+    }
     if (user) {
         if (auto* bucket = user->phrases.find(key))
             for (auto& [p, _] : *bucket)
@@ -1590,10 +1596,25 @@ static std::optional<char32_t> strong_homophone(const ustr& reading, const Lexic
 // 其他: cohesive), often enough (VARIANT_PAIR): 字 before 由 and 現 before 像 are in the corpus,
 // across words (文字由, 出現像), and made 字由 of every 自由.
 namespace { bool cohesive(const BigramModel& bigram, const ustr& phrase); }
+constexpr double VARIANT_SHARE = 0.2;  // (#47) of the words with a character, written with its homophone too: a variant
+
 static bool variant_is_written(const ustr& key, const ustr& phrase, const ustr& variant, const UserModel& user,
-                               const BigramModel* bigram) {
+                               const BigramModel* bigram, const Lexicon& lexicon) {
     if (user.bonus(key, variant)) return true;
     if (user.bonus(key, phrase) || !bigram) return false;
+    // (#47: a written form the dictionary does not have is made only with a homophone that is the other's variant - in
+    // the dictionary, words with one have the other written too (你/妳: 你們 妳們, 謝謝你 謝謝妳: 31%; 他/她 32%) - or
+    // one of the personal dictionary; 頁 picked 5 times for 網頁 made 專業 專頁 (業/頁: 0%; 時/實 2%, 是/事 4%))
+    {
+        std::vector<ustr> rds = split(key, U'-');
+        for (size_t j = 0; j < variant.size(); ++j) {
+            if (variant[j] == phrase[j]) continue;
+            auto it = user.custom.find(rds[j]);
+            bool mine = it != user.custom.end() &&
+                        std::find(it->second.begin(), it->second.end(), ustr(1, variant[j])) != it->second.end();
+            if (!mine && lexicon.variant_share(phrase[j], variant[j]) < VARIANT_SHARE) return false;
+        }
+    }
     int word = -1;  // (whether phrase is cohesive, worked out once if needed)
     for (size_t j = 0; j < variant.size(); ++j) {
         if (variant[j] == phrase[j]) continue;
@@ -1688,7 +1709,7 @@ static void repick(std::vector<Segment>& path, const std::vector<ustr>& readings
                 bool known = false;
                 for (auto& [p, _] : cands)
                     if (p == variant) known = true;
-                if (variant != phrase && !known && variant_is_written(key, phrase, variant, user, bigram)) {
+                if (variant != phrase && !known && variant_is_written(key, phrase, variant, user, bigram, lexicon)) {
                     double u = 0;
                     for (auto& [p, pu] : o->second)
                         if (p == phrase) {
@@ -1820,9 +1841,9 @@ double word_term(const std::vector<Segment>& path, const BigramModel* bigram) {
 // what phrase carries itself. Split, those words carry their bonus; whole, the word did not, so a
 // word learned once cut every longer one around it (講｜起來), and the character left alone was
 // chosen without the word (獎 picked once: 獎起來).
-static double inherited_bonus(const std::vector<ustr>& rds, const ustr& phrase, const UserModel& user) {
+// inherited_bonus before what phrase carries itself is taken off (len(phrase) == len(rds) >= 3)
+static double inherited_best(const std::vector<ustr>& rds, const ustr& phrase, const UserModel& user) {
     const int n = static_cast<int>(phrase.size());
-    if (n < 3 || n != static_cast<int>(rds.size())) return 0.0;
     std::vector<double> best(n + 1, 0.0);
     for (int b = 1; b <= n; ++b) {
         best[b] = best[b - 1];
@@ -1833,7 +1854,13 @@ static double inherited_bonus(const std::vector<ustr>& rds, const ustr& phrase, 
             }
         }
     }
-    return std::max(0.0, best[n] - user.bonus(join(rds, U'-'), phrase));
+    return best[n];
+}
+
+static double inherited_bonus(const std::vector<ustr>& rds, const ustr& phrase, const UserModel& user) {
+    const int n = static_cast<int>(phrase.size());
+    if (n < 3 || n != static_cast<int>(rds.size())) return 0.0;
+    return std::max(0.0, inherited_best(rds, phrase, user) - user.bonus(join(rds, U'-'), phrase));
 }
 
 static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
@@ -1905,6 +1932,65 @@ static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, 
                 auto& opt = options[span];
                 for (size_t k = 0; k < cands.size() && k < PER_SPAN; ++k)
                     opt.emplace_back(cands[k].first, corpus_unigram(bigram, lexicon, cands[k].first, cands[k].second));
+                if (user && l >= 2) {
+                    // (#47: of two words of these syllables the user picked, the one picked clearly less - half as often
+                    // and two picks fewer (部隊 1, 不對 4) - goes below the other when its own picks put it ahead: held
+                    // down, never under its score before its picks, so picking a word never makes it lose, alone or in a
+                    // sentence (代表 after 戴錶 3 times; 我們的關注 after 關住 3 times); picks close together leave it to
+                    // the corpus and the sentence (試用 5, 是用 3); a word never picked keeps its place - engine/composer.py)
+                    ustr key = join(std::vector<ustr>(readings.begin() + i, readings.begin() + i + l), U'-');
+                    struct Picked {
+                        ustr p;
+                        double u, cnt, before;
+                    };
+                    std::vector<Picked> picked;
+                    for (auto& [p, u] : opt)
+                        if (user->learned(key, p)) picked.push_back({p, u, user->phrase_count(key, p), 0.0});
+                    if (picked.size() >= 2) {
+                        // each one's unigram had it never been picked, made as it was: its picks out of the bonus
+                        // (個人詞庫 kept), the inherited bonus as it would be then, the corpus again (engine/composer.py)
+                        bool inherits = l >= 3 && ov == overrides.end() && inside.empty();
+                        std::vector<ustr> rds(readings.begin() + i, readings.begin() + i + l);
+                        for (auto& b : picked) {
+                            double s = 0.0;
+                            for (size_t k = 0; k < cands.size() && k < PER_SPAN; ++k)
+                                if (cands[k].first == b.p) {
+                                    s = cands[k].second;
+                                    break;
+                                }
+                            double own = user->pick_bonus(key, b.p), bonus = user->bonus(key, b.p);
+                            if (inherits && static_cast<int>(b.p.size()) == l) {  // (inherited_bonus: the others get nothing)
+                                double best = inherited_best(rds, b.p, *user);
+                                s = s - own - std::max(0.0, best - bonus) + std::max(0.0, best - (bonus - own));
+                            } else {
+                                s = s - own;
+                            }
+                            b.before = corpus_unigram(bigram, lexicon, b.p, s);
+                        }
+                        // (most picked first: a word over this one is held already - 適用 5 over 是用 2 over 試用 1
+                        // keeps them in that order)
+                        std::vector<const Picked*> order;
+                        for (auto& b : picked) order.push_back(&b);
+                        std::stable_sort(order.begin(), order.end(),
+                                         [](const Picked* x, const Picked* y) { return x->cnt > y->cnt; });
+                        std::unordered_map<ustr, double> held;
+                        auto now = [&](const Picked& a) {
+                            auto it = held.find(a.p);
+                            return it != held.end() ? it->second : a.u;
+                        };
+                        for (const Picked* b : order) {
+                            std::optional<double> over;
+                            for (auto& a : picked) {
+                                double au = now(a);
+                                if (a.cnt >= 2 * b->cnt && a.cnt - b->cnt >= 2 && au > b->before && (!over || au < *over))
+                                    over = au;
+                            }
+                            if (over) held[b->p] = std::max(b->before, std::min(b->u, *over - 0.01));
+                        }
+                        for (auto& [p, u] : opt)
+                            if (auto it = held.find(p); it != held.end()) u = it->second;
+                    }
+                }
             } else if (bare && l == 1 && ov == overrides.end() && inside.empty()) {
                 options[span].emplace_back(readings[i], NO_CHAR_SCORE);
             }

@@ -1,4 +1,5 @@
 """Phrase dictionary plus the per-user learned preferences."""
+import itertools
 import json
 import math
 import os
@@ -7,6 +8,18 @@ import time
 
 MAX_PHRASE_LEN = 8
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+# (#47) 不 and 一 change their tone before others: the dictionary writes the changed one (不對 ㄅㄨˊ ㄉㄨㄟˋ, 一定
+# ㄧˊ ㄉㄧㄥˋ), people type their own (ㄅㄨˋ, ㄧ). Typed syllable -> (the changed ones, the character).
+SANDHI = {"ㄅㄨˋ": (("ㄅㄨˊ",), "不"), "ㄧ": (("ㄧˊ", "ㄧˋ"), "一")}
+SANDHI_TYPED = {c: t for t, (changed, _) in SANDHI.items() for c in changed}  # changed -> typed
+SANDHI_MAX = 2  # positions changed in one word at most (一年一度, 天不怕地不怕)
+
+
+def is_sandhi(typed, syl, ch):
+    """syl is the changed tone of typed for ch (ㄅㄨˋ, ㄅㄨˊ, 不)."""
+    rule = SANDHI.get(typed)
+    return rule is not None and ch == rule[1] and syl in rule[0]
 
 
 
@@ -58,6 +71,8 @@ class Lexicon:
         self.reading_mass = {p: math.log10(m) for p, m in mass.items()}
         self._by_start = None  # first reading -> phrases of 2+ syllables, see completions()
         self._by_toneless = None  # readings without tones -> reading keys, see reads_with_other_tones()
+        self._with_char = None  # character -> [(reading, word of 2+ characters with it)], see variant_share()
+        self._variant_shares = {}
         # Names of well-known people and characters (names.txt next to the dictionary, made by
         # tools/build_names.py): reading -> [(name, score)]. Kept apart from entries: they are candidates
         # for converting only (phrase_candidates(..., names=True)), not words for the English / zhuyin
@@ -148,9 +163,46 @@ class Lexicon:
     def lookup(self, readings):
         return self.entries.get("-".join(readings), [])
 
+    def sandhi_lookup(self, readings):
+        """[(phrase, score)] the dictionary has under these readings with 不 typed ㄅㄨˋ or 一 typed ㄧ in its changed
+        tone (不對 ㄅㄨˊ ㄉㄨㄟˋ for ㄅㄨˋ ㄉㄨㄟˋ; 一年一度 ㄧˋ ㄋㄧㄢˊ ㄧˊ ㄉㄨˋ: SANDHI_MAX positions at once). Words of 2+
+        syllables; one position changed first, then two, positions and tones in order."""
+        at = [i for i, r in enumerate(readings) if r in SANDHI]
+        if len(readings) < 2 or not at:
+            return []
+        out = []
+        for n in range(1, min(SANDHI_MAX, len(at)) + 1):
+            for pos in itertools.combinations(at, n):
+                for tones in itertools.product(*(SANDHI[readings[i]][0] for i in pos)):
+                    alt = list(readings)
+                    for i, t in zip(pos, tones):
+                        alt[i] = t
+                    out += [(p, s) for p, s in self.lookup(alt)
+                            if len(p) == len(readings) and all(p[i] == SANDHI[readings[i]][1] for i in pos)]
+        return out
+
     def has(self, readings, phrase):
-        """phrase is the dictionary's for these readings."""
-        return any(p == phrase for p, _ in self.lookup(readings))
+        """phrase is the dictionary's for these readings (不 / 一 typed in their own tone too: sandhi_lookup)."""
+        return any(p == phrase for p, _ in self.lookup(readings)) or \
+            (("不" in phrase or "一" in phrase) and any(p == phrase for p, _ in self.sandhi_lookup(readings)))
+
+    def variant_share(self, a, b):
+        """Of the dictionary's words of two characters or more with a, the share also written with b in its place
+        (same syllables): 你 -> 妳 0.31, 業 -> 頁 0.0 (#47). The words with each character are listed once, on first
+        use (a pair is worked out from a's alone, while typing), and each pair once."""
+        key = (a, b)
+        if key not in self._variant_shares:
+            if self._with_char is None:
+                self._with_char = {}
+                for reading, lst in self.entries.items():
+                    for p in dict.fromkeys(p for p, _ in lst):
+                        if len(p) >= 2:
+                            for ch in dict.fromkeys(p):
+                                self._with_char.setdefault(ch, []).append((reading, p))
+            words = self._with_char.get(a, ())
+            n = sum(1 for reading, p in words if any(q == p.replace(a, b) for q, _ in self.entries[reading]))
+            self._variant_shares[key] = n / len(words) if words else 0.0
+        return self._variant_shares[key]
 
     def reads_with_other_tones(self, readings, phrase):
         """The dictionary has phrase under readings that differ from these only in tones (下載 is
@@ -193,7 +245,8 @@ class Lexicon:
 
     def completions(self, readings, min_score=-6.5):
         """Longer phrases whose readings start with `readings`:
-        ㄕㄣˊ -> 神奇, 神經... Returns [(readings, phrase, score)], most common first."""
+        ㄕㄣˊ -> 神奇, 神經... Returns [(readings, phrase, score)], most common first. 不 / 一 typed in their own tone
+        lead to the words the dictionary writes with the changed one too (ㄅㄨˋ -> 不是 ㄅㄨˊ ㄕˋ: SANDHI)."""
         if not readings:
             return []
         if self._by_start is None:  # built on first use: most users type a while first
@@ -201,15 +254,18 @@ class Lexicon:
             for reading, lst in self.entries.items():
                 syls = tuple(reading.split("-"))
                 if len(syls) >= 2:
+                    typed = SANDHI_TYPED.get(syls[0])
                     for p, s in lst:
                         if s >= min_score:
                             self._by_start.setdefault(syls[0], []).append((s, syls, p))
+                            if typed and p[0] == SANDHI[typed][1]:
+                                self._by_start.setdefault(typed, []).append((s, syls, p))
             for lst in self._by_start.values():
                 lst.sort(key=lambda x: -x[0])
         n = len(readings)
-        want = tuple(readings)
         return [(syls, p, s) for s, syls, p in self._by_start.get(readings[0], ())
-                if len(syls) > n and syls[:n] == want]
+                if len(syls) > n and all(a == b or (k < len(p) and is_sandhi(a, b, p[k]))
+                                         for k, (a, b) in enumerate(zip(readings, syls)))]
 
 
 def load_english(path=None):
@@ -761,10 +817,13 @@ class UserModel:
         self.custom_entries = entries
         return True
 
-    def bonus(self, reading_key, phrase):
+    def pick_bonus(self, reading_key, phrase):
+        """The part of bonus the picks give (not the personal dictionary's)."""
         count = self.phrase_count(reading_key, phrase)
-        learned = 0.0 if count < 1 else 3.0 + math.log10(count)
-        return learned + (CUSTOM_BONUS if phrase in self.custom.get(reading_key, ()) else 0.0)
+        return 0.0 if count < 1 else 3.0 + math.log10(count)
+
+    def bonus(self, reading_key, phrase):
+        return self.pick_bonus(reading_key, phrase) + (CUSTOM_BONUS if phrase in self.custom.get(reading_key, ()) else 0.0)
 
     def learn_phrase(self, reading_key, phrase):
         count = self.phrase_count(reading_key, phrase)

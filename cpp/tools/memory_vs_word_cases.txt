@@ -1,0 +1,15 @@
+# End-to-end checks of what the memory does against the dictionary (#47; memory_vs_word_user.json: 不對 4 times and
+# 部隊 once for ㄅㄨˋ ㄉㄨㄟˋ, 戴錶 3 times and 代表 once, 雞蛋 10 times, 肌蛋白 3 times and 雞蛋白 once, 頁 5 times and 夜
+# once, 試用 5 times and 是用 3): a word picked clearly more than its homophone comes first though the corpus ranks the
+# other ahead (不對, reported 2026-11-16), but picking a word never makes it lose (代表, first by the corpus, picked once
+# after 戴錶 3 times; 雞蛋白, first by what 雞蛋 inside it was picked, picked once after 肌蛋白 3 times; 關注, first after
+# 我們的, picked once after 關住 3 times - memory: 關住 3, 關注 1); a character picked
+# often does not make up a word the dictionary lacks (專業, not 專頁) but stays where it stands alone (第三頁)
+#   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 cpp\tools\memory_vs_word_cases.txt -User cpp\tools\memory_vs_word_user.json
+# e2e-args: -User cpp\tools\memory_vs_word_user.json
+1j42jo4{ENTER} => 不對
+su3u62u/41u3ji35j0 u,4{ENTER} => 你一定比我專業
+2u4n0 u,4{ENTER} => 第三頁
+ji3ap72k72941ul3{ENTER} => 我們的代表
+ru 204196cp3cl3{ENTER} => 雞蛋白很好
+ji3ap72k7ej0 5j4{ENTER} => 我們的關注

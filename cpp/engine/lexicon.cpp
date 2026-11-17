@@ -277,10 +277,113 @@ std::vector<const ustr*> Lexicon::other_tones(const std::vector<ustr>& readings)
     return out;
 }
 
+namespace {
+// (#47) 不 and 一 change their tone before others: the dictionary writes the changed one (不對 ㄅㄨˊ ㄉㄨㄟˋ, 一定 ㄧˊ ㄉㄧㄥˋ),
+// people type their own (ㄅㄨˋ, ㄧ) - engine/lexicon.py SANDHI
+struct SandhiRule {
+    ustr typed;
+    std::vector<ustr> changed;
+    char32_t ch;
+};
+const std::vector<SandhiRule>& sandhi_rules() {
+    static const std::vector<SandhiRule> rules = {{U"ㄅㄨˋ", {U"ㄅㄨˊ"}, U'不'}, {U"ㄧ", {U"ㄧˊ", U"ㄧˋ"}, U'一'}};
+    return rules;
+}
+const SandhiRule* sandhi_rule(const ustr& typed) {
+    for (auto& rule : sandhi_rules())
+        if (rule.typed == typed) return &rule;
+    return nullptr;
+}
+const SandhiRule* sandhi_rule_changed(const ustr& changed) {  // the rule changed is a changed tone of
+    for (auto& rule : sandhi_rules())
+        if (std::find(rule.changed.begin(), rule.changed.end(), changed) != rule.changed.end()) return &rule;
+    return nullptr;
+}
+bool is_sandhi(const ustr& typed, const ustr& syl, char32_t ch) {  // syl is the changed tone of typed for ch
+    const SandhiRule* rule = sandhi_rule(typed);
+    return rule && ch == rule->ch && std::find(rule->changed.begin(), rule->changed.end(), syl) != rule->changed.end();
+}
+}  // namespace
+
+std::vector<Scored> Lexicon::sandhi_lookup(const std::vector<ustr>& readings) const {
+    std::vector<Scored> out;
+    std::vector<size_t> at;
+    for (size_t i = 0; i < readings.size(); ++i)
+        if (sandhi_rule(readings[i])) at.push_back(i);
+    if (readings.size() < 2 || at.empty()) return out;
+    auto add = [&](const std::vector<ustr>& alt, std::initializer_list<size_t> pos) {
+        for (auto& [p, s] : lookup(alt)) {
+            if (p.size() != readings.size()) continue;
+            bool ok = true;
+            for (size_t i : pos)
+                if (p[i] != sandhi_rule(readings[i])->ch) ok = false;
+            if (ok) out.emplace_back(p, s);
+        }
+    };
+    // one position changed, then two (SANDHI_MAX); positions and tones in order (itertools.combinations, product)
+    for (size_t a = 0; a < at.size(); ++a)
+        for (auto& ta : sandhi_rule(readings[at[a]])->changed) {
+            std::vector<ustr> alt = readings;
+            alt[at[a]] = ta;
+            add(alt, {at[a]});
+        }
+    for (size_t a = 0; a < at.size(); ++a)
+        for (size_t b = a + 1; b < at.size(); ++b)
+            for (auto& ta : sandhi_rule(readings[at[a]])->changed)
+                for (auto& tb : sandhi_rule(readings[at[b]])->changed) {
+                    std::vector<ustr> alt = readings;
+                    alt[at[a]] = ta;
+                    alt[at[b]] = tb;
+                    add(alt, {at[a], at[b]});
+                }
+    return out;
+}
+
 bool Lexicon::has(const std::vector<ustr>& readings, const ustr& phrase) const {
     for (auto& [p, _] : lookup(readings))
         if (p == phrase) return true;
+    if (phrase.find(U'不') == ustr::npos && phrase.find(U'一') == ustr::npos) return false;
+    for (auto& [p, _] : sandhi_lookup(readings))
+        if (p == phrase) return true;
     return false;
+}
+
+double Lexicon::variant_share(char32_t a, char32_t b) const {
+    // the words with each character listed once, on first use (a pair is worked out from a's alone, while typing),
+    // each pair once - engine/lexicon.py
+    auto key = std::make_pair(a, b);
+    if (auto it = variant_shares_.find(key); it != variant_shares_.end()) return it->second;
+    if (!with_char_built_) {
+        with_char_built_ = true;
+        for (auto& [reading, lst] : entries_)
+            for (size_t k = 0; k < lst.size(); ++k) {
+                const ustr& p = lst[k].first;
+                if (p.size() < 2) continue;
+                bool again = false;
+                for (size_t j = 0; j < k; ++j)
+                    if (lst[j].first == p) again = true;
+                if (again) continue;
+                for (size_t c = 0; c < p.size(); ++c)
+                    if (p.find(p[c]) == c) with_char_[p[c]].emplace_back(&reading, &p);
+            }
+    }
+    size_t n = 0, total = 0;
+    if (auto it = with_char_.find(a); it != with_char_.end()) {
+        total = it->second.size();
+        for (auto& [reading, p] : it->second) {
+            ustr q = *p;
+            for (auto& c : q)
+                if (c == a) c = b;
+            for (auto& [x, _] : entries_.at(*reading))
+                if (x == q) {
+                    ++n;
+                    break;
+                }
+        }
+    }
+    double share = total ? static_cast<double>(n) / static_cast<double>(total) : 0.0;
+    variant_shares_[key] = share;
+    return share;
 }
 
 const std::vector<Scored>& Lexicon::lookup(const std::vector<ustr>& readings) const {
@@ -297,8 +400,12 @@ std::vector<const Completion*> Lexicon::completions(const std::vector<ustr>& rea
         for (const auto& reading : order_) {
             auto syls = split(reading, U'-');
             if (syls.size() < 2) continue;
+            const SandhiRule* rule = sandhi_rule_changed(syls[0]);  // (不是 ㄅㄨˊ ㄕˋ for ㄅㄨˋ too)
             for (auto& [p, s] : entries_.at(reading))
-                if (s >= min_score) by_start_[syls[0]].push_back(Completion{syls, p, s});
+                if (s >= min_score) {
+                    by_start_[syls[0]].push_back(Completion{syls, p, s});
+                    if (rule && p[0] == rule->ch) by_start_[rule->typed].push_back(Completion{syls, p, s});
+                }
         }
         for (auto& [_, lst] : by_start_)
             std::stable_sort(lst.begin(), lst.end(),
@@ -307,8 +414,13 @@ std::vector<const Completion*> Lexicon::completions(const std::vector<ustr>& rea
     auto it = by_start_.find(readings[0]);
     if (it == by_start_.end()) return out;
     size_t n = readings.size();
-    for (auto& c : it->second)
-        if (c.syls.size() > n && std::equal(readings.begin(), readings.end(), c.syls.begin())) out.push_back(&c);
+    for (auto& c : it->second) {
+        if (c.syls.size() <= n) continue;
+        bool ok = true;
+        for (size_t k = 0; k < n && ok; ++k)
+            ok = readings[k] == c.syls[k] || (k < c.phrase.size() && is_sandhi(readings[k], c.syls[k], c.phrase[k]));
+        if (ok) out.push_back(&c);
+    }
     return out;
 }
 
@@ -961,9 +1073,13 @@ bool UserModel::reload_custom() {
     return true;
 }
 
-double UserModel::bonus(const ustr& key, const ustr& phrase) const {
+double UserModel::pick_bonus(const ustr& key, const ustr& phrase) const {
     double count = phrase_count(key, phrase);
-    double learned = count < 1 ? 0.0 : 3.0 + std::log10(count);
+    return count < 1 ? 0.0 : 3.0 + std::log10(count);
+}
+
+double UserModel::bonus(const ustr& key, const ustr& phrase) const {
+    double learned = pick_bonus(key, phrase);
     auto it = custom.find(key);
     bool mine = it != custom.end() && std::find(it->second.begin(), it->second.end(), phrase) != it->second.end();
     return learned + (mine ? CUSTOM_BONUS : 0.0);

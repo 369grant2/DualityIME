@@ -87,9 +87,24 @@ class Lexicon:
         if os.path.isfile(names_path):
             with open(names_path, encoding="utf-8") as f:
                 self.add_names(f)
+        # The character usually typed right after an English word, by syllable (after_english.txt next to the
+        # dictionary, made by tools/build_after_english.py; #42): (word lower-cased, reading) -> character (CP + ㄓˊ: 值)
+        self.after_english = {}
+        after_path = os.path.join(os.path.dirname(path), "after_english.txt")
+        if os.path.isfile(after_path):
+            with open(after_path, encoding="utf-8") as f:
+                self.add_after_english(f)
         # 簡體輸出 (#32): OpenCC's tables (data/opencc next to the dictionary)
         from engine.script import Script
         self.script = Script.load(os.path.dirname(path))
+
+    def add_after_english(self, lines):
+        """Lines of after_english.txt: "word<TAB>reading<TAB>character", # a comment; whatever is broken is left out."""
+        for line in lines:
+            parts = line.rstrip("\r\n").split("\t")
+            if line.startswith("#") or len(parts) != 3 or not all(parts) or len(parts[2]) != 1:
+                continue
+            self.after_english[(parts[0].lower(), parts[1])] = parts[2]
 
     def add_names(self, lines):
         """Lines of names.txt: "reading<TAB>name<TAB>score", a character's with "<TAB>written" too - its Han
@@ -346,6 +361,15 @@ KEEP_CORRECTIONS = 2000  # key strings 注音自動校正 remembers
 CORRECTION_MIN_USES = 2  # a choice there counts once picked this many times
 KEYS_SECTION = "standard"  # keys.json keeps them under the keyboard's name
 AS_ENGLISH = "en"  # 代碼記憶's choice: the keys are English (mp3), not the zhuyin they spell
+# keys.json: English keys, this, then the keys of the syllable right after them (CP→56: CP值 picked from the bar, #42).
+# No key types it, so a version before, which looks up the keys of a syllable only, never finds one (a space would do:
+# CP 56 is five keys, a syllable's length) and keeps it when it writes the file.
+SPLIT_MARK = "→"
+
+
+def split_keys(english, keys):
+    """The keys.json key of a syllable typed right after English (CP, 56: CP→56)."""
+    return english + SPLIT_MARK + keys
 REPLACE_MIN_USES = 2  # 簡體輸出 (#32): a Mainland word picked this many times for a Taiwan one comes by itself
 
 # 快速填入 until quick_fill.json is first saved (#33, as ASUS 快捷文字本 ships them; the same list in
@@ -395,7 +419,9 @@ class CorrectionMemory:
     a reading is "this syllable" (si3 read ㄋㄧˇ); AS_ENGLISH is "English" (mp3, not 允). A choice
     picked CORRECTION_MIN_USES times, more than every other, is what those keys do from then on.
     Counts fade like the other picks; only a pick counts as use. Read at start; with 注音自動校正
-    off only AS_ENGLISH is used.
+    off only AS_ENGLISH and the split ones are used. Split (split_keys, #42): English keys, SPLIT_MARK and the
+    keys right after them: a reading is "this syllable right after that English" (CP→56 read ㄓˊ: CP值, not the
+    number CP56), "" is "as typed".
 
     {"format": 1, "standard": {"picks": {keys: {choice: count}}, "used": {keys: {choice: day}}}}
     """
@@ -406,6 +432,7 @@ class CorrectionMemory:
         self.loaded = False
         self.picks, self.used = {}, {}  # keys -> {choice: count}, keys -> {choice: day}
         self._codes = None  # (day, version) -> the codes read as English, for codes()
+        self._splits = None  # (version, whether any key is a split one), for has_splits()
         self.version = 0
 
     def _faded(self, count, day):
@@ -475,6 +502,15 @@ class CorrectionMemory:
             self._codes = (key, frozenset(k for k, c in self.picks.items()
                                           if AS_ENGLISH in c and self.choice(k) == AS_ENGLISH))
         return self._codes[1]
+
+    def has_splits(self):
+        """Some key strings are split ones (split_keys, #42): the tokenizer looks them up only then (almost no one has
+        any: no lookup a key - /code-review)."""
+        if not self.loaded:
+            return False
+        if self._splits is None or self._splits[0] != self.version:
+            self._splits = (self.version, any(SPLIT_MARK in k for k in self.picks))
+        return self._splits[1]
 
     def record(self, keys, choice):
         """One pick, sent. Returns what it changed, as it was: for restore (undo)."""

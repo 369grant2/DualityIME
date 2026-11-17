@@ -112,6 +112,10 @@ const double LOG_BIGRAM_WEIGHT = std::log10(BIGRAM_WEIGHT);
 constexpr size_t BEAM = 12;
 constexpr size_t PER_SPAN = 8;
 constexpr double NO_CHAR_SCORE = -8.0;  // a syllable written as zhuyin: no character has it (convert)
+// the character usually right after the English word before a run (data/after_english.txt, #42): the words of the run's
+// first place starting with it get this much (log10; CP值, T恤 - see engine/composer.py)
+constexpr double LEAD_BONUS = 2.0;
+constexpr double LEAD_OVER_PICKS = 2;  // ...unless the user picked another character of the syllable this many times more
 constexpr double DICT_FLOOR = 0.4;
 constexpr size_t LM_CONTEXT_MAX = 64;  // ...kept for plus and max, which may read 64 (選字模型, #41)
 constexpr size_t LM_CONTEXT = 32;  // 接續前文選字 (#37): the Chinese characters just sent that the model reads first, at most
@@ -470,6 +474,32 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         }
         return false;
     };
+    const bool splits = memory && memory->has_splits();  // (none learned: nothing to look up)
+    // tok, a syllable right after the English token before (no space), is what the user picked there from the bar twice
+    // (校正記憶's split keys, #42: CP→56 read ㄓˊ), the setting on or off. Not inside a longer term: a digit, a capital,
+    // @ : \\ right after it, or . / followed by a letter (CP567, CP56X, CP56.com: as ㄡ, ㄥ they end a syllable); nor an
+    // address's symbol in a token joined to the English on its left, the English too (www.CP56, a@CP56) - not a
+    // syllable's keys: . / are ㄡ ㄥ (又CP56). each_left(f) calls f on the English, then the tokens before it, until f
+    // says stop (engine/composer.py split_learned)
+    auto split_learned = [&](const Token& before, const Token& tok, auto&& each_left) {
+        if (!splits || before.kind != Kind::En || ends_with(before.raw, std::string(" "))) return false;
+        const std::string typed = rstrip(tok.raw);
+        const size_t end = static_cast<size_t>(tok.start) + typed.size();
+        const char after = end < n ? raw[end] : ' ';
+        if (is_digit(after) || (after >= 'A' && after <= 'Z') || after == '@' || after == ':' || after == '\\' ||
+            ((after == '.' || after == '/') && end + 1 < n && is_alpha(raw[end + 1])))
+            return false;
+        bool symbol = false, first = true;
+        each_left([&](const Token& t) {
+            if (!first && ends_with(t.raw, std::string(" "))) return true;
+            first = false;
+            symbol = t.kind != Kind::Zh && t.raw.find_first_of("./@:\\") != std::string::npos;
+            return symbol;
+        });
+        if (symbol) return false;
+        auto c = memory->choice(split_keys(before.raw, typed));
+        return c && *c == tok.value;
+    };
     auto offer = [&](size_t i, size_t j, double cost, Token tok) {
         (void)i;
         if (tok.kind == Kind::En && is_digit(tok.raw[0]) && cur != 0 && nodes[cur].tok.kind == Kind::Lit &&
@@ -532,6 +562,13 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                         cost -= EN_CASE_SWITCH;
                 }
                 if (tok.kind == Kind::Zh && starts_phrase(j, tok.value)) cost -= EN_PHRASE;
+                // picked from the bar twice right after this English (#42): CP56 is CP值 from then on, the setting on
+                // or off
+                if (tok.kind == Kind::Zh && split_learned(nodes[cur].tok, tok, [&](auto&& f) {
+                        for (size_t p = cur; p != 0; p = nodes[p].prev)
+                            if (f(nodes[p].tok)) break;
+                    }))
+                    cost += COST_FORCED_TOKEN;
             } else if (tok.kind == Kind::Lit && tok.raw.size() == 1 && zh_punct.count(tok.raw[0]) &&
                      is_digit(nodes[cur].tok.raw.back()))
                 // a zhuyin key as punctuation right after digits: youtube2; is youtube當,
@@ -795,7 +832,16 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         for (size_t p = pick; p != 0; p = nodes[p].prev) tokens.push_back(nodes[p].tok);
         std::reverse(tokens.begin(), tokens.end());
     }
-    return digits_as_zhuyin ? tokens : digits_to_numbers(tokens, after_english, chinese);
+    if (digits_as_zhuyin) return tokens;
+    // (a syllable picked twice right after this English stays one, digits too: CP56 is CP值, as the pick made it - #42)
+    std::set<int> keep = chinese;
+    for (size_t k = 1; k < tokens.size(); ++k)
+        if (tokens[k].kind == Kind::Zh && split_learned(tokens[k - 1], tokens[k], [&](auto&& f) {
+                for (size_t p = k; p-- > 0;)
+                    if (f(tokens[p])) break;
+            }))
+            keep.insert(tokens[k].start);
+    return digits_to_numbers(tokens, after_english, keep);
 }
 
 std::optional<double> corpus_unigram_opt(const BigramModel* bigram, const ustr& phrase) {
@@ -1873,7 +1919,8 @@ static double inherited_bonus(const std::vector<ustr>& rds, const ustr& phrase, 
 
 static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
                      const std::map<std::pair<int, int>, ustr>& overrides, const BigramModel* bigram,
-                     const std::optional<ustr>& prev_word, std::optional<bool> alone_ = std::nullopt, bool bare = false) {
+                     const std::optional<ustr>& prev_word, std::optional<bool> alone_ = std::nullopt, bool bare = false,
+                     std::optional<char32_t> lead = std::nullopt) {
     // beam search over (position, previous phrase) so that context counts; alone: the syllable is
     // all that is typed (none: a run of one syllable). bare: a syllable with no character is
     // written as its zhuyin (NO_CHAR_SCORE) instead of ending every path there
@@ -2002,6 +2049,12 @@ static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, 
             } else if (bare && l == 1 && ov == overrides.end() && inside.empty()) {
                 options[span].emplace_back(readings[i], NO_CHAR_SCORE);
             }
+            if (lead && i == 0 && ov == overrides.end() && inside.empty())
+                // (right after an English word: the character usually there, alone or starting a word - CP值, T恤)
+                for (Options* o : {&options, &full})
+                    if (auto it = o->find(span); it != o->end())
+                        for (auto& [p, u] : it->second)
+                            if (!p.empty() && p[0] == *lead) u += LEAD_BONUS;
         }
     }
     std::vector<OrderedMap<Key, PathState, KeyHash>> states(n + 1);
@@ -2155,11 +2208,12 @@ static std::vector<Segment> with_lm(double score, std::vector<Segment> path, con
 
 std::vector<Segment> convert(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
                              const std::map<std::pair<int, int>, ustr>& overrides, const BigramModel* bigram,
-                             const std::optional<ustr>& prev_word, const LmScorer* lm, std::optional<bool> alone) {
-    Search found = search(readings, lexicon, user, overrides, bigram, prev_word, alone);
+                             const std::optional<ustr>& prev_word, const LmScorer* lm, std::optional<bool> alone,
+                             std::optional<char32_t> lead) {
+    Search found = search(readings, lexicon, user, overrides, bigram, prev_word, alone, false, lead);
     // a syllable no character has, only a word of the personal dictionary (ㄅㄧㄤˇ of 電餅), typed
     // outside that word: it stays zhuyin and the rest is written around it
-    if (found.ends.empty()) found = search(readings, lexicon, user, overrides, bigram, prev_word, alone, true);
+    if (found.ends.empty()) found = search(readings, lexicon, user, overrides, bigram, prev_word, alone, true, lead);
     const int n = static_cast<int>(readings.size());
     std::vector<Segment> out;
     if (found.ends.empty()) {  // (a pick that no longer reads so)
@@ -2511,9 +2565,15 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     std::vector<std::pair<int, int>> runs;
     int idx = 0, run_start = 0;
     bool in_run = false;
-    for (auto& t : tokens) {
+    std::map<int, size_t> first_token;  // run start -> its first token's index (after_english_char)
+    for (size_t k = 0; k < tokens.size(); ++k) {
+        const Token& t = tokens[k];
         if (t.kind == Kind::Zh) {
-            if (!in_run) { run_start = idx; in_run = true; }
+            if (!in_run) {
+                run_start = idx;
+                in_run = true;
+                first_token[idx] = k;
+            }
             ++idx;
         } else if (in_run) {
             runs.emplace_back(run_start, idx);
@@ -2549,7 +2609,8 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
             if (!context.empty()) run_model = model->view(context);
             if (!instead) run_contexts_[a] = context;
         }
-        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, run_model, alone)) {
+        auto lead = after_english_char(first_token[a], a);
+        for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, run_model, alone, lead)) {
             out.push_back(Segment{a + seg.start, seg.length, seg.phrase});
             if (en)
                 for (char32_t ch : seg.phrase)
@@ -2558,6 +2619,39 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     }
     runs_ = runs;
     return out;
+}
+
+std::optional<char32_t> Composer::after_english_char(size_t k, int a) const {
+    // the character usually typed right after the English word before tokens[k], syllable a, nothing between
+    // (data/after_english.txt, #42: CP + ㄓˊ is 值); a word of letters only, as the table counts them
+    // none either when the user picked another character of that syllable clearly more (LEAD_OVER_PICKS: T + 續 twice)
+    const Token* t = lexicon_.has_after_english() ? english_before(k) : nullptr;
+    if (!t) return std::nullopt;
+    std::string word = t->raw;
+    for (char& c : word)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    const ustr& reading = readings[static_cast<size_t>(a)];
+    auto lead = lexicon_.after_english(word, reading);
+    if (lead) {
+        const double mine = user.phrase_count(reading, ustr(1, *lead));
+        for (auto& [p, s] : lexicon_.lookup({reading}))
+            if (!(p.size() == 1 && p[0] == *lead) && user.phrase_count(reading, p) >= mine + LEAD_OVER_PICKS)
+                return std::nullopt;
+    }
+    return lead;
+}
+
+size_t Composer::token_index(int start) const {
+    size_t k = 0;
+    while (k < tokens.size() && tokens[k].start != start) ++k;
+    return k;
+}
+
+const Token* Composer::english_before(size_t k) const {
+    // what after_english.txt and the split keys count (#42): English letters right before tokens[k], nothing between
+    if (k == 0 || k > tokens.size()) return nullptr;
+    const Token& t = tokens[k - 1];
+    return t.kind == Kind::En && !ends_with(t.raw, std::string(" ")) && all_alpha(t.raw) ? &t : nullptr;
 }
 
 void Composer::render() {
@@ -4361,6 +4455,7 @@ void Composer::pick_syllable(const Action& action) {
         for (int x = action.force + 1; x <= c; ++x) breaks_.erase(x);
         forced_.insert(action.force);
         note_code_part(action.force, c);
+        note_split(action.force, c, j);
     }
     Fixed fixed;
     for (auto& [a, v] : fixed_)
@@ -4778,6 +4873,7 @@ void Composer::pick(int i, bool from_bar) {
         // as an English word, 1j as a code of 代碼記憶, would show as the keys from then on, before
         // the tone is typed)
         keep_before_bar(action.start);
+        if (action.type == "raw") note_split_back(action.start);
         if (action.type == "raw" && !note_code(action.start)) note_as_typed(action.start);
         taken_.erase(action.start);
         forced_.insert(action.start);
@@ -5538,13 +5634,8 @@ void Composer::picks_back(const std::pair<std::vector<int>, Overrides>& before) 
 bool Composer::note_code(int start) {
     // 代碼記憶: the keys from start put back as typed: if they are a code with the English right next to
     // them (gp + t4 read gp赤: gpt4; ji3 + mp3 read 我允: mp3), it is noted as English, learned once sent
-    int k = -1;
-    for (size_t n = 0; n < tokens.size(); ++n)
-        if (tokens[n].start == start) {
-            k = static_cast<int>(n);
-            break;
-        }
-    if (k < 0) return false;
+    if (token_index(start) == tokens.size()) return false;
+    int k = static_cast<int>(token_index(start));
     auto joined = [&](int a, int b) {  // tokens[a] runs straight into tokens[b]: no space between
         return !ends_with(tokens[a].raw, std::string(" ")) &&
                tokens[a].start + static_cast<int>(tokens[a].raw.size()) == tokens[b].start;
@@ -5566,13 +5657,54 @@ void Composer::note_code_part(int begin, int end) {
     if (is_code(keys)) pending_[begin] = {keys, AS_ENGLISH};
 }
 
+void Composer::note_split(int begin, int c, int j) {
+    // keys c..j picked from the bar as a syllable, raw[begin:c] before them kept as typed: English letters right before
+    // it (CP56 picked CP值, #42) is noted, learned once sent - the setting on or off. At c: the English's own start has
+    // 代碼記憶's note (note_code_part, note_code)
+    std::string english = raw.substr(begin, c - begin);
+    auto parsed = table_.parse_syllable(std::string_view(raw).substr(c, j - c));
+    if (all_alpha(english) && parsed) pending_[c] = {split_keys(english, rstrip(raw.substr(c, j - c))), parsed->first};
+}
+
+void Composer::note_split_back(int start) {
+    // the syllable at raw offset start, right after English letters, put back as typed (CP值 back to CP56): noted
+    // against what note_split learned there, if anything (#42)
+    size_t k = token_index(start);
+    const Token* before = k < tokens.size() ? english_before(k) : nullptr;
+    if (!before || tokens[k].kind != Kind::Zh) return;
+    std::string keys = split_keys(before->raw, rstrip(tokens[k].raw));
+    if (user.corrections.has_picks(keys)) pending_[start] = {keys, U""};
+}
+
 std::vector<CorrectionMemory::Change> Composer::learn_corrections(int upto) {
     // the picks noted for the keys before upto, sent now, if they still stand (see composer.py)
     std::vector<CorrectionMemory::Change> changes;
     for (auto& [start, v] : pending_) {
         auto& [keys, choice] = v;
-        if (start >= upto || !(table_.autocorrect || is_code(keys))) continue;  // (off: 代碼記憶 only)
-        if (choice == AS_ENGLISH) {  // (still English, all of it)
+        bool split = keys.find(SPLIT_MARK) != std::string::npos;
+        // (off: 代碼記憶 and the syllables after English only)
+        if (start >= upto || !(table_.autocorrect || is_code(keys) || split)) continue;
+        if (split) {  // (#42: a syllable picked right after English, or put back as typed)
+            size_t at = keys.find(SPLIT_MARK);
+            std::string english = keys.substr(0, at), typed = keys.substr(at + SPLIT_MARK.size());
+            if (start < static_cast<int>(english.size()) ||
+                raw.compare(start - english.size(), english.size(), english) != 0 ||
+                raw.compare(start, typed.size(), typed) != 0)
+                continue;
+            size_t k = token_index(start);
+            if (!choice.empty()) {  // (still that syllable, right after that English)
+                const Token* before = k < tokens.size() ? english_before(k) : nullptr;
+                if (!before || before->raw != english || tokens[k].kind != Kind::Zh || tokens[k].value != choice ||
+                    rstrip(tokens[k].raw) != typed)
+                    continue;
+            } else {  // (as typed: no syllable there)
+                bool syllable = false;
+                for (auto& t : tokens)
+                    if (t.kind == Kind::Zh && t.start <= start && start < t.start + static_cast<int>(t.raw.size()))
+                        syllable = true;
+                if (syllable) continue;
+            }
+        } else if (choice == AS_ENGLISH) {  // (still English, all of it)
             bool still = false;
             for (auto& t : tokens)
                 if (t.start == start && t.kind != Kind::Zh && rstrip(t.raw) == keys) still = true;

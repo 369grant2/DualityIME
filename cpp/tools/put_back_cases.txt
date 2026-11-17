@@ -20,3 +20,12 @@ vup ej/ s/6{ENTER} => vup 功能
 vup ej/ s/6{HOME}{UP}{RIGHT}{ENTER}{ENTER} => 新功能
 vup ej/ s/6{ENTER} => 新功能
 vup {ENTER} => 新
+# #42: CP56 alone is a number (English, then digits); the bar's 值 (the character usually after CP, not 直) picked twice:
+# CP56 is CP值 from then on, with 注音自動校正 off too; CP567 and cp56 stay as typed
+CP56{ENTER} => CP56
+CP56{HOME}{RIGHT}{RIGHT}{UP}{ENTER}{ENTER} => CP值
+CP56{ENTER} => CP56
+CP56{HOME}{RIGHT}{RIGHT}{UP}{ENTER}{ENTER} => CP值
+CP56{ENTER} => CP值
+CP567{ENTER} => CP567
+cp56{ENTER} => cp56

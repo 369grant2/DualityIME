@@ -5636,6 +5636,146 @@ for _name in [n for n in dir(AutocorrectMemoryTest) if n.startswith("test_")]:
     setattr(CodeMemoryTest, _name, None)  # (only the helpers are shared)
 
 
+class SplitMemoryTest(CodeMemoryTest):
+    """A syllable picked from the bar right after English twice is read so from then on (#42: CP56 picked CP值), the
+    setting on or off; put back as typed twice, as typed again. Kept in keys.json under English→keys. (Runs
+    CodeMemoryTest's helpers; its own tests are not run again here.)"""
+
+    def pick_cp(self, label="值", raw="CP56", rights=2):
+        """Type raw, the caret before its character after HOME + rights, the bar's label, send."""
+        return self.bar_keys_back(raw, label, rights)
+
+    def picks(self):
+        with open(self.file, encoding="utf-8") as f:
+            return json.load(f)["standard"]["picks"]
+
+    def test_twice_off(self):
+        self.assertEqual(self.type("CP56"), "CP56")  # (English, then digits: a number)
+        self.assertEqual(self.pick_cp(), "CP值")
+        self.assertEqual(self.type("CP56"), "CP56")  # once: not yet
+        self.pick_cp()
+        self.assertEqual(self.type("CP56"), "CP值")  # twice: from now on
+        self.assertEqual(self.picks(), {"CP→56": {"ㄓˊ": 2}})
+
+    def test_twice_on(self):
+        self.config.set(autocorrect=True)
+        self.c.settings_changed()
+        for _ in range(2):
+            self.pick_cp()
+        self.assertEqual(self.type("CP56"), "CP值")
+
+    def test_only_those_keys(self):
+        before = {raw: self.type(raw) for raw in ("cp56", "CP567", "CP 56", "XCP56", "CP56X", "www.CP56.com ",
+                                                  "CP56.com ", "a@CP56 ")}
+        for _ in range(2):
+            self.pick_cp()
+        for raw, out in before.items():  # (the case as typed; not inside a longer term or an address - code-reviewer)
+            self.assertEqual(self.type(raw), out, raw)
+        # (. / are ㄡ ㄥ: a syllable with them before or after is no address - code-reviewer; the first two were CP56
+        # before the picks, the last two were CP值 already and must stay so)
+        for raw, out in (("u.4CP56", "又CP值"), ("5j/4CP56", "中CP值"), ("u.4CP56xu.3", "又CP值柳"), ("CP56u.4", "CP值又")):
+            self.assertEqual(self.type(raw), out, raw)
+
+    def test_back_twice(self):
+        for _ in range(2):
+            self.pick_cp()
+        self.assertEqual(self.pick_cp("56"), "CP56")
+        self.assertEqual(self.type("CP56"), "CP值")  # once: not yet
+        self.pick_cp("56")
+        self.assertEqual(self.type("CP56"), "CP56")  # as many as picked: back as typed
+        self.assertEqual(self.picks()["CP→56"], {"ㄓˊ": 2, "": 2})
+
+    def test_not_sent_not_learned(self):
+        c = self.c
+        for _ in range(2):
+            self.type("CP56", enter=False)
+            c.key(special="HOME")
+            c.key(special="RIGHT")
+            c.key(special="RIGHT")
+            self.pick_bar_label("值")
+            c.key(special="ESC")
+            c.key(special="ESC")
+        self.assertFalse(os.path.exists(self.file) and self.picks().get("CP→56"))
+        self.assertEqual(self.type("CP56"), "CP56")
+
+    def pick_bar_label(self, label):
+        c = self.c
+        for _ in range(c.replacements.index(label) + 1):
+            c.key(special="RIGHT") if _ else c.key(special="UP")
+        c.key(special="ENTER")
+
+    def test_key_an_older_version_never_looks_up(self):
+        from engine.lexicon import SPLIT_MARK, split_keys
+        # (a version before looks up the keys of a syllable, raw[i:j]: raw is the keys typed, ASCII only; with a space,
+        # CP 56 would be five keys, a syllable's length)
+        self.assertFalse(SPLIT_MARK.isascii())
+        self.assertEqual(split_keys("CP", "56"), "CP→56")
+
+    def test_import(self):
+        data = {"phrases": {}, "keys": {"standard": {"picks": {"CP→56": {"ㄓˊ": 2}}, "used": {"CP→56": {"ㄓˊ": 20000}}}}}
+        with open(os.path.join(self.dir, "import-memory.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.config.set(import_memory=1)
+        self.c.settings_changed()
+        self.assertEqual(self.type("CP56"), "CP值")
+
+
+for _name in [n for n in dir(CodeMemoryTest) if n.startswith("test_") and n not in SplitMemoryTest.__dict__]:
+    setattr(SplitMemoryTest, _name, None)  # (only the helpers are shared; its own of the same names stay)
+
+
+class AfterEnglishPickTest(Base):
+    """The user's own pick of another character for the syllable counts, not data/after_english.txt (#42 - code-reviewer:
+    續 picked after T took 6-10 picks to win against the table's 恤). Its own composer: the pick stays."""
+
+    def test_pick_wins(self):
+        c = self.c
+        self.assertEqual(self.type("Tvm4"), "T恤")
+        for n in range(2):
+            self.type("Tvm4", enter=False)
+            c.key(special="DOWN")
+            c._pick(c.candidates.index("續"))
+            c.key(special="ENTER")
+            # (LEAD_OVER_PICKS: picked twice more than 恤, the table is left out for this syllable; once is not enough -
+            # one pick of another character somewhere else must not turn it off - /code-review)
+            self.assertEqual(self.type("Tvm4"), "T續" if n else "T恤")
+        self.assertEqual(self.type("CP56cp3el "), "CP值很高")  # (another syllable: still the table's)
+
+
+class AfterEnglishTest(Base):
+    """The character usually typed right after an English word (data/after_english.txt, #42): CP值, T恤 - only with
+    nothing between."""
+
+    def test_table(self):
+        table = self.c.lexicon.after_english
+        self.assertEqual(table[("cp", "ㄓˊ")], "值")
+        self.assertEqual(table[("t", "ㄒㄩˋ")], "恤")
+
+    def test_read(self):
+        from engine.lexicon import Lexicon
+        lex = Lexicon.__new__(Lexicon)  # (the lines alone)
+        lex.after_english = {}
+        lex.add_after_english(["# a comment\n", "AB\tㄓˊ\t值\r\n", "two\tcolumns\n", "a\t\t值\n", "x\tㄅ\tㄅ\textra\n"])
+        self.assertEqual(lex.after_english, {("ab", "ㄓˊ"): "值"})
+
+    def test_after_english(self):
+        self.assertEqual(self.type("Tvm4"), "T恤")      # (the syllable's own first: 續)
+        self.assertEqual(self.type("T vm4"), "T 續")    # (a space between: as usual)
+        self.assertEqual(self.type("ji3buy5k4Tvm4"), "我buy這T恤")
+        self.assertEqual(self.type("CP56cp3el "), "CP值很高")
+
+    def test_bar(self):
+        c = self.c
+        self.type("CP56", enter=False)  # (English, then digits: a number, as decided)
+        self.assertEqual(c.composition, "CP56")
+        c.key(special="HOME")
+        c.key(special="RIGHT")
+        c.key(special="RIGHT")
+        self.assertEqual(c.replacements[:1], ["值"])  # (the syllable after CP: 值, not its first, 直)
+        self.pick_bar("值")
+        self.assertEqual(c.composition, "CP值")
+
+
 class TypingMemoryTest(CodeMemoryTest):
     """全部清除 clears every kind of typing memory (Emails only when asked); Emails are kept apart,
     never fade, URLs are not remembered, one letter or digit is never learned as English."""

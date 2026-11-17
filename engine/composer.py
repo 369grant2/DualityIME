@@ -10,7 +10,8 @@ from . import lm as language_model
 from . import symbols
 from .config import Config
 from . import candlayout
-from .lexicon import AS_ENGLISH, MAX_PHRASE_LEN, ZHUYIN_TEXT, is_code, is_email, is_han, is_zhuyin_text
+from .lexicon import (AS_ENGLISH, MAX_PHRASE_LEN, SPLIT_MARK, ZHUYIN_TEXT, is_code, is_email, is_han,
+                      is_zhuyin_text, split_keys)
 from .zhuyin import FINALS
 
 # keys that become full-width punctuation outside English words
@@ -302,6 +303,32 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
                 return True
         return False
 
+    splits = memory is not None and memory.has_splits()  # (none learned: nothing to look up)
+
+    def split_learned(path, k, tok):
+        """tok, a syllable right after path[k - 1], English with no space between, is what the user picked there from the
+        bar twice (校正記憶's split keys, #42: CP→56 read ㄓˊ), the setting on or off. Not inside a longer term: a digit,
+        a capital, @ : \\ right after it, or . / followed by a letter (CP567, CP56X, CP56.com: as ㄡ, ㄥ they end a
+        syllable, a tone or a space next); nor an address's symbol . / @ : \\ in a token joined to the English on its
+        left, the English too (www.CP56, a@CP56) - not a syllable's keys: . / are ㄡ ㄥ (又CP56 - code-reviewer). A
+        lower-case key after it is the next syllable being typed (u.4CP56xu.3: 又CP值柳)."""
+        before = path[k - 1] if splits and k else None
+        if before is None or before.kind != "en" or before.raw.endswith(" "):
+            return False
+        typed = tok.raw.rstrip(" ")
+        end = tok.start + len(typed)
+        after = raw[end] if end < n else " "
+        if after.isdigit() or "A" <= after <= "Z" or after in "@:\\" or \
+                (after in "./" and end + 1 < n and raw[end + 1].isalpha()):
+            return False
+        for m in range(k - 1, -1, -1):
+            t = path[m]
+            if m < k - 1 and t.raw.endswith(" "):
+                break
+            if t.kind != "zh" and any(ch in "./@:\\" for ch in t.raw):
+                return False
+        return memory.choice(split_keys(before.raw, typed)) == tok.value
+
     def offer(j, cost, prev, tok):
         if tok.kind == "en" and tok.raw[0].isdigit() and prev[1] and prev[1][-1].kind == "lit" and                 prev[1][-1].raw in zh_punct:
             # digits right after a zhuyin key read as punctuation: the u,4 of sugatau,4 is 頁,
@@ -352,6 +379,10 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
                         cost -= EN["case_switch"]
                 if tok.kind == "zh" and starts_phrase(j, tok.value):
                     cost -= EN["phrase"]
+                if tok.kind == "zh" and split_learned(prev[1], len(prev[1]), tok):
+                    # picked from the bar twice right after this English (#42): CP56 is CP值 from then on, the setting
+                    # on or off
+                    cost += COST_FORCED_TOKEN
             elif tok.kind == "lit" and tok.raw in zh_punct and prev[1][-1].raw[-1].isdigit():
                 # a zhuyin key as punctuation right after digits: youtube2; is youtube當,
                 # not youtube2 + ； (the same as the 2; inside a piece, below)
@@ -520,7 +551,11 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
             else:
                 offer(j, cost, prev, Token("en", piece, piece, i))
     tokens = min(best[n].values(), key=lambda v: v[0])[1] if best[n] else []  # (a tie: the first reached)
-    return tokens if digits_as_zhuyin else _digits_to_numbers(tokens, after_english, chinese)
+    # (a syllable picked twice right after this English stays one, digits too: CP56 is CP值, as the pick made it - #42)
+    if digits_as_zhuyin:
+        return tokens
+    picked = {t.start for k, t in enumerate(tokens) if t.kind == "zh" and split_learned(tokens, k, t)}
+    return _digits_to_numbers(tokens, after_english, set(chinese) | picked)
 
 
 # Scoring English pieces (tuned with tools/tune_english.py). A piece is split into
@@ -1263,7 +1298,18 @@ NBEST_N = 10       # ...and distinct texts the model scores
 NO_CHAR_SCORE = -8.0  # a syllable written as zhuyin: no character has it (convert)
 
 
-def convert(readings, lexicon, user=None, overrides=None, bigram=None, prev_word=None, lm=None, alone=None):
+LEAD_OVER_PICKS = 2  # ...unless the user picked another character of the syllable this many times more (#42)
+LEAD_BONUS = 2.0  # the character usually right after the English word before a run (data/after_english.txt, #42):
+                  # the words of the run's first place starting with it get this much (log10; CP值, T恤 - 1, 2 and 4
+                  # measured: 58.2%, 59.8%, 59.9% of English with one character after it written right, 51.4% without)
+
+
+def _letters(text):
+    """ASCII letters only, one at least: an English word as after_english.txt and the split keys count it (#42)."""
+    return text.isascii() and text.isalpha()
+
+
+def convert(readings, lexicon, user=None, overrides=None, bigram=None, prev_word=None, lm=None, alone=None, lead=None):
     """Best phrase sequence for a syllable run.
 
     Beam search over (position, previous phrase) so that context counts:
@@ -1273,14 +1319,16 @@ def convert(readings, lexicon, user=None, overrides=None, bigram=None, prev_word
     lm: an engine.lm.Scorer (長句選字加強) or None.
     alone: the one syllable is all that is typed, nothing else in the text (a pick counts in full
     then); None: if the run is one syllable.
+    lead: the character usually typed right after the English word just before the run, for its first
+    syllable (Composer._after_english_char), or None.
     Returns [(start, length, phrase)].
     """
     overrides = overrides or {}
-    ends, options, full = _search(readings, lexicon, user, overrides, bigram, prev_word, alone)
+    ends, options, full = _search(readings, lexicon, user, overrides, bigram, prev_word, alone, lead=lead)
     if not ends:
         # a syllable no character has, only a word of the personal dictionary (ㄅㄧㄤˇ of 電餅), typed
         # outside that word: it stays zhuyin and the rest is written around it
-        ends, options, full = _search(readings, lexicon, user, overrides, bigram, prev_word, alone, True)
+        ends, options, full = _search(readings, lexicon, user, overrides, bigram, prev_word, alone, True, lead=lead)
     if not ends:  # (a pick that no longer reads so)
         return [(i, 1, readings[i]) for i in range(len(readings))]
     score, path = max(ends.values(), key=lambda v: v[0])
@@ -1420,7 +1468,7 @@ def inherited_best(rds, phrase, user):
     return best[n]
 
 
-def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, bare=False):
+def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, bare=False, lead=None):
     """convert's beam search: ({last phrase: (score, path)} at the end, options, full). alone: the
     syllable is all that is typed (None: a run of one syllable). bare: a syllable with no character
     is written as its zhuyin (NO_CHAR_SCORE) instead of ending every path there."""
@@ -1502,6 +1550,11 @@ def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, b
                         options[span] = [(p, held.get(p, u)) for p, u in options[span]]
             elif bare and l == 1 and span not in overrides and not inside:
                 options[span] = [(readings[i], NO_CHAR_SCORE)]
+            if lead and i == 0 and span in options and span not in overrides and not inside:
+                # (right after an English word: the character usually there, alone or starting a word - CP值, T恤)
+                options[span] = [(p, u + LEAD_BONUS if p[:1] == lead else u) for p, u in options[span]]
+                if span in full:
+                    full[span] = [(p, u + LEAD_BONUS if p[:1] == lead else u) for p, u in full[span]]
 
     # states[i]: {last phrase: (score, path)}
     states = [dict() for _ in range(n + 1)]
@@ -1947,6 +2000,36 @@ class Composer:
             return ""
         return self.lm_units if _knows_english(self._lm()) else self.lm_context
 
+    def _after_english_char(self, k, a):
+        """The character usually typed right after the English word before tokens[k], syllable a, nothing between
+        (data/after_english.txt, #42: CP + ㄓˊ is 值, T + ㄒㄩˋ is 恤), or None. A word of letters only, as the
+        table counts them; with a space between it is no word of its own with the syllable (CP 56 as usual). None
+        either when the user picked another character of that syllable clearly more (LEAD_OVER_PICKS: T + 續 picked
+        twice; the bonus took 6-10 picks to lose - code-reviewer; one pick of 執 somewhere else keeps CP值 - /code-review)."""
+        t = self._english_before(k) if self.lexicon.after_english else None
+        if t is None:
+            return None
+        reading = self.readings[a]
+        lead = self.lexicon.after_english.get((t.raw.lower(), reading))
+        if lead:
+            mine = self.user.phrase_count(reading, lead)
+            if any(p != lead and self.user.phrase_count(reading, p) >= mine + LEAD_OVER_PICKS
+                   for p, _ in self.lexicon.lookup([reading])):
+                return None
+        return lead
+
+    def _token_index(self, start):
+        """The index of the token that starts at raw offset start, or None."""
+        return next((n for n, t in enumerate(self.tokens) if t.start == start), None)
+
+    def _english_before(self, k):
+        """tokens[k - 1] if it is English letters right before tokens[k], nothing between: what after_english.txt and
+        the split keys count (#42), else None."""
+        if not k or k > len(self.tokens):
+            return None
+        t = self.tokens[k - 1]
+        return t if t.kind == "en" and not t.raw.endswith(" ") and _letters(t.raw) else None
+
     def _run_context(self, before, earlier=None):
         """What the model reads before a run of the buffer (長句選字加強 on): what was just sent while 接續前文選字 is on
         (#37), then the Chinese characters of the runs before it, as converted (before: their (start, length,
@@ -1980,10 +2063,12 @@ class Composer:
         idx = 0
         runs = []
         in_run = False
-        for t in self.tokens:
+        first_token = {}  # run start -> its first token's index (_after_english_char)
+        for k, t in enumerate(self.tokens):
             if t.kind == "zh":
                 if not in_run:
                     run_start, in_run = idx, True
+                    first_token[idx] = k
                 idx += 1
             elif in_run:
                 runs.append((run_start, idx))
@@ -2010,7 +2095,8 @@ class Composer:
             run_lm = lm.view(context) if context else lm
             if shown:
                 self._run_contexts[a] = context
-            for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, run_lm, alone):
+            lead = self._after_english_char(first_token[a], a)
+            for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, run_lm, alone, lead):
                 out.append((a + s, l, p))
                 if en:
                     earlier += "".join(ch for ch in p if is_han(ch))
@@ -2984,6 +3070,7 @@ class Composer:
             self.breaks -= set(range(keep + 1, c + 1))
             self.forced.add(keep)
             self._note_code_part(keep, c)
+            self._note_split(keep, c, j)
         self.fixed = {a: v for a, v in self.fixed.items() if v[0] <= c or a >= j}
         self.taken = {a: v for a, v in self.taken.items() if v[0] <= c or a >= j}
         self._refresh()
@@ -3543,6 +3630,8 @@ class Composer:
             # the tone is typed)
             _, text, start = action
             self._keep_before_bar(start)
+            if action[0] == "raw":
+                self._note_split_back(start)
             if action[0] == "raw" and not self._note_code(start):
                 self._note_as_typed(start)
             self.taken.pop(start, None)
@@ -4042,7 +4131,7 @@ class Composer:
         English right next to them (gp + t4 read gp赤: gpt4; ji3 + mp3 read 我允: mp3), it is noted as
         English, learned once sent. True if so."""
         toks = self.tokens
-        k = next((n for n, t in enumerate(toks) if t.start == start), None)
+        k = self._token_index(start)
         if k is None:
             return False
 
@@ -4068,15 +4157,47 @@ class Composer:
         if is_code(keys):
             self.pending[begin] = (keys, AS_ENGLISH)
 
+    def _note_split(self, begin, c, j):
+        """Keys c..j picked from the bar as a syllable, raw[begin:c] before them kept as typed: English letters right
+        before it (CP56 picked CP值, #42) is noted, learned once sent - the setting on or off. At c: the English's own
+        start has 代碼記憶's note (_note_code_part, _note_code)."""
+        english, keys = self.raw[begin:c], self.raw[c:j].rstrip(" ")
+        parsed = self.table.parse_syllable(self.raw[c:j])
+        if _letters(english) and parsed:
+            self.pending[c] = (split_keys(english, keys), parsed[0])
+
+    def _note_split_back(self, start):
+        """The syllable at raw offset start, right after English letters, put back as typed (CP值 back to CP56): noted
+        against what _note_split learned there, if anything (#42)."""
+        k = self._token_index(start)
+        before = self._english_before(k)
+        if before is None or self.tokens[k].kind != "zh":
+            return
+        keys = split_keys(before.raw, self.tokens[k].raw.rstrip(" "))
+        if self.user.corrections.picks.get(keys):
+            self.pending[start] = (keys, "")
+
     def _learn_corrections(self, upto):
         """校正記憶: the picks noted for the keys before raw offset upto, sent now, if they still
         stand (the keys read as picked). Returns what changed, for undo_commit."""
         changes = []
         memory = self.user.corrections
         for start, (keys, choice) in sorted(self.pending.items()):
-            if start >= upto or not (self.table.autocorrect or is_code(keys)):
-                continue  # (off: 代碼記憶 only)
-            if choice == AS_ENGLISH:  # (still English, all of it)
+            if start >= upto or not (self.table.autocorrect or is_code(keys) or SPLIT_MARK in keys):
+                continue  # (off: 代碼記憶 and the syllables after English only)
+            if SPLIT_MARK in keys:  # (#42: a syllable picked right after English, or put back as typed)
+                english, typed = keys.split(SPLIT_MARK)
+                if self.raw[start - len(english):start] != english or self.raw[start:start + len(typed)] != typed:
+                    continue
+                k = self._token_index(start)
+                if choice:  # (still that syllable, right after that English)
+                    before = self._english_before(k)
+                    if before is None or before.raw != english or self.tokens[k].kind != "zh" or \
+                            self.tokens[k].value != choice or self.tokens[k].raw.rstrip(" ") != typed:
+                        continue
+                elif any(t.kind == "zh" and t.start <= start < t.start + len(t.raw) for t in self.tokens):
+                    continue  # (as typed: no syllable there)
+            elif choice == AS_ENGLISH:  # (still English, all of it)
                 if not any(t.start == start and t.kind != "zh" and t.raw.rstrip(" ") == keys for t in self.tokens):
                     continue
             elif choice == "" and start in self.exact and self.raw[start:start + len(keys)] == keys and is_code(keys):

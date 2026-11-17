@@ -56,6 +56,10 @@ Lexicon::Lexicon(const std::wstring& path) {
     std::wstring names_path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"names.txt";
     std::string names_text;
     if (read_file(names_path, names_text)) add_names(names_text);
+    // the character usually typed right after an English word, by syllable (#42: CP + ㄓˊ is 值)
+    std::string after_text;
+    if (read_file(path.substr(0, path.find_last_of(L"\\/") + 1) + L"after_english.txt", after_text))
+        add_after_english(after_text);
     script_.load(path.substr(0, path.find_last_of(L"\\/") + 1));  // 簡體輸出 (#32): the opencc folder next to it
     ok_ = true;
 }
@@ -79,6 +83,35 @@ static std::vector<CustomUnit> name_units(const std::vector<ustr>& syls, const u
         units.push_back(u);
     }
     return units;
+}
+
+void Lexicon::add_after_english(std::string_view text) {
+    // whatever is broken is left out (engine/lexicon.py add_after_english)
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        std::string_view line(text.data() + at, nl - at);
+        at = nl + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.remove_suffix(1);
+        if (!line.empty() && line[0] == '#') continue;
+        size_t t1 = line.find('\t');
+        size_t t2 = t1 == std::string_view::npos ? t1 : line.find('\t', t1 + 1);
+        if (t2 == std::string_view::npos || line.find('\t', t2 + 1) != std::string_view::npos) continue;
+        std::string word(line.substr(0, t1));
+        std::string_view reading = line.substr(t1 + 1, t2 - t1 - 1);
+        ustr ch = from_utf8(line.substr(t2 + 1));
+        if (word.empty() || reading.empty() || ch.size() != 1) continue;
+        for (char& c : word)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        after_english_[word + '\t' + std::string(reading)] = ch[0];
+    }
+}
+
+std::optional<char32_t> Lexicon::after_english(const std::string& word, const ustr& reading) const {
+    auto it = after_english_.find(word + '\t' + to_utf8(reading));
+    if (it == after_english_.end()) return std::nullopt;
+    return it->second;
 }
 
 void Lexicon::add_names(std::string_view text) {
@@ -503,6 +536,18 @@ bool is_code(const std::string& keys) {
         else return false;
     }
     return letter && digit;
+}
+
+bool CorrectionMemory::has_splits() const {
+    // (almost no one has any: no lookup a key - /code-review)
+    if (!loaded_) return false;
+    if (splits_.first != version_) {
+        bool any = false;
+        for (auto& [keys, choices] : data_.picks)
+            if (keys.find(SPLIT_MARK) != std::string::npos) any = true;
+        splits_ = {version_, any};
+    }
+    return splits_.second;
 }
 
 const std::unordered_set<std::string>& CorrectionMemory::codes() const {

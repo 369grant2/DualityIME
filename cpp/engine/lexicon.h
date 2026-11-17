@@ -79,6 +79,12 @@ public:
     // Lines of names.txt (a character's with the way it is written as a fourth column, #14): see
     // engine/lexicon.py add_names
     void add_names(std::string_view text);
+    // The character usually typed right after an English word (lower-cased letters) for this syllable (after_english.txt
+    // beside the dictionary, made by tools/build_after_english.py; #42: cp, ㄓˊ -> 值), or none
+    std::optional<char32_t> after_english(const std::string& word, const ustr& reading) const;
+    bool has_after_english() const { return !after_english_.empty(); }
+    // Lines of after_english.txt: "word<TAB>reading<TAB>character", # a comment (engine/lexicon.py add_after_english)
+    void add_after_english(std::string_view text);
     // the names whose first parts are these readings (艾連 of 艾連·葉卡), names.txt's order
     const std::vector<NameStart>& name_starts(const std::vector<ustr>& readings) const;
     // a name's Han characters -> as written with its dots (艾連葉卡 -> 艾連·葉卡), or nullptr
@@ -92,6 +98,7 @@ private:
     Script script_;
     std::unordered_map<ustr, std::vector<Scored>> entries_;
     std::unordered_map<ustr, std::vector<Scored>> names_;
+    std::unordered_map<std::string, char32_t> after_english_;  // word lower-cased TAB reading (UTF-8) -> character
     std::unordered_map<ustr, ustr> name_written_;
     std::unordered_map<ustr, std::vector<NameStart>> name_starts_;
     std::vector<std::pair<ustr, ustr>> name_rows_;  // (reading key, written) of every name, names.txt's order
@@ -127,6 +134,10 @@ constexpr double CUSTOM_BONUS = 4.0;
 constexpr size_t KEEP_CORRECTIONS = 2000;   // key strings 注音自動校正 remembers
 constexpr double CORRECTION_MIN_USES = 2;   // a choice there counts once picked this many times
 inline const ustr AS_ENGLISH = U"en";        // 代碼記憶's choice: the keys are English (mp3), not the zhuyin they spell
+// keys.json: English keys, this (UTF-8), then the keys of the syllable right after them (CP→56: CP值 picked from the bar,
+// #42). No key types it, so a version before never looks one up, and keeps it (engine/lexicon.py SPLIT_MARK).
+inline const std::string SPLIT_MARK = "\xE2\x86\x92";  // →
+inline std::string split_keys(const std::string& english, const std::string& keys) { return english + SPLIT_MARK + keys; }
 constexpr double REPLACE_MIN_USES = 2;  // 簡體輸出 (#32): a Mainland word picked this many times for a Taiwan one comes by itself
 // a code for 代碼記憶: letters and digits only, both, 2-16 of them (mp3, win10, rtx4090; ji3 too)
 bool is_code(const std::string& keys);
@@ -149,7 +160,8 @@ class Json;
 // 校正記憶 and 代碼記憶 (keys.json next to user.json, apart so user.json keeps its format): what the
 // user did with a key string. "" is "as typed" (no correction: 817 a number, xl3 老), a reading is
 // "this syllable" (si3 read ㄋㄧˇ), AS_ENGLISH "English" (mp3, not 允). Read at start; with 注音自動校正
-// off only AS_ENGLISH is used. See engine/lexicon.py CorrectionMemory.
+// off only AS_ENGLISH and the split ones (split_keys: a syllable right after English, #42) are used. See
+// engine/lexicon.py CorrectionMemory.
 class CorrectionMemory {
 public:
     CorrectionMemory(std::wstring path, std::function<int()> today);
@@ -157,8 +169,15 @@ public:
     double count(const std::string& keys, const ustr& choice) const;
     // what these keys do by the user's picks: "" (as typed), a reading, or none (the rules)
     std::optional<ustr> choice(const std::string& keys) const;
+    // the user picked something for these keys (that has not faded away), whatever it is
+    bool has_picks(const std::string& keys) const {
+        auto it = data_.picks.find(keys);
+        return it != data_.picks.end() && !it->second.empty();
+    }
     // the key strings read as English by the user's picks (代碼記憶), for the tokenizer
     const std::unordered_set<std::string>& codes() const;
+    // some key strings are split ones (split_keys, #42): the tokenizer looks them up only then
+    bool has_splits() const;
     // (keys, choice, count, day) as it was: for restore (undo)
     using Change = std::tuple<std::string, ustr, std::optional<double>, std::optional<int>>;
     std::vector<Change> record(const std::string& keys, const ustr& choice);
@@ -187,6 +206,7 @@ private:
     unsigned version_ = 0;  // bumped by every change, for codes()
     mutable std::pair<int, unsigned> codes_key_{-1, ~0u};
     mutable std::unordered_set<std::string> codes_;
+    mutable std::pair<unsigned, bool> splits_{~0u, false};  // (version, any split key), for has_splits()
 };
 
 // How often each word of 自訂詞彙 was taken with Tab (custom_picks.json next to user.json, a file of its own):

@@ -308,6 +308,15 @@ CASES = [
     # (#51) a syllable 注音自動校正 swapped: what the keys typed among its characters by the sentence (寄 6th), other tones too
     "ji3ru0320 ru4ek7u.6ru04{LEFT}{LEFT}{LEFT}{LEFT}{DOWN}6{ENTER}5k1u0 {HOME}{DOWN}{PGDN}{PGDN}2{ENTER}w961o3g4vu04u4fm "
     "{HOME}{RIGHT}{RIGHT}{RIGHT}{DOWN}{PGDN}4{ENTER}",
+    # (#42) the character usually right after an English word (data/after_english.txt: T恤, CP值; with a space between
+    # as usual), the bar's 值 for CP56 picked twice (CP56 alone is CP值 from then on; not CP567 nor cp56), then put
+    # back as typed twice (CP56 again; keys.json has CP→56); not inside an address or before a capital (www.CP56.com,
+    # CP56X; . / as ㄡ ㄥ are no address: 又CP值); 續 picked after T: once T恤 still, twice the table is left out for that syllable (T續)
+    "Tvm4 T vm4 ji3buy5k4Tvm4{ENTER}CP56cp3el {ENTER}CP56{HOME}{RIGHT}{RIGHT}{UP}{ENTER}{ENTER}"
+    "CP56{HOME}{RIGHT}{RIGHT}{UP}{ENTER}{ENTER}CP56{ENTER}CP567{ENTER}cp56{ENTER}www.CP56.com {ENTER}CP56X{ENTER}u.4CP56{ENTER}"
+    "Tvm4{DOWN}1{ENTER}Tvm4{ENTER}Tvm4{DOWN}1{ENTER}Tvm4{ENTER}"
+    "CP56{HOME}{RIGHT}{RIGHT}{UP}{RIGHT}{RIGHT}{ENTER}{ENTER}CP56{HOME}{RIGHT}{RIGHT}{UP}{RIGHT}{RIGHT}{ENTER}{ENTER}"
+    "CP56{ENTER}",
 ]
 
 PUNCT = list(",.;?!:\"'[]()<>-_=+/\\|@#$%^&*")

@@ -18,3 +18,8 @@ ji356ru, 5k4u;4283cjo41o4Github1u04g4t/6tj/6zj4a87{ENTER} => 我直接這樣打�
 ul4fm,41l3ru, vu84x96Sessions/6gjp4xu4d9 z8 {ENTER} => 要確保接下來Session能順利開發
 # #42: sent, then a buffer that starts with English: the Chinese after it reads what was sent too: 再 (alone 在)
 ji3ap7vu0 fm4t z04{ENTER}Githuby94fm4d042u04u/3{ENTER} => 我們先去吃飯Github再去看電影
+# #42: the character usually right after an English word (data/after_english.txt): T恤 (alone 續), CP值; a space between: as usual
+Tvm4{ENTER} => T恤
+T vm4{ENTER} => T 續
+ji3buy5k4Tvm4{ENTER} => 我buy這T恤
+CP56cp3el {ENTER} => CP值很高

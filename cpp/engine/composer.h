@@ -73,7 +73,9 @@ std::vector<Scored> phrase_candidates(const std::vector<ustr>& readings, const L
 std::vector<Segment> convert(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
                              const std::map<std::pair<int, int>, ustr>& overrides, const BigramModel* bigram,
                              const std::optional<ustr>& prev_word, const LmScorer* lm = nullptr,  // lm: 長句選字加強
-                             std::optional<bool> alone = std::nullopt);  // the syllable is all that is typed (none: a run of one)
+                             std::optional<bool> alone = std::nullopt,  // the syllable is all that is typed (none: a run of one)
+                             // the character usually typed right after the English word just before the run (#42)
+                             std::optional<char32_t> lead = std::nullopt);
 // log10 score of the best way to write these syllables (convert's search, no picks, nothing
 // before): how well a reading of a syllable reads with the ones around it, for 注音自動校正
 // (老 or 好 in 你老嗎). Empty if some syllable has no character.
@@ -221,6 +223,10 @@ private:
     void clear_input();
     void refresh();
     std::vector<Segment> convert_all(const Overrides* instead = nullptr);
+    // the character usually typed right after the English word before tokens[k], syllable a (#42), or none
+    std::optional<char32_t> after_english_char(size_t k, int a) const;
+    size_t token_index(int start) const;              // the token that starts at raw offset start (tokens.size(): none)
+    const Token* english_before(size_t k) const;      // tokens[k - 1] if English letters right before tokens[k] (#42)
     ustr run_context(const std::vector<Segment>& before, const ustr* earlier = nullptr) const;
     std::map<int, ustr> english_gaps() const;  // (#41: run start -> the EN_MARKs before it)
     bool knows_english() const;                // (#41: the model in use reads EN_MARK)
@@ -354,6 +360,8 @@ private:
     std::pair<std::vector<int>, Overrides> picks_by_key() const;
     void picks_back(const std::pair<std::vector<int>, Overrides>& before);
     void note_code_part(int begin, int end);       // ...a code kept as typed where the rest was picked Chinese
+    void note_split(int begin, int c, int j);      // #42: keys c..j picked a syllable right after English (CP值)
+    void note_split_back(int start);               // ...that syllable put back as typed (CP56)
 
     SyllableTable& table_;
     const Lexicon& lexicon_;

@@ -1,0 +1,24 @@
+# End-to-end: remembered e-mail addresses (#54): Tab completes in the case typed, the address as typed first, and
+# Chinese gets Chinese hints - English and digits the addresses (one engine for all lines, so what is remembered
+# carries over; a made-up address: its a06 is also the zhuyin 蠻, as the reported one's start was a syllable)
+#   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 cpp\tools\email_cases.txt
+A06312345@example.org{ENTER} => A06312345@example.org
+# typed in lower case: what was typed as typed, the rest remembered (it came out A063...)
+a063{TAB}{ENTER} => a06312345@example.org
+# both now remembered: the one that starts as typed
+A063{TAB}{ENTER} => A06312345@example.org
+a063{TAB}{ENTER} => a06312345@example.org
+# Chinese: a Chinese hint, no address (居 + a06, as 居然 offered the reported address)
+rm a06{TAB}{ENTER} => 居蠻多
+a06{TAB}{ENTER} => 蠻多
+# a063e is no address's start: Chinese as before
+a063ek7{ENTER} => 蠻3個
+# two that differ after the part typed: the one that starts as typed even used less (school 3 times, Abcd 2: Abc ->
+# example, abc -> school)
+Abcd1234@example.com{ENTER} => Abcd1234@example.com
+Abcd1234@example.com{ENTER} => Abcd1234@example.com
+abcd1234@example.net{ENTER} => abcd1234@example.net
+abcd1234@example.net{ENTER} => abcd1234@example.net
+abcd1234@example.net{ENTER} => abcd1234@example.net
+Abc{TAB}{ENTER} => Abcd1234@example.com
+abc{TAB}{ENTER} => abcd1234@example.net

@@ -1603,13 +1603,42 @@ std::vector<std::string> UserModel::words_starting(const std::string& prefix, si
             double c = word_count(w);
             if (c >= WORD_MIN_USES) found.emplace_back(c, w);
         }
+    // (#54: the addresses that start as typed, case and all, first - one remembered in another case only when none
+    // does; each one its own, as typed when sent)
+    std::vector<std::pair<double, std::string>> addresses, exact;
     for (auto& [w, n] : emails)
-        if (starts_with(lower(w), p) && w.size() > prefix.size() && n >= 1) found.emplace_back(n, w);
+        if (starts_with(lower(w), p) && w.size() > prefix.size() && n >= 1) {
+            addresses.emplace_back(n, w);
+            if (starts_with(w, prefix)) exact.emplace_back(n, w);
+        }
+    for (auto& a : exact.empty() ? addresses : exact) found.push_back(a);
     std::stable_sort(found.begin(), found.end(), [](auto& a, auto& b) { return -a.first < -b.first; });
     for (auto& [_, w] : found)
         if (!custom_english.count(lower(w))) mine.push_back(w);
     if (mine.size() > limit) mine.resize(limit);
     return mine;
+}
+
+bool UserModel::is_completion_start(const std::string& keys) const {
+    if (keys.size() < COMPLETION_START_KEYS) return false;
+    // (a list made again only when what Tab completes from changes: a set of e-mails changes their number; 自訂詞彙 and
+    // the words bump words_version_; the day fades words - /code-review: lower-casing them all a key was slow)
+    auto key = std::make_tuple(today_(), words_version_, emails.size());
+    if (completion_key_ != key) {
+        completion_lower_.clear();
+        for (auto& w : custom_words) completion_lower_.push_back(lower(w));
+        for (auto& [w, _] : words)
+            if (std::all_of(w.begin(), w.end(), [](char c) { return static_cast<unsigned char>(c) < 128; }) &&
+                word_count(w) >= WORD_MIN_USES)
+                completion_lower_.push_back(lower(w));
+        for (auto& [w, n] : emails)
+            if (n >= 1) completion_lower_.push_back(lower(w));
+        std::sort(completion_lower_.begin(), completion_lower_.end());
+        completion_key_ = key;
+    }
+    std::string p = lower(keys);
+    auto it = std::lower_bound(completion_lower_.begin(), completion_lower_.end(), p);
+    return it != completion_lower_.end() && starts_with(*it, p);
 }
 
 void UserModel::learn_english(const std::string& raw, bool wanted) {

@@ -148,7 +148,7 @@ class Token:
 
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
-             taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False):
+             taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False, starts=False):
     """Split raw keys into the cheapest sequence of tokens.
 
     literal: raw offsets of keys that are always themselves (numpad digits and
@@ -162,7 +162,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
     lm: 長句選字加強's scorer (None: off), asked about digits out of order at the end of a run
         (_check_corrections); sent: what was just sent (接續前文選字), read first (#37, #42), the last context_len
         characters with the runs before (LM_CONTEXT if None); marks: EN_MARK where English came before a run (a
-        model that knows English, #41); lit_keys: punctuation is sent as the key typed (half width), read so.
+        model that knows English, #41); lit_keys: punctuation is sent as the key typed (half width), read so;
+        starts: 補字提示 is on - the start of what Tab would complete reads as English (#54).
     Other arguments: see _tokenize_run.
     """
     cuts = sorted([(p, p + 1, None) for p in literal if p < len(raw)] +
@@ -171,7 +172,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                   key=lambda c: (c[0], c[1]))
     if not cuts:
         tokens = _tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese, lexicon,
-                               breaks, exact)
+                               breaks, exact, True, starts)
         return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
                                   lit_keys) if table.autocorrect else tokens
     tokens, start = [], 0
@@ -184,7 +185,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                                  after_english and start == 0, digits_as_zhuyin,
                                  {c - start for c in chinese if start <= c < a}, lexicon,
                                  {c - start for c in breaks if start <= c < a},
-                                 {c - start for c in exact if start <= c < a})
+                                 {c - start for c in exact if start <= c < a}, start == 0, starts)
             for t in part:
                 t.start += start
             tokens += part
@@ -201,7 +202,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
 
 
 def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=False,
-                  digits_as_zhuyin=False, chinese=(), lexicon=None, breaks=(), exact=()):
+                  digits_as_zhuyin=False, chinese=(), lexicon=None, breaks=(), exact=(), text_start=True, starts=False):
     """Split raw keys into the cheapest sequence of tokens.
 
     forced: raw offsets where the user asked for English/number, not zhuyin.
@@ -531,6 +532,14 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
         end = n if sp < 0 else sp
         after_word = (after_english and i == 0) or bool(prev[1]) and prev[1][-1].kind == "en" and \
             prev[1][-1].raw.endswith(" ") and prev[1][-1].raw.strip().isalpha()
+        # (#54) the start of what Tab would complete (a remembered address, an English word sent twice), typed at a
+        # word's start - the text's, or after a space between words, not the first tone of a syllable (居 + a06 stays
+        # 居蠻) - is English as the word is (a063 of a06...@: not 蠻3), so its completion is offered: English gets the
+        # addresses, Chinese the Chinese hints (the user's words); all the keys of the word so far (a063ek7: a063e is no
+        # address's start, 蠻3個 as before); only with 補字提示 on (starts: else nothing is offered - /code-review). The
+        # text's start, not a run's after a cut (a numpad digit, a pick of the bar or the list: 我 + numpad 1 + a063 stays
+        # 我1蠻3 - code-reviewer)
+        word_start = (i == 0 and text_start) or (i > 0 and raw[i - 1] == " " and not (prev[1] and prev[1][-1].kind == "zh"))
         for j in range(i + 1, end + 1):
             piece = raw[i:j]
             word_after = after_word
@@ -544,8 +553,10 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
                                         if english else False)
                 if zh and zh[1] and starts_phrase(j + 1, zh[0], SHORT_EN_WORD if common else None):
                     word_after = False
-            cost = english_piece_cost(piece, english, learned, word_after, mine, () if i in exact else codes) + \
-                bonus + crosses(i, j)
+            cost = english_piece_cost(piece, english, learned, word_after, mine, () if i in exact else codes)
+            if starts and word_start and j == end and user is not None and user.is_completion_start(piece):
+                cost = min(cost, EN["learned"])  # (as one sent before)
+            cost += bonus + crosses(i, j)
             if j == end and sp >= 0:
                 offer(j + 1, cost, prev, Token("en", piece + " ", piece + " ", i))
             else:
@@ -1918,7 +1929,7 @@ class Composer:
                                self.after_english, self.digits_as_zhuyin, self.literal, self.chinese, self.fixed,
                                self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
                                self._sent_context(), self._context_len(), _knows_english(self._lm()),
-                               self._lit_keys())
+                               self._lit_keys(), self.config.completion)
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
@@ -2304,17 +2315,26 @@ class Composer:
         last = self.tokens[-1] if self.tokens else None
         # remembered e-mail addresses / English words: the word being typed is a prefix
         # (from the last space, or from where the English part starts)
-        starts = {self.raw.rfind(" ") + 1}
-        if last and last.kind in ("en", "partial"):
-            starts.add(last.start)
+        # ...within the tokens at the end that are no Chinese: Chinese gets the Chinese hints, English and digits the
+        # addresses (#54, the user 2026-11-17: 居然 offered a remembered address whose keys start like the last
+        # syllable's - 居's first tone is a space too, which rfind took for one between words)
+        run = len(self.raw)
+        for t in reversed(self.tokens):
+            if t.kind == "zh":
+                break
+            run = t.start
+        starts = {s for s in (self.raw.rfind(" ") + 1, last.start if last and last.kind in ("en", "partial") else -1)
+                  if s >= run}
         starts |= {s + 1 for s in starts if self.raw[s:s + 1] == "/"}  # a slash command: /con -> /continue
         for start in sorted(starts):
             if len(self.raw) - start >= 3:
-                for w in self.user.words_starting(self.raw[start:]):
-                    # an English word keeps the case typed (cla -> claude, Cla -> Claude); one of 自訂詞彙 is as
-                    # written there (kaz -> Kazuma, the user's call 2026-11-13)
-                    if not is_email(w) and w.lower() not in self.user.custom_english:
-                        w = self.raw[start:] + w[len(self.raw) - start:]
+                typed = self._as_typed(start, self.raw[start:])  # (as shown: a capital typed with Caps Lock - /code-review)
+                for w in self.user.words_starting(typed):
+                    # an English word keeps the case typed (cla -> claude, Cla -> Claude), an e-mail address too
+                    # (a06 -> a06...@ for one remembered as A06...@, #54); one of 自訂詞彙 is as written there (kaz ->
+                    # Kazuma, the user's call 2026-11-13)
+                    if w.lower() not in self.user.custom_english:
+                        w = typed + w[len(typed):]
                     actions.append(("word", start, w))
         # the English typed at the end: from where the last run of English, symbols and
         # unfinished zhuyin starts (the i of code-revi reads as ㄛ for now)
@@ -3299,7 +3319,7 @@ class Composer:
                          self.digits_as_zhuyin, self.literal - set(unlit), (self.chinese - set(unchinese)) | {s},
                          {a: v for a, v in self.fixed.items() if a != unfix}, self.lexicon, self.breaks,
                          self.exact, self.taken, self.bigram, self._lm(), self._sent_context(), self._context_len(),
-                         _knows_english(self._lm()), self._lit_keys())
+                         _knows_english(self._lm()), self._lit_keys(), self.config.completion)
         inside = [t for t in trial if s <= t.start < end]
         if not inside or inside[0].start != s or any(t.kind != "zh" for t in inside) or \
                 inside[-1].start + len(inside[-1].raw) != end:

@@ -131,6 +131,7 @@ constexpr size_t KEEP_EMAILS = 2000;         // remembered e-mail addresses kept
 constexpr size_t KEEP_ENGLISH_WORDS = 2000;  // remembered English words kept
 constexpr double WORD_MIN_USES = 2;          // an English word is offered once typed this many times (an e-mail: once)
 constexpr double CUSTOM_BONUS = 4.0;
+constexpr size_t COMPLETION_START_KEYS = 4;  // the start of what Tab would complete, this long, reads as English (#54)
 constexpr size_t KEEP_CORRECTIONS = 2000;   // key strings 注音自動校正 remembers
 constexpr double CORRECTION_MIN_USES = 2;   // a choice there counts once picked this many times
 inline const ustr AS_ENGLISH = U"en";        // 代碼記憶's choice: the keys are English (mp3), not the zhuyin they spell
@@ -264,6 +265,9 @@ public:
     // a backup restored (counter bumped): merge import-memory.json next to user.json, then remove it
     void import_memory(int counter);
     std::vector<std::string> words_starting(const std::string& prefix, size_t limit = 3) const;
+    // keys, COMPLETION_START_KEYS at least, are the start of what Tab would complete, whatever the case (#54: a063 of a
+    // remembered address a06...@ is English, not 蠻3; mp3t of an English word mp3tag sent twice; engine/lexicon.py)
+    bool is_completion_start(const std::string& keys) const;
     void learn_english(const std::string& raw, bool wanted);
     void save();
     // 簡體輸出 (#32): see engine/lexicon.py set_simplified. Simplified mode: phrases / phrase_used are the shared
@@ -331,6 +335,9 @@ private:
     bool custom_seen_ = false;
     long long custom_mtime_ = 0;
     bool custom_exists_ = false;
+    // what Tab completes from, lower-cased and sorted, for is_completion_start: (day, words_version_, e-mails) it was made
+    mutable std::tuple<int, unsigned, size_t> completion_key_{-1, ~0u, 0};
+    mutable std::vector<std::string> completion_lower_;
     unsigned words_version_ = 0;  // bumped by every change of words or custom_english, for sure_english()
     mutable std::pair<int, unsigned> sure_key_{-1, ~0u};
     mutable std::unordered_set<std::string> sure_;

@@ -396,8 +396,10 @@ bool whole_keys(const std::string& raw, size_t i, size_t j, const SyllableTable&
 std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& table, const UserModel* user,
                                 const English& english, const std::set<int>& forced, bool after_english,
                                 bool digits_as_zhuyin, const std::set<int>& chinese, const Lexicon* lexicon,
-                                const std::set<int>& breaks, const std::set<int>& exact) {
-    // exact: raw offsets where a syllable is not autocorrected
+                                const std::set<int>& breaks, const std::set<int>& exact, bool text_start = true,
+                                bool starts = false) {
+    // exact: raw offsets where a syllable is not autocorrected; text_start: the run is the text's start (not after a cut);
+    // starts: 補字提示 is on (#54)
     const size_t n = raw.size();
     // The cheapest split of raw[:j] whose last token is zhuyin right after English with no space - English cut short
     // there, not English the user asked for (state 1) - and the cheapest of all the others (state 0), in the order
@@ -798,6 +800,13 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         bool after_word = (after_english && i == 0) ||
                           (cur != 0 && nodes[cur].tok.kind == Kind::En && ends_with(nodes[cur].tok.raw, std::string(" ")) &&
                            all_alpha(strip(nodes[cur].tok.raw)));
+        // (#54) the start of what Tab would complete (a remembered address, an English word sent twice) typed at a
+        // word's start - the text's, or after a space between words, not the first tone of a syllable (居 + a06 stays
+        // 居蠻) - all the keys of the word so far, is English as the word is (a063, not 蠻3; a063ek7 stays 蠻3個), so its
+        // completion is offered; only with 補字提示 on (engine/composer.py)
+        // (the text's start, not a run's after a cut: 我 + numpad 1 + a063 stays 我1蠻3 - code-reviewer)
+        const bool word_start =
+            (i == 0 && text_start) || (i > 0 && raw[i - 1] == ' ' && !(cur != 0 && nodes[cur].tok.kind == Kind::Zh));
         for (size_t j = i + 1; j <= end; ++j) {
             std::string piece = raw.substr(i, j - i);
             bool word_after = after_word;
@@ -813,8 +822,9 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                     starts_phrase(j + 1, zh->first, common ? std::optional<double>(SHORT_EN_WORD) : std::nullopt))
                     word_after = false;
             }
-            double cost = english_piece_cost(piece, english, learned, word_after, mine,
-                                             contains(exact, ii) ? none : codes) + bonus + crosses(i, j);
+            double cost = english_piece_cost(piece, english, learned, word_after, mine, contains(exact, ii) ? none : codes);
+            if (starts && word_start && j == end && user && user->is_completion_start(piece)) cost = std::min(cost, EN_LEARNED);
+            cost += bonus + crosses(i, j);
             if (j == end && sp != std::string::npos)
                 offer(i, j + 1, cost, Token{Kind::En, piece + " ", U(piece + " "), ii});
             else
@@ -1424,7 +1434,8 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             bool digits_as_zhuyin, const std::set<int>& literal, const std::set<int>& chinese,
                             const Fixed* fixed, const Lexicon* lexicon, const std::set<int>* breaks,
                             const std::set<int>* exact, const Fixed* taken, const BigramModel* bigram,
-                            const LmScorer* lm, const ustr* sent, size_t context_len, bool marks, bool lit_keys) {
+                            const LmScorer* lm, const ustr* sent, size_t context_len, bool marks, bool lit_keys,
+                            bool starts) {
     // literal: raw offsets of keys that are always themselves (numpad); fixed: keys shown
     // as picked from the replacement bar (ㄏㄠˇ, clˇ); taken: keys read as a syllable picked
     // from the list (注音自動校正: si3 as ㄋㄧˇ). They cut the text in two.
@@ -1454,7 +1465,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
     };
     if (cuts.empty())
         return checked(tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese,
-                                    lexicon, brk, ex));
+                                    lexicon, brk, ex, true, starts));
     // sorted like Python's: by (a, b), then in the order given
     std::sort(cuts.begin(), cuts.end(), [](const Cut& x, const Cut& y) {
         if (x.a != y.a) return x.a < y.a;
@@ -1477,7 +1488,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
             for (int x : ex)
                 if (start <= x && x < cut.a) e.insert(x - start);
             auto part = tokenize_run(raw.substr(start, cut.a - start), table, user, english, f,
-                                     after_english && start == 0, digits_as_zhuyin, c, lexicon, b, e);
+                                     after_english && start == 0, digits_as_zhuyin, c, lexicon, b, e, start == 0, starts);
             for (auto& t : part) {
                 t.start += start;
                 tokens.push_back(std::move(t));
@@ -2380,7 +2391,7 @@ void Composer::settings_changed() {
 std::vector<Token> Composer::retokenize(const std::set<int>& chinese) const {
     return tokenize(raw, table_, &user, english_, forced_, after_english_, digits_as_zhuyin_, literal_, chinese,
                     &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(),
-                    knows_english(), lit_keys());
+                    knows_english(), lit_keys(), config.flag("completion"));
 }
 
 bool Composer::knows_english() const {
@@ -2903,24 +2914,32 @@ void Composer::suggest() {
     std::vector<Action> actions;
     const Token* last = tokens.empty() ? nullptr : &tokens.back();
     // remembered e-mail addresses / English words: the word being typed is a prefix
+    // ...within the tokens at the end that are no Chinese: Chinese gets the Chinese hints, English and digits the
+    // addresses (#54: 居然 offered a remembered address whose keys start like the last syllable's - 居's first tone is a
+    // space too, which rfind took for one between words)
+    int run = static_cast<int>(raw.size());
+    for (auto t = tokens.rbegin(); t != tokens.rend() && t->kind != Kind::Zh; ++t) run = t->start;
     std::set<int> starts;
     size_t sp = raw.rfind(' ');
-    starts.insert(sp == std::string::npos ? 0 : static_cast<int>(sp) + 1);
-    if (last && (last->kind == Kind::En || last->kind == Kind::Partial)) starts.insert(last->start);
+    int after_space = sp == std::string::npos ? 0 : static_cast<int>(sp) + 1;
+    if (after_space >= run) starts.insert(after_space);
+    if (last && (last->kind == Kind::En || last->kind == Kind::Partial) && last->start >= run) starts.insert(last->start);
     for (int s : std::set<int>(starts))
         if (s < static_cast<int>(raw.size()) && raw[s] == '/') starts.insert(s + 1);  // a slash command: /con -> /continue
     for (int start : starts) {
-        if (static_cast<int>(raw.size()) - start >= 3)
-            for (auto& w : user.words_starting(raw.substr(start))) {
+        if (static_cast<int>(raw.size()) - start >= 3) {
+            // (as shown: a capital typed with Caps Lock - /code-review)
+            const std::string typed = to_utf8(as_typed(start, raw.substr(start)));
+            for (auto& w : user.words_starting(typed)) {
                 Action a;
                 a.type = "word";
                 a.start = start;
-                // an English word keeps the case typed (cla -> claude, Cla -> Claude); one of 自訂詞彙 is as
-                // written there (kaz -> Kazuma, the user's call 2026-11-13)
-                a.word = is_email(w) || user.custom_english.count(lower(w)) ? w
-                                                                             : raw.substr(start) + w.substr(raw.size() - start);
+                // an English word keeps the case typed (cla -> claude, Cla -> Claude), an e-mail address too (#54);
+                // one of 自訂詞彙 is as written there (kaz -> Kazuma, the user's call 2026-11-13)
+                a.word = user.custom_english.count(lower(w)) ? w : typed + w.substr(typed.size());
                 actions.push_back(a);
             }
+        }
     }
     // the English typed at the end: from where the last run of English, symbols and
     // unfinished zhuyin starts (the i of code-revi reads as ㄛ for now)
@@ -4176,7 +4195,8 @@ std::optional<std::pair<int, std::vector<ustr>>> Composer::reads_as_chinese(int 
         if (a != unfix) fixed[a] = v;
     auto trial =
         tokenize(raw, table_, &user, english_, forced, after_english_, digits_as_zhuyin_, lit, ch, &fixed, &lexicon_,
-                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(), knows_english(), lit_keys());
+                 &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(), knows_english(), lit_keys(),
+                 config.flag("completion"));
     std::vector<const Token*> inside;
     for (auto& t : trial)
         if (s <= t.start && t.start < end) inside.push_back(&t);

@@ -357,6 +357,8 @@ KEEP_PHRASES = 2000  # learned phrases kept (the most used); the rest are droppe
 KEEP_EMAILS = 2000   # remembered e-mail addresses kept (the most recently used); they never fade
 KEEP_ENGLISH_WORDS = 2000  # remembered English words kept
 WORD_MIN_USES = 2    # an English word is offered once typed this many times (an e-mail: once)
+COMPLETION_START_KEYS = 4  # the start of what Tab would complete, this long, reads as English (#54: a063, not 蠻3; a06
+                           # alone stays 蠻)
 KEEP_CORRECTIONS = 2000  # key strings 注音自動校正 remembers
 CORRECTION_MIN_USES = 2  # a choice there counts once picked this many times
 KEYS_SECTION = "standard"  # keys.json keeps them under the keyboard's name
@@ -1030,6 +1032,20 @@ class UserModel:
                 else:
                     table.setdefault(key, {})[phrase] = value
 
+    def completion_words(self):
+        """What Tab completes from (words_starting): 自訂詞彙's English words, the English words sent WORD_MIN_USES times
+        (faded, ASCII), the e-mail addresses."""
+        return (list(self.custom_words) + [w for w in self.words if w.isascii() and self.word_count(w) >= WORD_MIN_USES] +
+                [w for w, n in self.emails.items() if n >= 1])
+
+    def is_completion_start(self, keys):
+        """keys, COMPLETION_START_KEYS at least, are the start of what Tab would complete, whatever the case (#54: a063 of
+        a remembered address a06...@ is English, not 蠻3; mp3t of an English word mp3tag sent twice, not 允 + t)."""
+        if len(keys) < COMPLETION_START_KEYS:
+            return False
+        p = keys.lower()
+        return any(w.lower().startswith(p) for w in self.completion_words())
+
     def learn_word(self, word):
         """An English word or an e-mail address sent (a URL is not remembered)."""
         if is_url(word):
@@ -1150,8 +1166,10 @@ class UserModel:
         hits = [(self.word_count(w), w) for w in self.words
                 if w.isascii() and w.lower().startswith(p) and len(w) > len(prefix)]
         hits = [h for h in hits if h[0] >= WORD_MIN_USES]
-        hits += [(n, w) for w, n in self.emails.items() if w.lower().startswith(p) and len(w) > len(prefix)
-                 and n >= 1]
+        emails = [(n, w) for w, n in self.emails.items() if w.lower().startswith(p) and len(w) > len(prefix) and n >= 1]
+        # (#54, the user 2026-11-17: the addresses that start as typed, case and all, first - an address remembered in
+        # another case only when none does; each one its own, as typed when sent)
+        hits += [h for h in emails if h[1].startswith(prefix)] or emails
         hits.sort(key=lambda h: -h[0])
         mine += [w for _, w in hits if w.lower() not in self.custom_english]
         return mine[:limit]

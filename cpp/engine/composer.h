@@ -44,7 +44,8 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             const ustr* sent = nullptr,    // sent: what was just sent, read first by lm (#37, #42)
                             size_t context_len = 0,       // ...the last context_len with the runs before (0: 32)
                             bool marks = false,           // marks: EN_MARK where English came before a run (#41)
-                            bool lit_keys = false);       // ...punctuation sent as the key typed (half width)
+                            bool lit_keys = false,        // ...punctuation sent as the key typed (half width)
+                            bool starts = false);         // starts: 補字提示 on - what Tab completes starts English (#54)
 
 struct Segment {
     int start, length;

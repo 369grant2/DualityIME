@@ -1079,6 +1079,111 @@ class CompletionTest(Base):
         c.key(special="ENTER")
         self.assertEqual(c.commit, "我" + self.EMAIL)
 
+    def test_email_typed_case_kept(self):
+        # (#54, the user 2026-11-17: an address remembered with a capital first, typed in lower case, came out with the
+        # capital; a06 is a syllable too (蠻), as the reported address's start was a syllable - this one is made up)
+        c = self.c
+        c.user.emails.clear()  # (the class shares one engine: no address from another test)
+        c.user.email_used.clear()
+        self.type("A06312345@example.org")
+        for ch in "a063":
+            c.key(ch)
+        self.assertEqual(c.composition, "a063")  # (a remembered address's start: read as typed, not 蠻3)
+        self.assertEqual(c.suggestions, ["12345@example.org"])
+        c.key(special="TAB")
+        self.assertEqual(c.composition, "a06312345@example.org")  # (what was typed as typed, the rest remembered)
+        c.key(special="ENTER")
+        self.assertEqual(sorted(c.user.emails), ["A06312345@example.org", "a06312345@example.org"])
+
+    def test_email_of_the_case_typed_first(self):
+        # (#54: two addresses that differ in case only at the start: the one as typed first, even used less; none so
+        # written, the other one in the case typed)
+        c = self.c
+        c.user.emails.clear()  # (the class shares one engine: no address from another test)
+        c.user.email_used.clear()
+        for _ in range(3):
+            self.type("A06312345@example.org")
+        c.user.learn_word("a06312345@example.net")  # (typed in lower case it reads 蠻312345@...: sent after Tab)
+        for start, rest in (("a063", "12345@example.net"), ("A063", "12345@example.org")):
+            for ch in start:
+                c.key(ch)
+            self.assertEqual(c.suggestions, [rest], start)
+            c.key(special="ESC")
+
+    def test_email_not_offered_for_chinese(self):
+        # (#54, the user 2026-11-17: 居然 offered an address starting with the keys of its last syllable; Chinese gets Chinese hints,
+        # English and digits the addresses - the user's words)
+        c = self.c
+        c.user.emails.clear()  # (the class shares one engine: no address from another test)
+        c.user.email_used.clear()
+        self.type("A06312345@example.org")
+        for keys, shown in (("a06", "蠻"), ("rm" + " a06", "居蠻"), ("rm" + " a063", None)):
+            for ch in keys:
+                c.key(ch)
+            if shown:
+                self.assertEqual(c.composition, shown, keys)
+            self.assertEqual(c.composition[:1] == "居", keys.startswith("rm"), keys)  # (居's first tone is no space between)
+            self.assertFalse(any("@" in s for s in c.suggestions), keys)
+            c.key(special="ESC")
+        for ch in "a063ek7":  # (a063e is no remembered address's start: 蠻3個 as before)
+            c.key(ch)
+        self.assertEqual(c.tokens[0].kind, "zh")
+        c.key(special="ESC")
+
+    def test_email_start_only_at_the_text_start(self):
+        # (#54: a numpad digit cuts the text in two: what follows it is no text's start - code-reviewer)
+        c = self.c
+        c.user.emails.clear()  # (the class shares one engine: no address from another test)
+        c.user.email_used.clear()
+        self.type("A06312345@example.org")
+        for ch in "ji3":
+            c.key(ch)
+        c.type_literal("1")
+        for ch in "a063":
+            c.key(ch)
+        self.assertEqual(c.composition, "我1蠻3")
+        c.key(special="ESC")
+
+    def test_email_case_as_shown(self):
+        # (#54 /code-review: a capital typed with Caps Lock is kept in the keys in lower case - the case shown counts)
+        c = self.c
+        c.user.emails.clear()  # (the class shares one engine: no address from another test)
+        c.user.email_used.clear()
+        c.user.learn_word("A06312345@example.org")
+        c.user.learn_word("a06312345@example.net")
+        c.key("A", caps=True)
+        for ch in "063":
+            c.key(ch)
+        self.assertEqual(c.composition, "A063")
+        self.assertEqual(c.suggestions, ["12345@example.org"])
+        c.key(special="TAB")
+        self.assertEqual(c.composition, "A06312345@example.org")
+        c.key(special="ESC")
+
+    def test_starts_only_with_completion_on(self):
+        # (#54 /code-review: 補字提示 off offers nothing, so the keys read as before - 蠻3)
+        c = self.c
+        c.user.emails.clear()
+        c.user.email_used.clear()
+        c.user.learn_word("A06312345@example.org")
+        c.config.set(completion=False)
+        for ch in "a063":
+            c.key(ch)
+        self.assertEqual(c.composition, "蠻3")
+        c.key(special="ESC")
+
+    def test_english_word_start_as_an_address(self):
+        # (#54 /code-review: an English word sent twice whose keys start like a syllable is offered as an address is -
+        # mp3t of mp3tag reads as typed, not 允 + t)
+        c = self.c
+        for _ in range(2):
+            c.user.learn_word("mp3tag")
+        for ch in "mp3t":
+            c.key(ch)
+        self.assertEqual(c.composition, "mp3t")
+        self.assertEqual(c.suggestions, ["ag"])
+        c.key(special="ESC")
+
     def test_remembering_can_be_turned_off_and_cleared(self):
         c = self.c
         c.config.set(remember_words=False)

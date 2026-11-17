@@ -317,6 +317,15 @@ CASES = [
     "Tvm4{DOWN}1{ENTER}Tvm4{ENTER}Tvm4{DOWN}1{ENTER}Tvm4{ENTER}"
     "CP56{HOME}{RIGHT}{RIGHT}{UP}{RIGHT}{RIGHT}{ENTER}{ENTER}CP56{HOME}{RIGHT}{RIGHT}{UP}{RIGHT}{RIGHT}{ENTER}{ENTER}"
     "CP56{ENTER}",
+    # (#54) a remembered address completed in the case typed, the one that starts as typed first; Chinese gets Chinese
+    # hints (居 + a06, a06 alone), a remembered address's start is English (a063), a063e is not (蠻3個)
+    "A06312345@example.org{ENTER}a063{TAB}{ENTER}A063{TAB}{ENTER}a063{TAB}{ENTER}rm a06{TAB}{ENTER}a063ek7{ENTER}"
+    "a06{TAB}{ENTER}",
+    # (#54) two that differ after the part typed: the one that starts as typed, even used less (school 3, Abcd...example
+    # 2: Abc is example); a numpad digit is no text's start (我1蠻3); the A typed with Caps Lock counts as shown (example)
+    "Abcd1234@example.com{ENTER}Abcd1234@example.com{ENTER}abcd1234@example.net{ENTER}abcd1234@example.net{ENTER}"
+    "abcd1234@example.net{ENTER}Abc{TAB}{ENTER}abc{TAB}{ENTER}A06312345@example.org{ENTER}ji3{#1}a063{ENTER}"
+    "{CAPS}a{CAPS}bc{TAB}{ENTER}",
 ]
 
 PUNCT = list(",.;?!:\"'[]()<>-_=+/\\|@#$%^&*")

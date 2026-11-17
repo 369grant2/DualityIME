@@ -179,6 +179,9 @@ public:
     int64_t char_score(const ustr& before, char32_t ch, const ustr& syllable) const;
     // the sum of the characters' scores (Q10), one character per syllable
     int64_t text_score(const ustr& text, const std::vector<ustr>& readings) const;
+    // Q10 log probability of ch after before among the characters of these syllables together (#51: the syllable
+    // typed against the one 注音自動校正 read); one not among them gets the lowest of theirs, no list at all 0
+    int64_t among_score(const ustr& before, char32_t ch, const std::vector<ustr>& syllables) const;
     // Q16 probability that the character after before is one of the syllable's (candidates, id 0 left
     // out), over the whole vocabulary; 0 for a syllable with none (engine/lm.py Scorer.syllable_mass_q16)
     int64_t syllable_mass_q16(const ustr& before, const ustr& syllable) const;

@@ -594,6 +594,13 @@ class PunctuationTest(Base):
 
 
 class SymbolKeyboardTest(Base):
+    def press(self, *seq):
+        for k in seq:
+            if len(k) == 1:
+                self.c.key(k)
+            else:
+                self.c.key(special=k)
+
     def test_backquote_opens_the_keyboard_on_the_first_page(self):
         c = self.c
         self.assertTrue(c.key("`"))
@@ -655,6 +662,98 @@ class SymbolKeyboardTest(Base):
         c.key("f")
         self.assertEqual(c.commit, "你好●")
         self.assertEqual(c.composition, "")
+
+    def test_space_types_a_space(self):
+        # (#49, the user 2026-11-17: Space typed the symbol at the arrows' cursor - odd; a space, as anywhere, full
+        # width when spaces are; Enter types the cursor's symbol. Space as the first key still opens 快速填入)
+        c = self.c
+        for config, want in (({}, " "), ({"space": "full"}, "　"), ({"full_width": True}, "　")):
+            with self.subTest(config=config):
+                c.config.values = dict(DEFAULTS, **config)
+                self.press("`", "RIGHT", " ")
+                self.assertEqual(c.commit, want)
+                self.assertIsNone(c.symbol_page)  # (closes, as after a symbol)
+        c.config.values = dict(DEFAULTS)
+        self.press("`", " ")
+        self.assertIsNotNone(c.fill_shown())
+        self.press("ESC", *keys("ㄨㄛˇ"), "`", "RIGHT", " ")
+        self.assertEqual(c.commit, "我 ")  # (what is being typed goes out first)
+
+    def test_backspace_closes_the_keyboard(self):
+        c = self.c
+        self.press("`", "BACK")
+        self.assertIsNone(c.symbol_page)
+        self.assertEqual(c.commit, "")
+
+    def test_stays_open_with_the_setting(self):
+        # (#49, GitHub issue #7: 「」※○● each needed the keyboard opened again; 符號鍵盤選完不關 keeps it open, Esc
+        # (or × - the IME's close_symbols) closes it)
+        c = self.c
+        c.config.values = dict(DEFAULTS, symbols_stay_open=True)
+        sent = []
+        for k in ("`", "a", "s", "RIGHT", "ENTER", " ", "f"):
+            self.press(k)
+            sent.append(c.commit)
+            self.assertEqual(c.symbol_page, 0, k)
+        from engine import symbols
+        at = symbols.neighbour(symbols.KEYS.index("1"), "RIGHT")
+        self.assertEqual(sent, ["", "※", symbols.symbol(0, symbols.key_index("s")), "", symbols.symbol(0, at), " ", "●"])
+        self.press("ESC")
+        self.assertIsNone(c.symbol_page)
+        self.press("`", "a")
+        c.close_symbols()  # (× on the keyboard)
+        self.assertIsNone(c.symbol_page)
+
+    def test_stays_open_space_first_still_opens_quick_fill(self):
+        # (the user 2026-11-17: 快速填入 from Space as the first key must not break; once a symbol went out the
+        # keyboard is not new any more, so Space is a space)
+        c = self.c
+        c.config.values = dict(DEFAULTS, symbols_stay_open=True)
+        self.press("`", " ")
+        self.assertIsNotNone(c.fill_shown())
+        self.press("ESC", "`", "a", " ")
+        self.assertIsNone(c.fill_shown())
+        self.assertEqual((c.commit, c.symbol_page), (" ", 0))
+
+    def test_stays_open_after_ctrl_mark_and_numpad(self):
+        # (#49, code-reviewer: Ctrl + a mark and a numpad key closed it; with the setting only Esc / × do)
+        c = self.c
+        for stay in (True, False):
+            with self.subTest(stay=stay):
+                c.config.values = dict(DEFAULTS, symbols_stay_open=stay)
+                self.press("`", "a")
+                if not stay:
+                    self.press("`")
+                self.assertTrue(c.type_full_punct(","))
+                self.assertEqual((c.commit, c.symbol_page), ("，", 0 if stay else None))
+                if stay:  # (something went out: not new any more, Space is a space, not 快速填入 - code-reviewer)
+                    self.press(" ")
+                    self.assertEqual((c.commit, c.fill_shown(), c.symbol_page), (" ", None, 0))
+                self.press("ESC", "s", "u", "3", "`")
+                c.type_literal("1")
+                self.assertEqual(c.symbol_page, 0 if stay else None)
+                if stay:
+                    self.press(" ")
+                    self.assertIsNone(c.fill_shown())
+                self.press("ESC", "ENTER")
+
+    def test_stays_open_backspace_is_the_apps(self):
+        # (#49: with nothing being typed Backspace goes to the app - it deletes the symbol just sent - and the keyboard
+        # stays; with text being typed it deletes from that, as anywhere)
+        c = self.c
+        c.config.values = dict(DEFAULTS, symbols_stay_open=True)
+        self.press("`", "a")
+        self.assertFalse(c.key(special="BACK"))
+        self.assertEqual(c.symbol_page, 0)
+        self.press("ESC")
+        for ch in "su3j":
+            c.key(ch)
+        c.key("`")
+        self.assertTrue(c.key(special="BACK"))
+        self.assertEqual((c.composition, c.symbol_page), ("你", 0))
+        self.assertEqual(c.suggestions, [])  # (none while the keyboard is up: Tab is its own - /code-review)
+        self.press("a")
+        self.assertEqual((c.commit, c.symbol_page), ("你※", 0))
 
     def test_backtick_after_an_english_word_opens_the_keyboard(self):
         # ` opens the symbol keyboard anywhere; twice types a ` (`code` in Markdown or Discord)
@@ -2459,12 +2558,12 @@ class QuickFillTest(unittest.TestCase):
         self.assertIsNone(c.fill_shown())
         self.assertEqual((c.commit, c.composition), ("", ""))
 
-    def test_space_after_moving_types_symbol(self):
-        # (the symbol keyboard as ever once anything else was pressed in it)
+    def test_space_after_moving_types_a_space(self):
+        # (the symbol keyboard as ever once anything else was pressed in it; Space types a space since #49)
         c = self.c
         self.press("`", "RIGHT", " ")
         self.assertIsNone(c.fill_shown())
-        self.assertEqual(len(c.commit), 1)
+        self.assertEqual(c.commit, " ")
         self.press("`", "1")
         self.assertIsNone(c.fill_shown())
 
@@ -4767,13 +4866,15 @@ class AutocorrectTest(Base):
 
     def test_a_tone_left_out_lists_the_other_tones(self):
         # 這 (ㄓㄜˋ) put in for the 5k typed: ↓ there lists the other tones of what was typed too,
-        # the most common three right after the first (者, 著, 哲), then the rest (遮...), the keys last
+        # the most common three right after the first (者, 著, 哲), the rest (遮...) among the characters of ㄓㄜˋ by
+        # how common they are (#51), the keys last
         c = self.c
         cands = self.candidates_at("5k1u0 ", 0)
         tones = [i for i, a in enumerate(c._cand_actions) if a[0] == "tone"]
         self.assertEqual(tones[:3], [1, 2, 3])
         self.assertGreater(len(tones), 3)
-        self.assertEqual(tones[3:], list(range(tones[3], tones[3] + len(tones) - 3)))
+        chars = [i for i, a in enumerate(c._cand_actions) if a[0] == "phrase" and a[2] == 1]
+        self.assertLess(tones[3], chars[-1])
         self.assertEqual({c._cand_actions[i][2] for i in tones} & {"ㄓㄜˋ"}, set())
         self.assertIn("遮", cands)
         self.assertIn("哲", cands)
@@ -4952,15 +5053,57 @@ class AutocorrectTest(Base):
         for _ in range(3):
             c.key(special="RIGHT")
         c.key(special="DOWN")
-        self.assertEqual(c.candidates[1], "現")
-        # three of them, then the rest of what 信 is (信義 is not pushed past every ㄒㄧㄢˋ), and the
-        # other ㄒㄧㄢˋ after those (the last one the keys as typed)
+        # three of them (the most common - 現 - with the model off; with it on the best in the sentence: 限 first, 現
+        # among them, #51), then the rest of what 信 is (信義 is not pushed past every ㄒㄧㄢˋ), the other ㄒㄧㄢˋ
+        # among the characters of ㄒㄧㄣˋ (#51; the last one the keys as typed)
         exact = [i for i, a in enumerate(c._cand_actions) if a[0] == "exact"]
         self.assertEqual(exact[:3], [1, 2, 3])
+        self.assertIn("現", c.candidates[1:4])
+        if not c.config.long_sentence:
+            self.assertEqual(c.candidates[1], "現")
         self.assertIn("信義", c.candidates[4:8])
         self.assertGreater(len(exact), 3)
-        self.assertEqual(exact[3:], list(range(exact[3], exact[3] + len(exact) - 3)))
+        chars = [i for i, a in enumerate(c._cand_actions) if a[0] == "phrase" and a[2] == 1]
+        self.assertLess(exact[3], chars[-1])
         self.assertEqual(c._cand_actions[-1][0], "raw")
+
+    def test_what_the_keys_typed_spell_is_easy_to_pick_back(self):
+        # (#51, the user 2026-11-17: 我簡單寄個郵件 came out 幾個 - ㄐㄧˋ swapped for ㄐㄧˇ - and 寄 was not to be found:
+        # 47th, after every character of ㄐㄧˇ, 魕 and 㧗 too. 注音自動校正 may be wrong, but what the user typed must
+        # be easy to pick back: the rest of ㄐㄧˋ among the characters of ㄐㄧˇ by how common they are)
+        c = self.c
+        for ch in keys("ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"):
+            c.key(ch)
+        self.assertEqual(c.readings[3], "ㄐㄧˇ")  # (the swap: #43 may stop it, then this test needs another case)
+        for _ in range(4):
+            c.key(special="LEFT")
+        c.key(special="DOWN")
+        self.assertIn("寄", c.candidates[:18])
+        self.assertLess(c.candidates.index("寄"), c.candidates.index("魕"))
+        c._pick(c.candidates.index("寄"))
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "我簡單寄個郵件")
+
+    def test_what_the_keys_typed_spell_by_the_sentence(self):
+        # (#51) with 長句選字加強 on, by how each reads in the sentence (_sentence_order): 寄 on the first page, the best
+        # three of ㄐㄧˋ right after the first candidate, a rare character of ㄐㄧˇ after the common ones
+        c = self.c
+        c.config.set(long_sentence=True)
+        for ch in keys("ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"):
+            c.key(ch)
+        self.assertEqual(c.readings[3], "ㄐㄧˇ")
+        for _ in range(4):
+            c.key(special="LEFT")
+        c.key(special="DOWN")
+        self.assertLess(c.candidates.index("寄"), 9)
+        self.assertEqual([a[0] for a in c._cand_actions[1:4]], ["exact"] * 3)
+        self.assertLess(c.candidates.index("幾"), c.candidates.index("魕"))
+
+    def test_merge_by_score_keeps_each_order_and_the_syllable_read_first_on_a_tie(self):
+        # (#51, code-reviewer: nothing tested the tie)
+        block = [("甲", "b1", 2.0), ("乙", "b2", 1.0), ("丙", "b3", 0.0)]
+        rest = [("子", "r1", 1.0), ("丑", "r2", 3.0)]  # (its own order kept, though 丑 scores more)
+        self.assertEqual([x[0] for x in composer.merge_by_score(block, rest)], ["甲", "乙", "子", "丑", "丙"])
 
     def test_a_word_typed_is_swapped_too_when_the_sentence_reads_better(self):
         # 你老 is a word, but 你好嘛 reads better than 你老嗎 by more than SWAP_GAIN_WORD (x is next to c).

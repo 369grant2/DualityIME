@@ -1,0 +1,9 @@
+# e2e-args: -Config cpp\tools\symbols_stay_open_config.json
+# 符號鍵盤選完不關 (#49, GitHub issue #7): the symbol keyboard stays open after each symbol, Esc closes it
+`ghadf{ESC} => 「」※○●
+# Enter types the symbol at the arrows' cursor, Space a space, and it stays open after both
+`a{RIGHT}{ENTER} f{ESC} => ※2 ●
+# Backspace is the app's: it deletes the symbol just sent, the keyboard still open
+`ab{BACK}c{ESC} => ※…
+# what is being typed goes out first, the keyboard stays
+su3`a{ESC} => 你※

@@ -301,6 +301,13 @@ CASES = [
     # (#47) 不 / 一 typed in their own tone: the next character from the words the dictionary writes with the changed
     # one (不是), two changed in one word (一年一度, 天不怕地不怕), three homophones picked 8 / 3 / 1 times (imported)
     "1j4{TAB}{ENTER}u {TAB}{ENTER}u su06u 2j4{ENTER}wu0 1j4q842u41j4q84{ENTER}g4m/4{ENTER}g4m/4{DOWN}{ENTER}",
+    # the symbol keyboard (#49): Enter the cursor's symbol, Space a space (first: 快速填入), Backspace; with
+    # 符號鍵盤選完不關 it stays open (text being typed first, Backspace deleting from it), Esc closes it
+    # (Esc after the first Backspace: in the stay-open setting it leaves the keyboard open - code-reviewer)
+    "`as{RIGHT}{ENTER} f{ESC}` {ESC}`{BACK}{ESC}ji3`{BACK}a s{ESC}su3`{RIGHT}{RIGHT} {ESC}su3j`{BACK}a{ESC}",
+    # (#51) a syllable 注音自動校正 swapped: what the keys typed among its characters by the sentence (寄 6th), other tones too
+    "ji3ru0320 ru4ek7u.6ru04{LEFT}{LEFT}{LEFT}{LEFT}{DOWN}6{ENTER}5k1u0 {HOME}{DOWN}{PGDN}{PGDN}2{ENTER}w961o3g4vu04u4fm "
+    "{HOME}{RIGHT}{RIGHT}{RIGHT}{DOWN}{PGDN}4{ENTER}",
 ]
 
 PUNCT = list(",.;?!:\"'[]()<>-_=+/\\|@#$%^&*")
@@ -358,7 +365,9 @@ CONFIGS = [
     {},
     {"autocorrect": True, "preview": "zhuyin", "punctuation": "full", "space": "full"},
     {"full_width": True, "completion": False, "remember_words": False, "cand_per_row": 9},
-    {"import_memory": 1},  # a backup restored (備份與還原): IMPORTED is merged before typing
+    {"import_memory": 1,  # a backup restored (備份與還原): IMPORTED is merged before typing
+     "symbols_stay_open": True},  # (符號鍵盤選完不關, #49: not a config of its own - /code-review; not with the one
+                                  # alone with full-width marks and spaces: keys after an open keyboard are symbols)
     {"autocorrect": True},  # 注音自動校正
     {"long_sentence": False},  # 長句選字加強 off ({} above: on, the default)
     {"cand_keys": "1234qweras", "cand_layout": "grid",  # other candidate keys, a grid (#23)

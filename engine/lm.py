@@ -339,6 +339,25 @@ class Scorer:
         i = int(np.searchsorted(cands, c))
         return int(scores[i]) if i < len(cands) and cands[i] == c else int(scores.min())
 
+    def among_score(self, before, ch, syllables):
+        """Q10 natural log probability of ch after before among the characters of these syllables together (#51: a
+        character of the syllable typed against one of the syllable 注音自動校正 read, at one place); one not among them
+        gets the lowest of theirs, no list at all 0."""
+        lists = [c for c in (self.candidates(s) for s in syllables) if c is not None]
+        if not lists:
+            return 0
+        key = (before, "|" + "|".join(syllables))  # (never char_score's key: that one keeps the scores alone)
+        hit = self.score_cache.get(key)
+        if hit is None:
+            cands = np.unique(np.concatenate(lists))
+            hit = (cands, self.lm.scores(self.state(before), cands))
+            self._room()
+            self.score_cache[key] = hit
+        cands, scores = hit
+        c = self.lm.ids.get(ch, 0)
+        i = int(np.searchsorted(cands, c))
+        return int(scores[i]) if i < len(cands) and cands[i] == c else int(scores.min())
+
     def syllable_mass_q16(self, before, syllable):
         """Q16 probability that the character after before (from the start of the run) is one of
         the syllable's (candidates, the unknown id 0 left out), over the whole vocabulary: how

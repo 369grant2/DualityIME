@@ -15,6 +15,7 @@ const Json& Config::defaults() {
         j["space"] = Json("half");           // "half" or "full" (　) when typing a space on its own
         j["full_width"] = Json(false);       // 全形 mode (Shift+Space)
         j["ctrl_full_punct"] = Json(true);   // Ctrl + a punctuation key types its full-width mark (Ctrl+, -> ，); a new name, see engine/config.py
+        j["symbols_stay_open"] = Json(false);  // 符號鍵盤選完不關 (#49): the symbol keyboard stays open, Esc / × close it
         j["preview"] = Json("keys_hint");    // unfinished syllable shows "keys" (su), the keys with "keys_hint" (ㄋㄧ under them) or "zhuyin" (ㄋㄧ)
         j["shift_toggle"] = Json(true);      // tapping Shift switches Chinese / English
         j["start_mode"] = Json("mixed");     // switching to the IME starts in "mixed" (中英混打) or "english"

@@ -1126,6 +1126,25 @@ STRONG_PICKS = 5   # picked this often (or in the personal dictionary), a homoph
 VARIANT_PAIR = -2.0  # ...into a cohesive word only beside a neighbour it precedes or follows this often in the
                      # corpus (log10: 她說 -1.63; not 字由 -2.88 for 自由, 現像 -2.35, 其她 -3.88)
 ORIG_FIRST = 3     # 注音自動校正 swapped a syllable: this many of what the keys typed spell come second in ↓
+SENTENCE_POOL = 12  # ...and this many characters of each syllable are put in the sentence to order them (#51),
+SENTENCE_RIGHT = 2  # ...the model reading this many characters after it: 40 and the whole run took 41 ms more to
+                    # open the list in a long sentence; these a tenth of that, the same order but for 1 case of 80
+                    # (docs/superpowers/items/51/rank_eval.py RANK_POOL, RANK_RIGHT)
+
+
+def merge_by_score(block, rest):
+    """block and rest ([(label, action, score)]) merged by score, each list's own order kept, block's first on a tie
+    (#51: what the keys typed among the characters of the syllable 注音自動校正 read)."""
+    merged, i, j = [], 0, 0
+    while i < len(block) or j < len(rest):
+        if j < len(rest) and (i >= len(block) or rest[j][2] > block[i][2]):
+            merged.append(rest[j])
+            j += 1
+        else:
+            merged.append(block[i])
+            i += 1
+    return merged
+
 KEPT = "kept"      # marks an override that keeps a character as it was around a pick, not picked itself
 BAR = (-1, 0)      # ...kept by a pick from the bar above the text, which leaves no override of its own:
                    # in place of the span of the pick, and kept until the text is sent or edited there
@@ -1718,6 +1737,7 @@ class Composer:
         """Forget everything, including what was typed before (focus change)."""
         self.context_word = None    # last Chinese phrase committed, for the bigram
         self.lm_context = ""        # 接續前文選字 (#37): the Chinese just sent (Traditional, the last LM_CONTEXT_MAX)
+        self._run_contexts = {}     # run start -> what the model read before it, as shown (_convert_all; #51)
         self.lm_units = ""          # ...the same as units (context_units: EN_MARK too), for a model that knows English
         self.after_english = False  # last commit ended with an English word
         self.commit = ""
@@ -1951,7 +1971,10 @@ class Composer:
     def _convert_all(self, overrides=None):
         """Convert each maximal run of zh tokens; returns per-syllable phrases. overrides:
         instead of the user's picks ({}: what it would be without them)."""
+        shown = overrides is None  # (what is shown: each run's context kept for the list, _sentence_order)
         overrides = self.overrides if overrides is None else overrides
+        if shown:
+            self._run_contexts = {}
         out = []  # list of (global start, length, phrase)
         run_start = 0
         idx = 0
@@ -1985,6 +2008,8 @@ class Composer:
                 earlier += gap.get(a, "")
             context = (self._run_context(out, earlier if en else None)) if lm is not None else ""
             run_lm = lm.view(context) if context else lm
+            if shown:
+                self._run_contexts[a] = context
             for s, l, p in convert(self.readings[a:b], self.lexicon, self.user, ov, self.bigram, prev, run_lm, alone):
                 out.append((a + s, l, p))
                 if en:
@@ -2171,7 +2196,9 @@ class Composer:
         """The single most likely continuation, shown next to the text: the rest
         of a remembered e-mail / English word, or the next Chinese character."""
         self.suggestions, self._sugg_actions, self.sugg_index = [], [], 0
-        if not self.config.completion or self.candidates or not self.raw or self.fill is not None:
+        # (nor while the symbol keyboard is up - kept open, #49: Tab and → are its own then, nothing to take it with)
+        if not self.config.completion or self.candidates or not self.raw or self.fill is not None or \
+                self.symbol_page is not None:
             return
         if self.caret is not None:
             return  # (only at the end, like the ASUS IME: in the middle the bar is up)
@@ -2692,39 +2719,45 @@ class Composer:
             if a <= s_ and s_ + l <= b and tuple(self.readings[s_:s_ + l]) == syllables and (s_, l) not in spans:
                 spans.append((s_, l))
         labels, actions, seen = [], [], set()
+        single = {}  # the characters of syllable t -> their scores (a syllable 注音自動校正 swapped, #51)
         for s_, l in spans:
-            for p, _ in phrase_candidates(self.readings[s_:s_ + l], self.lexicon, self.user, names=True):
+            for p, score in phrase_candidates(self.readings[s_:s_ + l], self.lexicon, self.user, names=True):
                 if p not in seen:
                     seen.add(p)
                     labels.append(self.lexicon.name_written.get(p, p))  # (a character's name with its ·: #14)
                     actions.append(("phrase", s_, l, p))
+                    if l == 1 and s_ == t:
+                        single[p] = score
+
         tok = [x for x in self.tokens if x.kind == "zh"][t]
-        if tok.corrected == "valid":
-            # 注音自動校正 swapped the syllable (xl3 read as 好 in 你好): what the keys typed spell
-            # (老) - the first ORIG_FIRST right after the first candidate (現 second at 信 in
-            # 台北市信義區, not after every ㄒㄧㄣˋ), the rest after the others; picked, they are read
-            # as typed from then on
-            mine = [p for p, _ in phrase_candidates([tok.orig], self.lexicon, self.user) if p not in seen]
-            seen.update(mine)
+        if tok.corrected in ("valid", "tone"):
+            # 注音自動校正 swapped the syllable (xl3 read as 好 in 你好): what the keys typed spell (老); or put a tone in
+            # (5k1u0: 這邊): the other tones of the keys typed (哲, 遮). Picked, they are read as typed / the syllable
+            # keeps that tone from then on (_refresh). (#51, the user 2026-11-17: 注音自動校正 may be wrong, but what the
+            # user typed must be easy to pick back - 寄 of ㄐㄧˋ came 47th, after every character of ㄐㄧˇ, 魕 and 㧗
+            # too.) The first ORIG_FIRST of them right after the first candidate (現 second at 信 in 台北市信義區), the
+            # rest among the syllable's characters: by how they read in the sentence with 長句選字加強 on
+            # (_sentence_order), else by their scores (merge_by_score)
+            if tok.corrected == "valid":
+                typed_readings = [tok.orig]
+                mine = [(p, s, tok.orig) for p, s in phrase_candidates([tok.orig], self.lexicon, self.user)]
+            else:
+                typed_readings = [r for r in self.table.toned_forms(tok.raw) if r != tok.value]
+                mine = []
+                for r in typed_readings:
+                    mine += [(p, s, r) for p, s in phrase_candidates([r], self.lexicon, self.user)]
+                mine.sort(key=lambda x: -x[1])  # (stable: a reading's own order stays)
+            mine = [(p, s, r) for p, s, r in mine if p not in seen and not seen.add(p)]
+            rest = [(p, ("exact", tok.start, t, p) if tok.corrected == "valid" else ("tone", t, r, p), s)
+                    for p, s, r in mine]
             pos = min(1, len(labels))
-            labels[pos:pos] = mine[:ORIG_FIRST]
-            actions[pos:pos] = [("exact", tok.start, t, p) for p in mine[:ORIG_FIRST]]
-            labels += mine[ORIG_FIRST:]
-            actions += [("exact", tok.start, t, p) for p in mine[ORIG_FIRST:]]
-        elif tok.corrected == "tone":
-            # 注音自動校正 put a tone in (5k1u0: 這邊): the other tones of the keys typed (哲, 遮),
-            # the most common placed as above; picked, the syllable keeps that tone (_refresh)
-            mine = []
-            for r in self.table.toned_forms(tok.raw):
-                if r != tok.value:
-                    mine += [(score, p, r) for p, score in phrase_candidates([r], self.lexicon, self.user)]
-            mine.sort(key=lambda x: -x[0])  # (stable: a reading's own order stays)
-            mine = [(p, r) for _, p, r in mine if p not in seen and not seen.add(p)]
-            pos = min(1, len(labels))
-            labels[pos:pos] = [p for p, _ in mine[:ORIG_FIRST]]
-            actions[pos:pos] = [("tone", t, r, p) for p, r in mine[:ORIG_FIRST]]
-            labels += [p for p, _ in mine[ORIG_FIRST:]]
-            actions += [("tone", t, r, p) for p, r in mine[ORIG_FIRST:]]
+            at = [i for i, act in enumerate(actions) if i >= pos and act[0] == "phrase" and act[1] == t and act[2] == 1]
+            lo, hi = (at[0], at[-1] + 1) if at else (len(labels), len(labels))
+            block = [(labels[i], actions[i], single[actions[i][3]]) for i in range(lo, hi)]
+            order = self._sentence_order(t, [self.readings[t]] + typed_readings, block, rest)
+            head, tail = order if order else (rest[:ORIG_FIRST], merge_by_score(block, rest[ORIG_FIRST:]))
+            labels = labels[:pos] + [x[0] for x in head] + labels[pos:lo] + [x[0] for x in tail] + labels[hi:]
+            actions = actions[:pos] + [x[1] for x in head] + actions[pos:lo] + [x[1] for x in tail] + actions[hi:]
         if tok.corrected:
             # and last, the keys as typed (si3): picked, they stay so
             keys = tok.raw.rstrip(" ")
@@ -2993,6 +3026,41 @@ class Composer:
             self.caret = None
             self._render()
 
+    def _sentence_order(self, t, syllables, block, rest):
+        """#51 with 長句選字加強 on: the characters of syllable t, which 注音自動校正 swapped, ordered by how they read in
+        the sentence - their score + the model's weight * its log10 probability of the run with the character put in
+        (at t among the characters of all syllables - the one read, those the keys typed - together: among_score;
+        the SENTENCE_RIGHT after it as convert reads them), after the context convert read the run after. (head, tail): the best ORIG_FIRST of what the keys typed (rest), then the
+        rest of both (block: the syllable read's) by that, SENTENCE_POOL of each; past those, by their scores. Measured
+        (docs/superpowers/items/51/rank_eval.py): what was typed came in the first 3 for 82.5% of the syllables swapped
+        by mistake, against 81.2%, and on the first page for 92.5%, against 81.2%; a right swap showing another
+        character gave its right one no later. None without the model, a run not one character a syllable, or nothing
+        typed to place."""
+        lm = self._lm()
+        run = next(((a, b) for a, b in self.runs if a <= t < b), None)
+        chars = _chars(self.segments)
+        mine = [x for x in rest if len(x[0]) == 1][:SENTENCE_POOL]
+        # (2: nothing typed left to place - every one of them listed already - leaves the syllable's own order alone)
+        if lm is None or run is None or not mine or any(k not in chars for k in range(*run)):
+            return None
+        a, b = run
+        context = self._run_contexts.get(a, "")  # (1: what convert read before the run - just sent, runs before)
+        lm = lm.view(context) if context else lm
+        text = "".join(chars[k] for k in range(a, b))
+        rds, i, w = self.readings[a:b], t - a, _lm_weight(lm)
+        read = [x for x in block if len(x[0]) == 1][:SENTENCE_POOL]
+        total = {}
+        for label, _, s in mine + read:
+            alt = text[:i] + label + text[i + 1:]
+            q = lm.among_score(text[:i], label, syllables) + \
+                sum(lm.char_score(alt[:k], alt[k], rds[k]) for k in range(i + 1, min(len(alt), i + 1 + SENTENCE_RIGHT)))
+            total[label] = s + w * (q / (1024 * LN10))
+        head = sorted(mine, key=lambda x: -total[x[0]])[:ORIG_FIRST]  # (stable: equal ones as they came)
+        taken = {x[0] for x in head}
+        both = sorted([x for x in mine + read if x[0] not in taken], key=lambda x: -total[x[0]])
+        pooled = {x[0] for x in mine + read}
+        return head, both + merge_by_score([x for x in block if x[0] not in pooled], [x for x in rest if x[0] not in pooled])
+
     def _shortcut_candidates(self):
         """快捷文字: the text typed at the end is a shortcut (or the start of
         one) from the 個人詞庫: offer what it stands for."""
@@ -3225,14 +3293,21 @@ class Composer:
         self.symbol_page = None
         self._suggest()
 
-    def _type_symbol(self, sym):
-        """The text typed so far goes out first, then the symbol (快速填入 closes too)."""
+    def _type_symbol(self, sym, stay=False):
+        """The text typed so far goes out first, then the symbol (快速填入 closes too); the symbol keyboard closes
+        unless stay (符號鍵盤選完不關, #49)."""
         self.fill = None
-        self.close_symbols()
+        if not stay:
+            self.close_symbols()
+        else:  # (something went out: no longer new, Space is a space - not 快速填入 - code-reviewer)
+            self.symbol_fresh = False
         before = ""
         if self.raw:
+            keep = (self.symbol_page, self.symbol_cursor)
             self._do_commit()
             before = self.commit
+            if stay:  # (sending clears the input, the keyboard with it)
+                self.symbol_page, self.symbol_cursor = keep
         self.context_word, self.after_english = None, False
         self._sent([sym])  # (its Chinese, if any, is what is right before the caret now: #37)
         self.commit = before + sym
@@ -3244,27 +3319,33 @@ class Composer:
         sym = PUNCT_KEYS.get(ch) or PUNCT.get(ch)
         if not sym:
             return False
-        self._type_symbol(sym)
+        self._type_symbol(sym, bool(self.config.symbols_stay_open))  # (#49: the symbol keyboard stays as it is)
         return True
 
     def _key_symbols(self, ch, special):
-        """Keys while the symbol keyboard is open: each key types its symbol; Space first opens 快速填入."""
+        """Keys while the symbol keyboard is open: each key types its symbol, Enter the one at the arrows' cursor,
+        Space a space (the user 2026-11-17: Space typed the cursor's symbol, odd); Space as the first key opens
+        快速填入. With 符號鍵盤選完不關 (#49) it stays open after each, Esc (or ×) closes it, and Backspace is the app's
+        (the text being typed first): else Backspace closes it."""
         fresh, self.symbol_fresh = self.symbol_fresh, False
         if fresh and ch == " ":
             self.close_symbols()
             self.open_fill()
             return True
+        stay = bool(self.config.symbols_stay_open)
         pages = len(symbols.PAGES)
         if ch == " ":
-            self._type_symbol(symbols.symbol(self.symbol_page, self.symbol_cursor))
+            self._type_symbol(FULL_SPACE if self.config.space == "full" or self.config.full_width else " ", stay)
         elif ch:
             i = symbols.key_index(ch)
             if i is not None:
-                self._type_symbol(symbols.symbol(self.symbol_page, i))
+                self._type_symbol(symbols.symbol(self.symbol_page, i), stay)
+        elif special == "BACK" and stay:
+            return self._key_special("BACK")  # (False with nothing typed: the app deletes a character)
         elif special in ("ESC", "BACK"):
             self.close_symbols()
         elif special == "ENTER":
-            self._type_symbol(symbols.symbol(self.symbol_page, self.symbol_cursor))
+            self._type_symbol(symbols.symbol(self.symbol_page, self.symbol_cursor), stay)
         elif special in ("TAB", "PGDN"):
             self.symbol_page = (self.symbol_page + 1) % pages
         elif special in ("STAB", "PGUP"):
@@ -4258,8 +4339,9 @@ class Composer:
         self.last_commit = None
         if self.fill is not None:  # (快速填入: a numpad digit narrows it like any other)
             return self._key_fill(ch, None)
-        if self.symbol_page is not None:
+        if self.symbol_page is not None and not self.config.symbols_stay_open:  # (#49: only Esc / x close it then)
             self.close_symbols()
+        self.symbol_fresh = False  # (kept open: no longer new)
         if self.candidates:
             self._close_candidates()
         if self.repl_index >= 0:  # it leaves the replacement bar (from the end: back there)

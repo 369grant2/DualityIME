@@ -40,9 +40,10 @@ ok {ENTER} => ok
 qu qo4{ENTER} => 批配
 qu qo4{HOME}{DOWN}2{ENTER} => 匹配
 qu qo4{ENTER} => 匹配
-# a tone put back, another tone picked in ↓ (者 著 哲 second to fourth); the rest goes with the new
+# a tone put back, another tone picked in ↓ (the best three of the other tones by the sentence second to fourth, #51:
+# 著 折 者, then 這 and 哲); the rest goes with the new
 # tone (有 at 遊行: 有形, not 有行)
-5k1u0 {HOME}{DOWN}4{ENTER} => 哲邊
+5k1u0 {HOME}{DOWN}6{ENTER} => 哲邊
 u.vu/6{HOME}{DOWN}2{ENTER} => 有形
 # ㄣ and ㄥ mixed up (#38): 因該 -> 應該, 星情 -> 心情; 因為 typed right stays
 up e9 {ENTER} => 應該
@@ -50,3 +51,6 @@ vu/ fu/6{ENTER} => 心情
 up jo4{ENTER} => 因為
 # ...英 picked on the swapped one, then ㄅㄢˋ typed (the sentence no longer swaps it): the pick stays
 up e9 {HOME}{DOWN}6{END}104{ENTER} => 英該辦
+# a swapped syllable lists what the keys typed among its own characters by how they read in the sentence (#51, reported
+# 2026-11-17: 寄個 came out 幾個 and 寄 was the 47th, after every ㄐㄧˇ): 寄 6th, by the sentence
+ji3ru0320 ru4ek7u.6ru04{LEFT}{LEFT}{LEFT}{LEFT}{DOWN}6{ENTER} => 我簡單寄個郵件

@@ -59,6 +59,8 @@ constexpr double SWAP_GAIN_NO_WORD = 3.5;  // log10: how much better the sentenc
                                            // spells something, but makes no word, for its neighbour's (老嗎 -> 好嗎)
 constexpr double SWAP_GAIN_NASAL = 2.0;  // ...and ㄣ/ㄥ or ㄢ/ㄤ the other way round (因該 -> 應該, #38)
 constexpr double SWAP_GAIN_WORD = 3.0;     // ...and one that makes a word of the dictionary (你老嗎 -> 你好嗎)
+constexpr size_t SENTENCE_POOL = 12;  // ...and this many characters of each syllable go in the sentence to order them (#51),
+constexpr size_t SENTENCE_RIGHT = 2;  // ...the model reading this many after it (engine/composer.py: the time it takes)
 constexpr size_t ORIG_FIRST = 3;  // 注音自動校正 swapped a syllable: this many of what the keys typed spell come second in ↓
 constexpr int SWAP_WINDOW = 3;             // syllables on each side of it that count (run_score)
 constexpr size_t RUN_SCORES_KEPT = 50000;  // run_score results kept across keys (then all dropped and started again)
@@ -1806,9 +1808,15 @@ ustr text_of(const std::vector<Segment>& path) {
 }
 
 // the weight (the model's own, a version 2 file, #41; else LM_WEIGHT) * the model's log10 probability of the text
-double lm_term(const LmScorer& lm, const ustr& text, const std::vector<ustr>& readings) {
+// the weight of the model's log10 probability: the model's own (a version 2 file, #41), else LM_WEIGHT (engine/composer.py
+// _lm_weight)
+static double lm_weight(const LmScorer& lm) {
     const double own = lm.model().lm_weight();
-    return (own >= 0 ? own : LM_WEIGHT) * (static_cast<double>(lm.text_score(text, readings)) / (1024 * LN10));
+    return own >= 0 ? own : LM_WEIGHT;
+}
+
+double lm_term(const LmScorer& lm, const ustr& text, const std::vector<ustr>& readings) {
+    return lm_weight(lm) * (static_cast<double>(lm.text_score(text, readings)) / (1024 * LN10));
 }
 
 // phrase occurs in the corpus far more often than its characters would meet by chance
@@ -2498,6 +2506,7 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     // convert each maximal run of zh tokens; instead: other picks than the user's ({}: what it
     // would be without them)
     const Overrides& overrides = instead ? *instead : overrides_;
+    if (!instead) run_contexts_.clear();  // (what is shown: each run's context kept for the list, #51)
     std::vector<Segment> out;
     std::vector<std::pair<int, int>> runs;
     int idx = 0, run_start = 0;
@@ -2538,6 +2547,7 @@ std::vector<Segment> Composer::convert_all(const Overrides* instead) {
         if (model) {
             ustr context = run_context(out, en ? &earlier : nullptr);
             if (!context.empty()) run_model = model->view(context);
+            if (!instead) run_contexts_[a] = context;
         }
         for (auto& seg : convert(part, lexicon_, &user, ov, bigram_, prev, run_model, alone)) {
             out.push_back(Segment{a + seg.start, seg.length, seg.phrase});
@@ -2778,7 +2788,8 @@ void Composer::suggest() {
     suggestions.clear();
     sugg_actions_.clear();
     sugg_index = 0;
-    if (!config.flag("completion") || !candidates.empty() || raw.empty() || fill_) return;
+    // (nor while the symbol keyboard is up - kept open, #49: Tab and → are its own then, nothing to take it with)
+    if (!config.flag("completion") || !candidates.empty() || raw.empty() || fill_ || symbol_page) return;
     if (caret_) return;  // (only at the end, like the ASUS IME: in the middle the bar is up)
     if (auto custom = custom_completion()) {
         const auto& units = user.custom_entries[custom->first].second;
@@ -3460,6 +3471,8 @@ void Composer::simplified_list() {
     cand_index = 0;
 }
 
+static std::map<int, char32_t> chars_of(const std::vector<Segment>& segments);  // (below; open_list reads it, #51)
+
 bool Composer::open_list() {
     cand_expanded = false;
     cand_first = 0;
@@ -3576,9 +3589,10 @@ bool Composer::open_list() {
             spans.emplace_back(s0, l);
     }
     std::unordered_set<ustr> seen;
+    std::unordered_map<ustr, double> single;  // the characters of syllable t -> their scores (a syllable 注音自動校正 swapped, #51)
     for (auto [s0, l] : spans) {
         std::vector<ustr> part(readings.begin() + s0, readings.begin() + s0 + l);
-        for (auto& [p, _] : phrase_candidates(part, lexicon_, &user, true)) {
+        for (auto& [p, score] : phrase_candidates(part, lexicon_, &user, true)) {
             if (seen.insert(p).second) {
                 const ustr* written = lexicon_.name_written(p);  // (a character's name with its ·: #14)
                 labels.push_back(written ? *written : p);
@@ -3588,12 +3602,11 @@ bool Composer::open_list() {
                 act.l = l;
                 act.text = p;
                 actions.push_back(act);
+                if (l == 1 && s0 == t) single.emplace(p, score);
             }
         }
     }
     {
-        // 注音自動校正 swapped the syllable (xl3 read as 好 in 你好): what the keys typed spell
-        // (老); picked, they are read as typed from then on
         const Token* tok = nullptr;
         int k = 0;
         for (auto& x : tokens)
@@ -3601,60 +3614,159 @@ bool Composer::open_list() {
                 tok = &x;
                 break;
             }
-        if (tok && tok->corrected == "valid") {
-            // (the first ORIG_FIRST right after the first candidate: 現 second at 信 in 台北市信義區,
-            // not after every ㄒㄧㄣˋ; the rest after the others)
-            std::vector<ustr> mine_labels;
-            std::vector<Action> mine;
-            for (auto& [p, _] : phrase_candidates({tok->orig}, lexicon_, &user)) {
-                if (seen.insert(p).second) {
-                    mine_labels.push_back(p);
-                    Action act;
+        if (tok && (tok->corrected == "valid" || tok->corrected == "tone")) {
+            // 注音自動校正 swapped the syllable (xl3 read as 好 in 你好): what the keys typed spell (老); or put a tone in
+            // (5k1u0: 這邊): the other tones of the keys typed (哲, 遮). Picked, they are read as typed / the syllable
+            // keeps that tone from then on (refresh). (#51: what the user typed must be easy to pick back.) The first
+            // ORIG_FIRST of them right after the first candidate (現 second at 信 in 台北市信義區), the rest among the
+            // syllable's characters: by how they read in the sentence with 長句選字加強 on, else by their scores
+            // (engine/composer.py _open_list, _sentence_order, merge_by_score)
+            struct Ranked {
+                ustr label;
+                Action act;
+                double score;
+            };
+            auto merge_by_score = [](const std::vector<Ranked>& block, const std::vector<Ranked>& rest) {
+                std::vector<Ranked> merged;
+                size_t i = 0, j = 0;
+                while (i < block.size() || j < rest.size()) {
+                    if (j < rest.size() && (i >= block.size() || rest[j].score > block[i].score))
+                        merged.push_back(rest[j++]);
+                    else
+                        merged.push_back(block[i++]);
+                }
+                return merged;
+            };
+            struct Typed {
+                ustr p;
+                double score;
+                ustr r;
+            };
+            std::vector<ustr> typed_readings;
+            std::vector<Typed> found;
+            if (tok->corrected == "valid") {
+                typed_readings.push_back(tok->orig);
+                for (auto& [p, score] : phrase_candidates({tok->orig}, lexicon_, &user)) found.push_back({p, score, tok->orig});
+            } else {
+                for (auto& r : table_.toned_forms(tok->raw))
+                    if (r != tok->value) typed_readings.push_back(r);
+                for (auto& r : typed_readings)
+                    for (auto& [p, score] : phrase_candidates({r}, lexicon_, &user)) found.push_back({p, score, r});
+                // (stable: a reading's own order stays)
+                std::stable_sort(found.begin(), found.end(), [](const Typed& x, const Typed& y) { return x.score > y.score; });
+            }
+            std::vector<Ranked> rest;
+            for (auto& f : found) {
+                if (!seen.insert(f.p).second) continue;
+                Action act;
+                act.s = t;
+                act.text = f.p;
+                if (tok->corrected == "valid") {
                     act.type = "exact";
                     act.start = tok->start;
-                    act.s = t;
-                    act.text = p;
-                    mine.push_back(act);
-                }
-            }
-            size_t pos = std::min<size_t>(1, labels.size());
-            size_t first = std::min(ORIG_FIRST, mine.size());
-            labels.insert(labels.begin() + pos, mine_labels.begin(), mine_labels.begin() + first);
-            actions.insert(actions.begin() + pos, mine.begin(), mine.begin() + first);
-            labels.insert(labels.end(), mine_labels.begin() + first, mine_labels.end());
-            actions.insert(actions.end(), mine.begin() + first, mine.end());
-        } else if (tok && tok->corrected == "tone") {
-            // 注音自動校正 put a tone in (5k1u0: 這邊): the other tones of the keys typed (哲, 遮),
-            // the most common placed as above; picked, the syllable keeps that tone (refresh)
-            struct Other {
-                double score;
-                ustr p, r;
-            };
-            std::vector<Other> others;
-            for (auto& r : table_.toned_forms(tok->raw))
-                if (r != tok->value)
-                    for (auto& [p, score] : phrase_candidates({r}, lexicon_, &user)) others.push_back({score, p, r});
-            // (stable: a reading's own order stays)
-            std::stable_sort(others.begin(), others.end(), [](const Other& x, const Other& y) { return x.score > y.score; });
-            std::vector<ustr> mine_labels;
-            std::vector<Action> mine;
-            for (auto& o : others) {
-                if (seen.insert(o.p).second) {
-                    mine_labels.push_back(o.p);
-                    Action act;
+                } else {
                     act.type = "tone";
-                    act.s = t;
-                    act.reading = o.r;
-                    act.text = o.p;
-                    mine.push_back(act);
+                    act.reading = f.r;
                 }
+                rest.push_back({f.p, act, f.score});
             }
             size_t pos = std::min<size_t>(1, labels.size());
-            size_t first = std::min(ORIG_FIRST, mine.size());
-            labels.insert(labels.begin() + pos, mine_labels.begin(), mine_labels.begin() + first);
-            actions.insert(actions.begin() + pos, mine.begin(), mine.begin() + first);
-            labels.insert(labels.end(), mine_labels.begin() + first, mine_labels.end());
-            actions.insert(actions.end(), mine.begin() + first, mine.end());
+            size_t lo = labels.size(), hi = labels.size();
+            bool any = false;
+            for (size_t i = pos; i < actions.size(); ++i)
+                if (actions[i].type == "phrase" && actions[i].s == t && actions[i].l == 1) {
+                    if (!any) lo = i;
+                    any = true;
+                    hi = i + 1;
+                }
+            std::vector<Ranked> block;
+            for (size_t i = lo; i < hi; ++i) block.push_back({labels[i], actions[i], single.at(actions[i].text)});
+            std::vector<ustr> syllables{readings[t]};
+            syllables.insert(syllables.end(), typed_readings.begin(), typed_readings.end());
+            std::vector<Ranked> head, tail;
+            // with the model: by the score + its weight * the model's log10 probability of the run with the character
+            // put in (at t among the characters of all those syllables together, each one after as convert reads it)
+            // (run: the run of t, found above; nothing typed left to place - every one listed already - leaves the
+            // syllable's own order alone)
+            const LmScorer* scorer = lm();
+            bool typed_single = false;
+            for (auto& x : rest)
+                if (x.label.size() == 1) typed_single = true;
+            ustr text;
+            bool sentence = scorer != nullptr && typed_single;
+            if (sentence) {  // (after the context convert read the run after: just sent, the runs before)
+                auto before = run_contexts_.find(run->first);
+                if (before != run_contexts_.end() && !before->second.empty()) scorer = scorer->view(before->second);
+            }
+            if (sentence) {
+                auto chars = chars_of(segments_);
+                for (int q = run->first; q < run->second && sentence; ++q) {
+                    auto it = chars.find(q);
+                    if (it == chars.end()) sentence = false;
+                    else text.push_back(it->second);
+                }
+            }
+            if (sentence) {
+                std::vector<ustr> rds(readings.begin() + run->first, readings.begin() + run->second);
+                size_t i = static_cast<size_t>(t - run->first);
+                double w = lm_weight(*scorer);
+                std::vector<Ranked> mine, read;
+                for (auto& x : rest)
+                    if (x.label.size() == 1 && mine.size() < SENTENCE_POOL) mine.push_back(x);
+                for (auto& x : block)
+                    if (x.label.size() == 1 && read.size() < SENTENCE_POOL) read.push_back(x);
+                std::unordered_map<ustr, double> total;
+                for (const auto* list : {&mine, &read})
+                    for (auto& x : *list) {
+                        ustr alt = text;
+                        alt[i] = x.label[0];
+                        int64_t q = scorer->among_score(text.substr(0, i), x.label[0], syllables);
+                        for (size_t j = i + 1; j < alt.size() && j <= i + SENTENCE_RIGHT; ++j)
+                            q += scorer->char_score(alt.substr(0, j), alt[j], rds[j]);
+                        total[x.label] = x.score + w * (static_cast<double>(q) / (1024 * LN10));
+                    }
+                auto by_total = [&](const Ranked& x, const Ranked& y) { return total.at(x.label) > total.at(y.label); };
+                std::vector<Ranked> by_sentence = mine;
+                std::stable_sort(by_sentence.begin(), by_sentence.end(), by_total);
+                head.assign(by_sentence.begin(), by_sentence.begin() + std::min(ORIG_FIRST, by_sentence.size()));
+                std::unordered_set<ustr> taken, pooled;
+                for (auto& x : head) taken.insert(x.label);
+                std::vector<Ranked> both;
+                for (const auto* list : {&mine, &read})
+                    for (auto& x : *list) {
+                        pooled.insert(x.label);
+                        if (!taken.count(x.label)) both.push_back(x);
+                    }
+                std::stable_sort(both.begin(), both.end(), by_total);
+                std::vector<Ranked> left_block, left_rest;
+                for (auto& x : block)
+                    if (!pooled.count(x.label)) left_block.push_back(x);
+                for (auto& x : rest)
+                    if (!pooled.count(x.label)) left_rest.push_back(x);
+                tail = both;
+                auto more = merge_by_score(left_block, left_rest);
+                tail.insert(tail.end(), more.begin(), more.end());
+            } else {
+                size_t first = std::min(ORIG_FIRST, rest.size());
+                head.assign(rest.begin(), rest.begin() + first);
+                tail = merge_by_score(block, std::vector<Ranked>(rest.begin() + first, rest.end()));
+            }
+            std::vector<ustr> new_labels(labels.begin(), labels.begin() + pos);
+            std::vector<Action> new_actions(actions.begin(), actions.begin() + pos);
+            for (auto& x : head) {
+                new_labels.push_back(x.label);
+                new_actions.push_back(x.act);
+            }
+            new_labels.insert(new_labels.end(), labels.begin() + pos, labels.begin() + lo);
+            new_actions.insert(new_actions.end(), actions.begin() + pos, actions.begin() + lo);
+            for (auto& x : tail) {
+                new_labels.push_back(x.label);
+                new_actions.push_back(x.act);
+            }
+            new_labels.insert(new_labels.end(), labels.begin() + hi, labels.end());
+            new_actions.insert(new_actions.end(), actions.begin() + hi, actions.end());
+            labels = std::move(new_labels);
+            actions = std::move(new_actions);
         }
         if (tok && !tok->corrected.empty()) {
             // and last, the keys as typed (si3): picked, they stay so
@@ -4390,14 +4502,18 @@ void Composer::close_symbols() {
     suggest();
 }
 
-void Composer::type_symbol(const ustr& sym) {
-    // the text typed so far goes out first, then the symbol (快速填入 closes too)
+void Composer::type_symbol(const ustr& sym, bool stay) {
+    // the text typed so far goes out first, then the symbol (快速填入 closes too); the symbol keyboard closes unless stay
+    // (符號鍵盤選完不關, #49)
     fill_.reset();
-    close_symbols();
+    if (!stay) close_symbols();
+    else symbol_fresh_ = false;  // (something went out: no longer new, Space is a space - not 快速填入)
     ustr before;
     if (!raw.empty()) {
+        auto keep = std::make_pair(symbol_page, symbol_cursor);
         do_commit();
         before = commit;
+        if (stay) std::tie(symbol_page, symbol_cursor) = keep;  // (sending clears the input, the keyboard with it)
     }
     context_word_.reset();
     after_english_ = false;
@@ -4413,15 +4529,20 @@ bool Composer::key_symbols(std::optional<char32_t> ch, const std::string& specia
         open_fill();
         return true;
     }
+    // Enter types the symbol at the arrows' cursor, Space a space (the user 2026-11-17); with 符號鍵盤選完不關 (#49) it
+    // stays open, Esc (or ×) closes it and Backspace is the app's (the text being typed first) - engine/composer.py
+    bool stay = config.flag("symbols_stay_open");
     int pages = static_cast<int>(symbols::page_count());
     if (ch && *ch == ' ') {
-        type_symbol(symbols::symbol(*symbol_page, symbol_cursor));
+        type_symbol(config.text("space") == "full" || config.flag("full_width") ? FULL_SPACE : U" ", stay);
     } else if (ch) {
-        if (auto i = symbols::key_index(*ch)) type_symbol(symbols::symbol(*symbol_page, *i));
+        if (auto i = symbols::key_index(*ch)) type_symbol(symbols::symbol(*symbol_page, *i), stay);
+    } else if (special == "BACK" && stay) {
+        return key_special("BACK");  // (false with nothing typed: the app deletes a character)
     } else if (special == "ESC" || special == "BACK") {
         close_symbols();
     } else if (special == "ENTER") {
-        type_symbol(symbols::symbol(*symbol_page, symbol_cursor));
+        type_symbol(symbols::symbol(*symbol_page, symbol_cursor), stay);
     } else if (special == "TAB" || special == "PGDN") {
         symbol_page = (*symbol_page + 1) % pages;
     } else if (special == "STAB" || special == "PGUP") {
@@ -5828,7 +5949,7 @@ bool Composer::type_full_punct(char32_t ch) {
     if (sym.empty())
         if (auto b = PUNCT().find(k); b != PUNCT().end()) sym = b->second;
     if (sym.empty()) return false;
-    type_symbol(sym);
+    type_symbol(sym, config.flag("symbols_stay_open"));  // (#49: the symbol keyboard stays as it is)
     return true;
 }
 
@@ -5837,7 +5958,8 @@ bool Composer::type_literal(char32_t ch) {
     commit.clear();
     last_commit_.reset();
     if (fill_) return key_fill(ch, "");  // (快速填入: a numpad digit narrows it like any other)
-    if (symbol_page) close_symbols();
+    if (symbol_page && !config.flag("symbols_stay_open")) close_symbols();  // (#49: only Esc / x close it then)
+    symbol_fresh_ = false;  // (kept open: no longer new)
     if (!candidates.empty()) close_candidates();
     if (repl_index >= 0) {  // it leaves the replacement bar (from the end: back there)
         repl_index = -1;

@@ -93,6 +93,9 @@ ji3, => 我,
 # the symbol keyboard: ` then a key types the symbol on it
 `1 => 1
 `q => 《
+# ...Enter the symbol at the arrows' cursor, Space a space (#49: it typed the cursor's symbol)
+`{RIGHT}{ENTER} => 2
+ab`{RIGHT} cd{ENTER} => ab cd
 # Shift+` is ~, as any other symbol key (only ` opens the keyboard)
 ~{ESC} => ~
 su3cl3~{ENTER} => 你好~

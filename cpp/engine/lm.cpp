@@ -426,6 +426,37 @@ int64_t LmScorer::char_score(const ustr& before, char32_t ch, const ustr& syllab
     return *std::min_element(scores.begin(), scores.end());
 }
 
+int64_t LmScorer::among_score(const ustr& before, char32_t ch, const std::vector<ustr>& syllables) const {
+    // (#51) ch among the characters of these syllables together (engine/lm.py Scorer.among_score)
+    std::vector<int> cands;
+    ustr key = before;
+    key.push_back(U'\0');
+    key.push_back(U'|');  // (never char_score's key, as engine/lm.py)
+    bool any = false;
+    for (size_t k = 0; k < syllables.size(); ++k) {
+        if (k) key.push_back(U'|');
+        key += syllables[k];
+        if (const std::vector<int>* c = candidates(syllables[k])) {
+            cands.insert(cands.end(), c->begin(), c->end());
+            any = true;
+        }
+    }
+    if (!any) return 0;
+    std::sort(cands.begin(), cands.end());
+    cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
+    auto it = score_cache_.find(key);
+    if (it == score_cache_.end()) {
+        std::vector<int64_t> scores = lm_.scores(state(before), cands);
+        room();
+        it = score_cache_.emplace(std::move(key), std::move(scores)).first;
+    }
+    const std::vector<int64_t>& scores = it->second;
+    int c = lm_.id(ch);
+    auto at = std::lower_bound(cands.begin(), cands.end(), c);
+    if (at != cands.end() && *at == c) return scores[at - cands.begin()];
+    return *std::min_element(scores.begin(), scores.end());
+}
+
 int64_t LmScorer::syllable_mass_q16(const ustr& before, const ustr& syllable) const {
     ustr key = before;
     key.push_back(U'\0');

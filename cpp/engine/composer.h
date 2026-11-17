@@ -277,7 +277,7 @@ private:
     void splits(int begin, int end, const std::set<int>& unlit, const std::set<int>& unforce, std::optional<int> skip,
                 std::vector<ustr>& labels, std::vector<Action>& actions) const;
     void open_symbols();
-    void type_symbol(const ustr& sym);
+    void type_symbol(const ustr& sym, bool stay = false);
     bool key_symbols(std::optional<char32_t> ch, const std::string& special);
     bool key_fill(std::optional<char32_t> ch, const std::string& special);
     std::vector<std::pair<ustr, ustr>> fill_matches() const;
@@ -390,6 +390,7 @@ private:
     std::map<int, ustr> plain_chars_;  // syllable -> its character as chosen, Traditional (suggest)
     std::map<int, ustr> plain_by_start_;  // zh token start -> its character as chosen (Traditional)
     std::vector<std::pair<int, int>> runs_;
+    std::map<int, ustr> run_contexts_;  // run start -> what the model read before it, as shown (convert_all; #51)
 };
 
 }  // namespace sz

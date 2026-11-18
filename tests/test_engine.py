@@ -655,13 +655,38 @@ class SymbolKeyboardTest(Base):
         self.assertEqual(c.commit, "》")
 
     def test_symbol_after_text_being_typed(self):
+        # (#52, a user 2026-11-17: the symbol sent what was before it, fixing its words; it joins it now, like a mark
+        # typed there, and all goes out with Enter)
         c = self.c
         for ch in "su3cl3":
             c.key(ch)
         c.key("`")
         c.key("f")
+        self.assertEqual((c.commit, c.composition, c.symbol_page), ("", "你好●", None))
+        c.key(special="ENTER")
         self.assertEqual(c.commit, "你好●")
-        self.assertEqual(c.composition, "")
+
+    def test_a_space_in_the_text_is_one_between_words(self):
+        # (code-reviewer: after a space joined from the keyboard a remembered address read as Chinese, no hint - as
+        # after Space itself, a word starts there: #54)
+        c = self.c
+        c.user.learn_word("fu6u@example.com")
+        self.press(*"hello", "`", "RIGHT", " ", *"fu6u")
+        self.assertEqual((c.composition, c.suggestions), ("hello fu6u", ["@example.com"]))
+        self.press("ESC")
+        self.press(*"hello", " ", *"fu6u")  # (the same as Space itself)
+        self.assertEqual((c.composition, c.suggestions), ("hello fu6u", ["@example.com"]))
+
+    def test_symbol_in_the_text_stays_open_with_the_setting(self):
+        # (#52 with 符號鍵盤選完不關: each symbol joins the text, the keyboard stays; Esc closes it, Enter sends all)
+        c = self.c
+        c.config.values = dict(DEFAULTS, symbols_stay_open=True)
+        self.press(*keys("ㄋㄧˇ"), "`", "a", "f")
+        self.assertEqual((c.commit, c.composition, c.symbol_page), ("", "你※●", 0))
+        self.press("ESC")
+        self.assertEqual((c.composition, c.symbol_page), ("你※●", None))
+        self.press("ENTER")
+        self.assertEqual(c.commit, "你※●")
 
     def test_space_types_a_space(self):
         # (#49, the user 2026-11-17: Space typed the symbol at the arrows' cursor - odd; a space, as anywhere, full
@@ -677,7 +702,9 @@ class SymbolKeyboardTest(Base):
         self.press("`", " ")
         self.assertIsNotNone(c.fill_shown())
         self.press("ESC", *keys("ㄨㄛˇ"), "`", "RIGHT", " ")
-        self.assertEqual(c.commit, "我 ")  # (what is being typed goes out first)
+        self.assertEqual((c.commit, c.composition), ("", "我 "))  # (it joins what is being typed too: #52)
+        self.press("ENTER")
+        self.assertEqual(c.commit, "我 ")
 
     def test_backspace_closes_the_keyboard(self):
         c = self.c
@@ -753,7 +780,9 @@ class SymbolKeyboardTest(Base):
         self.assertEqual((c.composition, c.symbol_page), ("你", 0))
         self.assertEqual(c.suggestions, [])  # (none while the keyboard is up: Tab is its own - /code-review)
         self.press("a")
-        self.assertEqual((c.commit, c.symbol_page), ("你※", 0))
+        self.assertEqual((c.commit, c.composition, c.symbol_page), ("", "你※", 0))  # (#52: it joins the text)
+        self.assertTrue(c.key(special="BACK"))  # (right after: the symbol goes - the user 2026-11-17)
+        self.assertEqual((c.composition, c.symbol_page), ("你", 0))
 
     def test_backtick_after_an_english_word_opens_the_keyboard(self):
         # ` opens the symbol keyboard anywhere; twice types a ` (`code` in Markdown or Discord)
@@ -761,9 +790,9 @@ class SymbolKeyboardTest(Base):
         for ch in "hello`":
             c.key(ch)
         self.assertEqual(c.symbol_page, 0)
-        c.key("`")  # (a symbol from the keyboard goes out with the text before it)
+        c.key("`")  # (a symbol from the keyboard joins the text before it: #52)
         self.assertIsNone(c.symbol_page)
-        self.assertEqual(c.commit, "hello`")
+        self.assertEqual((c.commit, c.composition), ("", "hello`"))
 
     def test_tilde_inside_an_english_word_is_typed(self):
         c = self.c
@@ -2734,14 +2763,15 @@ class QuickFillTest(unittest.TestCase):
         self.assertEqual(c.composition, "我")
 
     def test_full_punct_closes(self):
-        # (Ctrl + a punctuation key: the mark goes out after what is typed, and the list closes)
+        # (Ctrl + a punctuation key: the mark joins what is typed (#52), and the list closes)
         c = self.c
         for ch in keys("ㄨㄛˇ"):
             c.key(ch)
         self.press("`", " ")
         self.assertTrue(c.type_full_punct(","))
         self.assertIsNone(c.fill_shown())
-        self.assertEqual(c.commit, "我，")
+        self.assertEqual((c.commit, c.composition), ("", "我，"))
+        self.press("ENTER")
         self.press("`", " ")  # (nothing typed)
         self.assertTrue(c.type_full_punct(","))
         self.assertIsNone(c.fill_shown())
@@ -4625,13 +4655,217 @@ class CtrlPunctuationTest(Base):
             self.assertTrue(c.type_full_punct(key), key)
             self.assertEqual(c.commit, mark)
 
-    def test_the_text_being_typed_goes_out_first(self):
+    def press(self, *seq):
+        for k in seq:
+            self.c.key(k) if len(k) == 1 else self.c.key(special=k)
+
+    def test_the_mark_joins_the_text_being_typed(self):
+        # (#52, a user 2026-11-17: Ctrl + a mark sent what was before it, fixing its words; it joins it now, like a
+        # mark typed there: what is typed after it goes with it, Enter sends all)
         c = self.c
-        for ch in "su3":
-            c.key(ch)
+        self.press("s", "u", "3")
         self.assertTrue(c.type_full_punct(","))
-        self.assertEqual(c.commit, "你，")
-        self.assertEqual(c.composition, "")
+        self.assertEqual((c.commit, c.composition), ("", "你，"))
+        self.press("c", "l", "3")
+        self.assertEqual((c.commit, c.composition), ("", "你，好"))
+        self.press("ENTER")
+        self.assertEqual(c.commit, "你，好")
+
+    def test_the_words_before_the_mark_can_still_be_picked(self):
+        c = self.c
+        self.press("s", "u", "3")
+        c.type_full_punct(",")
+        self.press("HOME", "DOWN")
+        self.assertIn("妳", c.candidates)
+        for _ in range(c.candidates.index("妳")):
+            self.press("DOWN")
+        self.press("ENTER")
+        self.assertEqual((c.commit, c.composition), ("", "妳，"))
+
+    def test_backspace_right_after_deletes_the_mark(self):
+        # (the user 2026-11-17: Backspace right after takes the mark back, nothing else)
+        c = self.c
+        self.press("s", "u", "3")
+        c.type_full_punct(".")
+        self.assertEqual(c.composition, "你。")
+        self.assertTrue(c.key(special="BACK"))
+        self.assertEqual((c.commit, c.composition), ("", "你"))
+
+    def test_the_mark_goes_in_at_the_caret(self):
+        c = self.c
+        self.press("s", "u", "3", "c", "l", "3", "LEFT")
+        c.type_full_punct(",")
+        self.assertEqual(c.composition, "你，好")
+        self.press("j", "i", "3")  # (typed on at the caret: after the mark, before 好)
+        self.assertEqual(c.composition, "你，我好")
+
+    def test_a_pick_after_the_caret_stays(self):
+        # (/code-review 2026-11-18, the user chose to fix it: 你郝 -> 你，好 lost the pick; the mark is no syllable)
+        c = self.c
+        self.press("s", "u", "3", "c", "l", "3", "LEFT", "DOWN")
+        self.assertIn("郝", c.candidates)
+        for _ in range(c.candidates.index("郝")):
+            self.press("DOWN")
+        self.press("ENTER")
+        self.assertEqual(c.composition, "你郝")
+        self.press("HOME", "RIGHT")
+        c.type_full_punct(",")
+        self.assertEqual(c.composition, "你，郝")
+        self.press("ENTER")
+        self.assertEqual(c.commit, "你，郝")
+
+    def test_a_pick_across_the_mark_is_let_go(self):
+        # (a pick never reaches across what is no syllable: a word picked whole, the mark put in its middle)
+        c = self.c
+        self.press(*"ji3ap7vu0 fm4t z04")
+        self.press("LEFT", "LEFT", "DOWN")
+        self.assertIn("喫飯", c.candidates)
+        for _ in range(c.candidates.index("喫飯")):
+            self.press("DOWN")
+        self.press("ENTER")
+        self.assertEqual(c.composition, "我們先去喫飯")
+        self.assertIn((4, 2), c.overrides)
+        self.press("END", "LEFT")
+        c.type_full_punct(",")
+        self.assertNotIn((4, 2), c.overrides)
+        self.assertEqual(c.composition[-2], "，")
+
+    def test_a_pick_follows_its_keys_when_what_is_before_reads_otherwise(self):
+        # (code-reviewer: before the mark the keys are read on their own - 一 turns English u4 - so the syllables after
+        # it get other numbers; the pick stays on its character, not the next 這)
+        c = self.c
+        self.press(*"theisu45k45k4")
+        self.assertEqual(c.composition, "theis一這這")
+        self.press("END", "LEFT", "LEFT", "DOWN")
+        for _ in range(c.candidates.index("蔗")):
+            self.press("DOWN")
+        self.press("ENTER")
+        self.assertEqual(c.composition, "theis一蔗這")
+        self.press("HOME", *["RIGHT"] * 6)
+        c.type_full_punct(",")
+        self.assertEqual(c.composition, "theisu4，蔗這")
+
+    def test_what_tab_replaced_is_not_brought_back_across_the_mark(self):
+        # (code-reviewer: 私鑰 picked, Tab made it 私鑰匙; the mark after 私, then Backspace: 私鑰 was learned)
+        c = self.c
+        c.config.values = dict(DEFAULTS, long_sentence=False)
+        c.settings_changed()
+        self.press(*keys("ㄙ ㄧㄠˋ"), "HOME", "DOWN")
+        for _ in range(c.candidates.index("私鑰")):
+            self.press("DOWN")
+        self.press("ENTER", "END", "TAB")
+        self.assertEqual(c.composition, "私鑰匙")
+        self.press("HOME", "RIGHT")
+        c.type_full_punct(",")
+        self.assertEqual(c.composition, "私，鑰匙")
+        self.press("END", "BACK", "ENTER")
+        self.assertFalse(any("私鑰" in v for v in c.user.phrases.values()))
+
+    def test_what_tab_replaced_before_the_mark_still_comes_back(self):
+        # (code-reviewer: 私鑰, Tab 私鑰匙, the mark at the end, Backspace twice - the mark, then 匙: 私鑰 again)
+        c = self.c
+        c.config.values = dict(DEFAULTS, long_sentence=False)
+        c.settings_changed()
+        self.press(*keys("ㄙ ㄧㄠˋ"), "HOME", "DOWN")
+        for _ in range(c.candidates.index("私鑰")):
+            self.press("DOWN")
+        self.press("ENTER", "END", "TAB")
+        c.type_full_punct(",")
+        self.assertEqual(c.composition, "私鑰匙，")
+        self.press("BACK", "BACK")
+        self.assertEqual(c.composition, "私鑰")
+
+    def test_taking_the_mark_out_keeps_the_picks_after_it(self):
+        # (code-reviewer: Ctrl+, in the wrong place, Backspace to take it back - 我，郝 went back to 我好)
+        c = self.c
+        for take in (("BACK",), ("LEFT", "DEL")):
+            c.reset()
+            self.press(*"ji3cl3", "LEFT", "DOWN")
+            for _ in range(c.candidates.index("郝")):
+                self.press("DOWN")
+            self.press("ENTER", "HOME", "RIGHT")
+            c.type_full_punct(",")
+            self.assertEqual(c.composition, "我，郝")
+            self.press(*take)
+            self.assertEqual(c.composition, "我郝", take)
+
+    def test_a_mainland_word_picked_after_the_caret_stays(self):
+        # (code-reviewer: 簡體輸出's picks are kept apart from the others - 你软件 became 你，软体)
+        c = self.c
+        c.toggle_simplified()
+        self.press(*"su3bj03wu3", "END", "LEFT", "LEFT", "DOWN")
+        for _ in range(c.candidates.index("软件")):
+            self.press("DOWN")
+        self.press("ENTER")
+        self.assertEqual(c.composition, "你软件")
+        self.press("HOME", "RIGHT")
+        c.type_full_punct(",")
+        self.assertEqual(c.composition, "你，软件")
+
+    def test_a_mark_key_before_the_symbol_is_a_mark(self):
+        # (code-reviewer: , right after Chinese, then Ctrl+. - the , stayed ㄝ / half-width: 我,。 with full-width marks)
+        c = self.c
+        c.config.values = dict(DEFAULTS, punctuation="full")
+        c.settings_changed()
+        self.press(*"ji3,")
+        c.type_full_punct(".")
+        self.press("ENTER")
+        self.assertEqual(c.commit, "我，。")
+
+    def test_a_mark_key_first_after_chinese_sent_is_a_mark(self):
+        # (code-reviewer: at the start it reads what was just sent - 我 sent, then , + Ctrl+. was ,。)
+        c = self.c
+        c.config.values = dict(DEFAULTS, punctuation="full")
+        c.settings_changed()
+        self.press(*"ji3", "ENTER", ",")
+        c.type_full_punct(".")
+        self.press("ENTER")
+        self.assertEqual(c.commit, "，。")
+
+    def test_a_mark_key_after_a_symbol_is_a_mark(self):
+        # (code-reviewer: 我， + , + Enter was 我，, - as , typed twice it is 我，，)
+        c = self.c
+        c.config.values = dict(DEFAULTS, punctuation="full")
+        c.settings_changed()
+        self.press(*"ji3")
+        c.type_full_punct(",")
+        self.press(",", "ENTER")
+        self.assertEqual(c.commit, "我，，")
+
+    def test_a_mark_key_after_an_ascii_symbol_is_as_typed(self):
+        # (code-reviewer: a digit from the symbol keyboard, then , at the end: as 1 typed, 1, - not 1，)
+        c = self.c
+        c.config.values = dict(DEFAULTS, punctuation="full")
+        c.settings_changed()
+        self.press(*"ji3", "`", "1", ",", "ENTER")
+        self.assertEqual(c.commit, "我1,")
+        # (an ASCII symbol is a mark, as typed: ji3=, is 我=，)
+        self.press(*"ji3", "`", "=", ",", "ENTER")
+        self.assertEqual(c.commit, "我=，")
+
+    def test_the_bar_offers_nothing_on_the_mark(self):
+        # (its key is none the user typed: nothing to read it back as, like the · of a name)
+        c = self.c
+        self.press("s", "u", "3")
+        c.type_full_punct(",")
+        self.press("c", "l", "3", "LEFT", "LEFT")
+        self.assertEqual(c.replacements, [])
+        self.press("UP")
+        self.assertEqual((c.repl_index, c.composition), (-1, "你，好"))
+
+    def test_the_mark_with_the_list_open_in_the_middle_goes_at_the_end(self):
+        # (code-reviewer: at the caret it went before the character being picked - ，你好)
+        c = self.c
+        self.press("s", "u", "3", "c", "l", "3", "HOME", "DOWN")
+        self.assertTrue(c.candidates)
+        c.type_full_punct(",")
+        self.assertEqual((c.composition, c.candidates, c.caret), ("你好，", [], None))
+
+    def test_nothing_typed_sends_the_mark(self):
+        # (the user 2026-11-17: with nothing being typed it goes out right away, as before)
+        c = self.c
+        self.assertTrue(c.type_full_punct(","))
+        self.assertEqual((c.commit, c.composition), ("，", ""))
 
     def test_other_keys_are_left_to_the_app(self):
         # letters, digits, and - = (zoom in browsers) stay shortcuts

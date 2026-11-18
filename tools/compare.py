@@ -161,6 +161,28 @@ CASES = [
     # 齊 picked before 一個 (typed ㄍㄜˋ, the dictionary's is ㄍㄜ˙) three times: no 齊一個 (星期一個 stays)
     ("ji3gji fu6u ek4xk7{HOME}{RIGHT}{RIGHT}{DOWN}{DOWN}{DOWN}{ENTER}{ENTER}" * 3) + "vu/ fu6u ek4{ENTER}",
     "su3{^,}cl3{^.}", "{^?}{^[}hello{^]}{^a}{^-}", "hello``", "hello`1", "abc~", "su3`{ESC}",
+    # Ctrl + a mark and the symbol keyboard join the text being typed (#52): at the caret, Backspace right after takes
+    # it back, the bar offers nothing on it, the words before it can still be picked (and are learned with Enter)
+    "su3cl3{LEFT}{^,}ji3{ENTER}", "su3{^,}{BACK}cl3{ENTER}", "su3{^,}cl3{LEFT}{LEFT}{UP}{DOWN}{ESC}{ENTER}",
+    "su3{^,}{HOME}{DOWN}{DOWN}{ENTER}{ENTER}su3{ENTER}", "hello{^,}world{^.}{ENTER}", "1234{^,}5{^,}{^.}{ENTER}",
+    "ji3`{RIGHT} su3`f{ENTER}", "su3cl3{LEFT}`f{ENTER}", "vu0 cjo6ru8 vu3yl3{^,}y94fm4d042u04u/3{^.}{ENTER}",
+    "gj{^,}bj4{ENTER}", "su3{^,}{ESC}cl3{ENTER}", "su3{^,}{HOME}{DOWN}2{ENTER}su3{ENTER}",
+    "ji3ap7vu0 fm4t z04{^,}{LEFT}{LEFT}{LEFT}{DOWN}2{END}y94fm4d042u04u/3{ENTER}", "su3`f{BACK}cl3{ENTER}",
+    "hello`{RIGHT} kazu{TAB}{ENTER}", "hello`{RIGHT} fu6u", "su3cl3{HOME}{DOWN}{^,}cl3{ENTER}",
+    # (a pick after the caret stays, one across the mark is let go: /code-review)
+    "ji3cl3{LEFT}{DOWN}2{HOME}{RIGHT}{^,}{ENTER}", "ji3ap7vu0 fm4t z04{LEFT}{LEFT}{DOWN}2{END}{LEFT}{^,}{ENTER}",
+    "ji3ap7vu0 fm4t z04{LEFT}{LEFT}{DOWN}6{END}{LEFT}{^,}{ENTER}",
+    # (the picks follow their keys: before the mark 一 turns English; what Tab replaced comes back only from before the
+    # mark - code-reviewer)
+    "theisu45k45k4{END}{LEFT}{LEFT}{DOWN}2{HOME}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{^,}{ENTER}",
+    "n ul4{HOME}{DOWN}1{END}{TAB}{HOME}{RIGHT}{^,}{END}{BACK}{ENTER}",
+    "n ul4{HOME}{DOWN}1{END}{TAB}{^,}{BACK}{BACK}{ENTER}",
+    # (taking the mark out keeps the picks after it; 簡體輸出's picks follow their keys; a , before it is a mark - code-reviewer)
+    "ji3cl3{LEFT}{DOWN}2{HOME}{RIGHT}{^,}{BACK}{ENTER}", "ji3cl3{LEFT}{DOWN}2{HOME}{RIGHT}{^,}{LEFT}{DEL}{ENTER}",
+    "ji3ap7vu0 fm4t z04{LEFT}{LEFT}{DOWN}2{HOME}{RIGHT}{RIGHT}{^,}{BACK}{ENTER}",
+    "{SC}su3bj03wu3{DOWN}1{HOME}{RIGHT}{^,}{ENTER}{SC}", "ji3,{^.}{ENTER}", "ji3cl3.{^?}{ENTER}", "ji3,`f{ENTER}",
+    "ji3{ENTER},{^.}{ENTER}", "ji3{^,},{ENTER}", "ji3{^,},{^.}{ENTER}", "ji3`f,{ENTER}", "ji3`{RIGHT} ,{ENTER}",
+    "ji3`1,{ENTER}", "hello`=,{ENTER}", "ji3`=,{ENTER}", "ji3`-.{ENTER}", "ji3=,{ENTER}",
     "g4{DOWN}{RIGHT}{RIGHT}{DOWN}{LEFT}{UP}{LEFT}{ESC}{ESC}", "g4{DOWN}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{PGDN}{PGUP}2",
     "u4{DOWN}{RIGHT}{PGDN}{PGDN}{PGDN}{PGDN}{PGDN}{PGDN}{PGDN}{RIGHT}{ENTER}{ENTER}", "fu,6{DOWN}{RIGHT}{RIGHT}{ENTER}",
     "/continue{ENTER}/continue{ENTER}/con{TAB}{ENTER}", "/usr/bin{ENTER}/usr/bin{ENTER}/us", "//comment{ENTER}",

@@ -2,6 +2,7 @@
 // to characters, and the key-handling state machine. A line-by-line port of
 // engine/composer.py; tools/compare.py checks both give the same results.
 #pragma once
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -284,7 +285,12 @@ private:
     void splits(int begin, int end, const std::set<int>& unlit, const std::set<int>& unforce, std::optional<int> skip,
                 std::vector<ustr>& labels, std::vector<Action>& actions) const;
     void open_symbols();
-    void type_symbol(const ustr& sym, bool stay = false);
+    void type_symbol(const ustr& sym, bool stay = false, bool join = false);
+    void join_symbol(const ustr& sym);
+    void ready_for_key(bool to_end = false);
+    void keep_picks_around(int at, const std::function<void()>& edit);
+    void marks_before_symbols();
+    int insert_key(const std::string& key);
     bool key_symbols(std::optional<char32_t> ch, const std::string& special);
     bool key_fill(std::optional<char32_t> ch, const std::string& special);
     std::vector<std::pair<ustr, ustr>> fill_matches() const;

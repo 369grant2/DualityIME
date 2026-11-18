@@ -146,6 +146,12 @@ class Token:
         return f"{self.kind}:{self.value!r}"
 
 
+def _joined_space(tok):
+    """A space joined from the symbol keyboard (#52): one between words, a word starts after it (the tokenizer, the
+    completions: code-reviewer)."""
+    return tok.kind == "fix" and tok.value in (" ", FULL_SPACE)
+
+
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
              taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False, starts=False):
@@ -175,7 +181,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                                breaks, exact, True, starts)
         return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
                                   lit_keys) if table.autocorrect else tokens
-    tokens, start = [], 0
+    tokens, start, spaced = [], 0, False
     for a, b, text in cuts + [(len(raw), len(raw), None)]:
         if a < start:
             continue  # (overlapping cuts: the first one wins)
@@ -185,10 +191,11 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                                  after_english and start == 0, digits_as_zhuyin,
                                  {c - start for c in chinese if start <= c < a}, lexicon,
                                  {c - start for c in breaks if start <= c < a},
-                                 {c - start for c in exact if start <= c < a}, start == 0, starts)
+                                 {c - start for c in exact if start <= c < a}, start == 0 or spaced, starts)
             for t in part:
                 t.start += start
             tokens += part
+        spaced = False
         if a < len(raw):
             if text is None:
                 tokens.append(Token("en", raw[a], raw[a], a))
@@ -196,6 +203,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                 tokens.append(Token("zh", raw[a:b], text[1], a, "taken"))
             else:
                 tokens.append(Token("fix", raw[a:b], text, a))
+                spaced = _joined_space(tokens[-1])
         start = b
     return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
                               lit_keys) if table.autocorrect else tokens
@@ -1930,6 +1938,7 @@ class Composer:
                                self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
                                self._sent_context(), self._context_len(), _knows_english(self._lm()),
                                self._lit_keys(), self.config.completion)
+        self._marks_before_symbols()
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
@@ -2323,8 +2332,9 @@ class Composer:
             if t.kind == "zh":
                 break
             run = t.start
-        starts = {s for s in (self.raw.rfind(" ") + 1, last.start if last and last.kind in ("en", "partial") else -1)
-                  if s >= run}
+        space = max([self.raw.rfind(" ") + 1] +  # (or a space joined from the symbol keyboard: #52)
+                    [t.start + len(t.raw) for t in self.tokens if _joined_space(t)])
+        starts = {s for s in (space, last.start if last and last.kind in ("en", "partial") else -1) if s >= run}
         starts |= {s + 1 for s in starts if self.raw[s:s + 1] == "/"}  # a slash command: /con -> /continue
         for start in sorted(starts):
             if len(self.raw) - start >= 3:
@@ -2915,8 +2925,9 @@ class Composer:
         end = tok.start + len(tok.raw)
         shown = self.composition[self._tok_offset(tok.start):self._tok_offset(end)]
         if tok.kind == "fix":
-            if tok.raw == NAME_MARK_KEY and tok.value == "·":
-                return labels, actions  # (the · of a character's name: its key is none the user typed, #14)
+            if tok.raw == NAME_MARK_KEY:
+                # (the · of a character's name (#14), a symbol joined to the text (#52): its key is none the user typed)
+                return labels, actions
             # back to the character the keys read as (ㄧㄝˋ -> 頁: the ASUS IME offers only
             # that), else to the keys as typed
             found = self._reads_as_chinese(tok.start, tok.start, end, unfix=tok.start)
@@ -3400,14 +3411,18 @@ class Composer:
         self.symbol_page = None
         self._suggest()
 
-    def _type_symbol(self, sym, stay=False):
+    def _type_symbol(self, sym, stay=False, join=False):
         """The text typed so far goes out first, then the symbol (快速填入 closes too); the symbol keyboard closes
-        unless stay (符號鍵盤選完不關, #49)."""
+        unless stay (符號鍵盤選完不關, #49). join (Ctrl + a mark, the symbol keyboard: #52): with text being typed the
+        symbol joins it instead (_join_symbol)."""
         self.fill = None
         if not stay:
             self.close_symbols()
         else:  # (something went out: no longer new, Space is a space - not 快速填入 - code-reviewer)
             self.symbol_fresh = False
+        if join and self.raw:
+            self._join_symbol(sym)
+            return
         before = ""
         if self.raw:
             keep = (self.symbol_page, self.symbol_cursor)
@@ -3419,6 +3434,72 @@ class Composer:
         self._sent([sym])  # (its Chinese, if any, is what is right before the caret now: #37)
         self.commit = before + sym
 
+    def _join_symbol(self, sym):
+        """A symbol into the text being typed, at the caret, as a mark typed there (#52, a user 2026-11-17: it sent
+        what was before it, fixing its words): a NAME_MARK_KEY shown as it - no syllable, so the picks stay; what is
+        before it can still be picked, what is typed after goes with it, Enter sends all, Backspace right after takes
+        it back."""
+        self.commit = ""
+        self.last_commit = None
+        self._ready_for_key(True)  # (the list open in the middle: at the end, not before the character being picked)
+        at = len(self.raw) if self.caret is None else self.caret
+
+        def put():
+            self._insert_key(NAME_MARK_KEY)
+            self.fixed[at] = (at + len(NAME_MARK_KEY), sym)
+        self._keep_picks_around(at, put)
+        self._auto_commit()
+
+    def _keep_picks_around(self, at, edit):
+        """edit() puts a mark in at raw offset at (a NAME_MARK_KEY shown as a symbol, #52) or takes the one there out:
+        no syllable, so the picks stay, following their keys (_splice drops those after it; and the keys before it are
+        read on their own and may read otherwise, mp3 turning English, which renumbers the syllables after it) - not
+        one reaching across it, a pick never does; 簡體輸出's picks too; what Tab replaced before it can still come back
+        while what is before it reads as it did (code-reviewer)."""
+        starts, overrides = self._picks_by_key()
+
+        def across(sp):
+            s, l = sp
+            return s + l <= len(starts) and starts[s] < at <= starts[s + l - 1]
+        overrides = {sp: v for sp, v in overrides.items()
+                     if not across(sp) and not (len(v) > 2 and v[3] != BAR and across(tuple(v[3])))}
+        terms = {sp: v for sp, v in self.term_picks.items() if not across(sp)}
+        size = len(self.raw)
+        edit()
+        before = sum(1 for s in starts if s < at)
+        replaced = {sp: r for sp, r in self.replaced.items() if sp[0] + sp[1] <= before}  # (_splice cut them at it)
+        self._refresh()
+        moved = [s + len(self.raw) - size if s >= at else s for s in starts]
+        now = {t.start: n for n, t in enumerate(t for t in self.tokens if t.kind == "zh")}
+        self.term_picks = {}
+        for (s, l), v in terms.items():
+            first = now.get(moved[s]) if s + l <= len(moved) else None
+            if first is not None and all(now.get(moved[s + k]) == first + k for k in range(l)):
+                self.term_picks[(first, l)] = v
+        self._picks_back((moved, overrides))  # (read again with them all)
+        if [s for s in starts if s < at] == [t.start for t in self.tokens if t.kind == "zh" and t.start < at]:
+            self.replaced = replaced
+
+    def _ready_for_key(self, to_end=False):
+        """Before a key goes into the text being typed: the list closes (to_end: the key goes at the end, not before
+        the character being picked - code-reviewer) and the replacement bar is left (from the end: back there)."""
+        if self.candidates:
+            self._close_candidates()
+            if to_end:
+                self.caret = None
+        if self.repl_index >= 0:
+            self.repl_index = -1
+            self._leave_bar()
+
+    def _insert_key(self, key):
+        """key into the text being typed at the caret (or the end), like a key typed there (_splice: the picks after
+        it go): where it went; the caret goes on after it."""
+        at = len(self.raw) if self.caret is None else self.caret
+        self._splice(at, at, key)
+        if self.caret is not None:
+            self.caret = at + len(key) if at + len(key) < len(self.raw) else None
+        return at
+
     def type_full_punct(self, ch):
         """Ctrl + a punctuation key (the setting ctrl_full_punct): its full-width mark, after the
         text typed so far (Ctrl+, -> ，). Only the keys with a Chinese mark (PUNCT_KEYS, PUNCT):
@@ -3426,7 +3507,7 @@ class Composer:
         sym = PUNCT_KEYS.get(ch) or PUNCT.get(ch)
         if not sym:
             return False
-        self._type_symbol(sym, bool(self.config.symbols_stay_open))  # (#49: the symbol keyboard stays as it is)
+        self._type_symbol(sym, bool(self.config.symbols_stay_open), True)  # (#49: the symbol keyboard stays as it is)
         return True
 
     def _key_symbols(self, ch, special):
@@ -3442,17 +3523,17 @@ class Composer:
         stay = bool(self.config.symbols_stay_open)
         pages = len(symbols.PAGES)
         if ch == " ":
-            self._type_symbol(FULL_SPACE if self.config.space == "full" or self.config.full_width else " ", stay)
+            self._type_symbol(FULL_SPACE if self.config.space == "full" or self.config.full_width else " ", stay, True)
         elif ch:
             i = symbols.key_index(ch)
             if i is not None:
-                self._type_symbol(symbols.symbol(self.symbol_page, i), stay)
+                self._type_symbol(symbols.symbol(self.symbol_page, i), stay, True)
         elif special == "BACK" and stay:
             return self._key_special("BACK")  # (False with nothing typed: the app deletes a character)
         elif special in ("ESC", "BACK"):
             self.close_symbols()
         elif special == "ENTER":
-            self._type_symbol(symbols.symbol(self.symbol_page, self.symbol_cursor), stay)
+            self._type_symbol(symbols.symbol(self.symbol_page, self.symbol_cursor), stay, True)
         elif special in ("TAB", "PGDN"):
             self.symbol_page = (self.symbol_page + 1) % pages
         elif special in ("STAB", "PGUP"):
@@ -4354,7 +4435,22 @@ class Composer:
         if i == 0:
             return self.context_word is not None
         prev = self.tokens[i - 1]
-        return prev.kind == "zh" or (prev.kind == "lit" and prev.value != " ")
+        # (a symbol joined into the text (#52) as a mark is: 我， + , + Enter is 我，， as with , typed twice; not
+        # the symbol keyboard's letters and digits, as typed: 1 + , is 1, while = + , is =， - code-reviewer)
+        return prev.kind == "zh" or (prev.kind == "lit" and prev.value != " ") or \
+            (prev.kind == "fix" and not _joined_space(prev) and not (prev.value.isascii() and prev.value.isalnum()))
+
+    def _marks_before_symbols(self):
+        """A , . ; after Chinese right before a symbol joined there (#52) is the mark, as with more typed after it or
+        at Enter, where it is the last key (我, + Ctrl+. is 我，。; also at the start, after Chinese just sent -
+        code-reviewer): a cut ends its run there, which reads it as an unfinished syllable."""
+        zh_punct = None
+        for i, t in enumerate(self.tokens[:-1]):
+            nxt = self.tokens[i + 1]
+            if t.kind == "partial" and nxt.kind == "fix" and nxt.raw == NAME_MARK_KEY:
+                zh_punct = zh_punct or zhuyin_punct(self.table)
+                if t.raw in zh_punct and self._chinese_before(t):
+                    self.tokens[i] = Token("lit", t.raw, zh_punct[t.raw], t.start)
 
     def _auto_commit(self):
         """The whole sentence (Chinese, English, symbols) stays until Enter, like
@@ -4483,22 +4579,16 @@ class Composer:
         if self.symbol_page is not None and not self.config.symbols_stay_open:  # (#49: only Esc / x close it then)
             self.close_symbols()
         self.symbol_fresh = False  # (kept open: no longer new)
-        if self.candidates:
-            self._close_candidates()
-        if self.repl_index >= 0:  # it leaves the replacement bar (from the end: back there)
-            self.repl_index = -1
-            self._leave_bar()
+        self._ready_for_key()
         if self.caret is None:
             self.literal.add(len(self.raw))
             self.raw += ch
         else:  # typed in the middle: in at the caret, like any other key
-            at = self.caret
-            before_zh = any(t.start == at and t.kind in ("zh", "fix") for t in self.tokens)
-            self._splice(at, at, ch)
+            before_zh = any(t.start == self.caret and t.kind in ("zh", "fix") for t in self.tokens)
+            at = self._insert_key(ch)
             if before_zh:
                 self.chinese.add(at + 1)
             self.literal.add(at)
-            self.caret = at + 1 if at + 1 < len(self.raw) else None
         self._refresh()
         return True
 
@@ -4521,9 +4611,15 @@ class Composer:
             tok = next((t for t in self.tokens if t.start <= at < t.start + len(t.raw)), None) if at >= 0 else None
             if tok is not None:
                 p, q = (tok.start, tok.start + len(tok.raw)) if tok.kind in ("zh", "fix") else (at, at + 1)
-                self._splice(p, q)
-                self.caret = p if p < len(self.raw) else None
-                self._refresh()
+
+                def take():
+                    self._splice(p, q)
+                    self.caret = p if p < len(self.raw) else None
+                if tok.kind == "fix" and tok.raw == NAME_MARK_KEY:  # (a symbol joined there, #52, or a name's ·)
+                    self._keep_picks_around(p, take)
+                else:
+                    take()
+                    self._refresh()
         elif special == "BACK":
             last = self.tokens[-1] if self.tokens else None
             if last and last.kind in ("zh", "fix"):

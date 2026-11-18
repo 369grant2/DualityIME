@@ -1427,6 +1427,9 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
     return tokens;
 }
 
+// a space joined from the symbol keyboard (#52): one between words, a word starts after it (the tokenizer, the
+// completions; engine/composer.py _joined_space)
+static bool joined_space(const Token& t) { return t.kind == Kind::Fix && (t.value == U" " || t.value == FULL_SPACE); }
 }  // namespace
 
 std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, const UserModel* user,
@@ -1475,6 +1478,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
     cuts.push_back(Cut{len, len, nullptr});
     std::vector<Token> tokens;
     int start = 0;
+    bool spaced = false;
     for (auto& cut : cuts) {
         if (cut.a < start) continue;  // (overlapping cuts: the first one wins)
         if (cut.a > start) {
@@ -1488,19 +1492,23 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
             for (int x : ex)
                 if (start <= x && x < cut.a) e.insert(x - start);
             auto part = tokenize_run(raw.substr(start, cut.a - start), table, user, english, f,
-                                     after_english && start == 0, digits_as_zhuyin, c, lexicon, b, e, start == 0, starts);
+                                     after_english && start == 0, digits_as_zhuyin, c, lexicon, b, e, start == 0 || spaced,
+                                     starts);
             for (auto& t : part) {
                 t.start += start;
                 tokens.push_back(std::move(t));
             }
         }
+        spaced = false;
         if (cut.a < len) {
             if (cut.reading)
                 tokens.push_back(Token{Kind::Zh, raw.substr(cut.a, cut.b - cut.a), *cut.reading, cut.a, "taken"});
             else if (!cut.text)
                 tokens.push_back(Token{Kind::En, std::string(1, raw[cut.a]), U(std::string(1, raw[cut.a])), cut.a});
-            else
+            else {
                 tokens.push_back(Token{Kind::Fix, raw.substr(cut.a, cut.b - cut.a), *cut.text, cut.a});
+                spaced = joined_space(tokens.back());
+            }
         }
         start = cut.b;
     }
@@ -2456,6 +2464,7 @@ void Composer::refresh() {
                     pinned[old[span.first + k]->start] = {old[span.first + k]->raw, v.first[k]};
     }
     tokens = retokenize(chinese_);
+    marks_before_symbols();
     if (table_.autocorrect) {
         for (auto& t : tokens) {
             auto pin = pinned.find(t.start);
@@ -2922,6 +2931,9 @@ void Composer::suggest() {
     std::set<int> starts;
     size_t sp = raw.rfind(' ');
     int after_space = sp == std::string::npos ? 0 : static_cast<int>(sp) + 1;
+    for (auto& t : tokens)  // (or a space joined from the symbol keyboard: #52)
+        if (joined_space(t))
+            after_space = std::max(after_space, t.start + static_cast<int>(t.raw.size()));
     if (after_space >= run) starts.insert(after_space);
     if (last && (last->kind == Kind::En || last->kind == Kind::Partial) && last->start >= run) starts.insert(last->start);
     for (int s : std::set<int>(starts))
@@ -4301,8 +4313,8 @@ void Composer::replacement_bar(std::vector<ustr>& out_labels, std::vector<Action
     int from = tok_offset(start), to = tok_offset(end);
     ustr shown = composition.substr(from, to - from);
     if (tok->kind == Kind::Fix) {
-        // (the · of a character's name: its key is none the user typed, #14)
-        if (tok->raw == std::string(1, NAME_MARK_KEY) && tok->value == U"·") return;
+        // (the · of a character's name (#14), a symbol joined to the text (#52): its key is none the user typed)
+        if (tok->raw == std::string(1, NAME_MARK_KEY)) return;
         // back to the character the keys read as (ㄧㄝˋ -> 頁: the ASUS IME offers only
         // that), else to the keys as typed
         auto found = reads_as_chinese(start, start, end, {}, {}, false, {}, start);
@@ -4617,12 +4629,16 @@ void Composer::close_symbols() {
     suggest();
 }
 
-void Composer::type_symbol(const ustr& sym, bool stay) {
+void Composer::type_symbol(const ustr& sym, bool stay, bool join) {
     // the text typed so far goes out first, then the symbol (快速填入 closes too); the symbol keyboard closes unless stay
-    // (符號鍵盤選完不關, #49)
+    // (符號鍵盤選完不關, #49); join (Ctrl + a mark, the symbol keyboard: #52): with text being typed it joins it instead
     fill_.reset();
     if (!stay) close_symbols();
     else symbol_fresh_ = false;  // (something went out: no longer new, Space is a space - not 快速填入)
+    if (join && !raw.empty()) {
+        join_symbol(sym);
+        return;
+    }
     ustr before;
     if (!raw.empty()) {
         auto keep = std::make_pair(symbol_page, symbol_cursor);
@@ -4634,6 +4650,99 @@ void Composer::type_symbol(const ustr& sym, bool stay) {
     after_english_ = false;
     sent({sym});  // (its Chinese, if any, is what is right before the caret now: #37)
     commit = before + sym;
+}
+
+void Composer::join_symbol(const ustr& sym) {
+    // a symbol into the text being typed, at the caret, as a mark typed there (#52): a NAME_MARK_KEY shown as it - no
+    // syllable, so the picks stay; what is before it can still be picked, Enter sends all (engine/composer.py)
+    commit.clear();
+    last_commit_.reset();
+    ready_for_key(true);  // (the list open in the middle: at the end, not before the character being picked)
+    int at = caret_ ? *caret_ : static_cast<int>(raw.size());
+    keep_picks_around(at, [&] {
+        insert_key(std::string(1, NAME_MARK_KEY));
+        fixed_[at] = {at + 1, sym};
+    });
+    auto_commit();
+}
+
+void Composer::keep_picks_around(int at, const std::function<void()>& edit) {
+    // edit() puts a mark in at raw offset at (a NAME_MARK_KEY shown as a symbol, #52) or takes the one there out: no
+    // syllable, so the picks stay, following their keys - not one reaching across it; 簡體輸出's picks too; what Tab
+    // replaced before it can still come back while what is before it reads as it did (engine/composer.py)
+    auto [starts, overrides] = picks_by_key();
+    auto across = [&](const std::pair<int, int>& sp) {
+        return sp.first + sp.second <= static_cast<int>(starts.size()) && starts[sp.first] < at &&
+               at <= starts[sp.first + sp.second - 1];
+    };
+    for (auto it = overrides.begin(); it != overrides.end();)
+        it = across(it->first) || (it->second.kept && it->second.by != BAR && across(it->second.by))
+                 ? overrides.erase(it)
+                 : std::next(it);
+    TermPicks terms;
+    for (auto& [sp, v] : term_picks_)
+        if (!across(sp)) terms[sp] = v;
+    const int size = static_cast<int>(raw.size());
+    edit();
+    std::vector<int> head;  // (the syllables before the mark)
+    for (int s : starts)
+        if (s < at) head.push_back(s);
+    const int before = static_cast<int>(head.size());
+    auto replaced = replaced_;  // (splice cut them at it)
+    for (auto it = replaced.begin(); it != replaced.end();)
+        it = it->first.first + it->first.second <= before ? std::next(it) : replaced.erase(it);
+    refresh();
+    std::vector<int> moved = starts;
+    for (int& s : moved)
+        if (s >= at) s += static_cast<int>(raw.size()) - size;
+    std::map<int, int> now;
+    int n = 0;
+    for (auto& t : tokens)
+        if (t.kind == Kind::Zh) now[t.start] = n++;
+    term_picks_.clear();
+    for (auto& [sp, v] : terms) {
+        auto [s, l] = sp;
+        if (s + l > static_cast<int>(moved.size())) continue;
+        auto first = now.find(moved[s]);
+        if (first == now.end()) continue;
+        bool row = true;
+        for (int k = 0; k < l; ++k) {
+            auto it = now.find(moved[s + k]);
+            if (it == now.end() || it->second != first->second + k) row = false;
+        }
+        if (row) term_picks_[{first->second, l}] = v;
+    }
+    picks_back({moved, overrides});  // (read again with them all)
+    std::vector<int> now_head;
+    for (auto& t : tokens)
+        if (t.kind == Kind::Zh && t.start < at) now_head.push_back(t.start);
+    if (now_head == head) replaced_ = std::move(replaced);
+}
+
+void Composer::ready_for_key(bool to_end) {
+    // before a key goes into the text being typed: the list closes (to_end: the key goes at the end, not before the
+    // character being picked) and the replacement bar is left (from the end: back there)
+    if (!candidates.empty()) {
+        close_candidates();
+        if (to_end) caret_.reset();
+    }
+    if (repl_index >= 0) {
+        repl_index = -1;
+        leave_bar();
+    }
+}
+
+int Composer::insert_key(const std::string& key) {
+    // key into the text being typed at the caret (or the end), like a key typed there (splice: the picks after it
+    // go): where it went; the caret goes on after it
+    int at = caret_ ? *caret_ : static_cast<int>(raw.size());
+    splice(at, at, key);
+    int after = at + static_cast<int>(key.size());
+    if (caret_) {
+        if (after < static_cast<int>(raw.size())) caret_ = after;
+        else caret_.reset();
+    }
+    return at;
 }
 
 bool Composer::key_symbols(std::optional<char32_t> ch, const std::string& special) {
@@ -4649,15 +4758,15 @@ bool Composer::key_symbols(std::optional<char32_t> ch, const std::string& specia
     bool stay = config.flag("symbols_stay_open");
     int pages = static_cast<int>(symbols::page_count());
     if (ch && *ch == ' ') {
-        type_symbol(config.text("space") == "full" || config.flag("full_width") ? FULL_SPACE : U" ", stay);
+        type_symbol(config.text("space") == "full" || config.flag("full_width") ? FULL_SPACE : U" ", stay, true);
     } else if (ch) {
-        if (auto i = symbols::key_index(*ch)) type_symbol(symbols::symbol(*symbol_page, *i), stay);
+        if (auto i = symbols::key_index(*ch)) type_symbol(symbols::symbol(*symbol_page, *i), stay, true);
     } else if (special == "BACK" && stay) {
         return key_special("BACK");  // (false with nothing typed: the app deletes a character)
     } else if (special == "ESC" || special == "BACK") {
         close_symbols();
     } else if (special == "ENTER") {
-        type_symbol(symbols::symbol(*symbol_page, symbol_cursor), stay);
+        type_symbol(symbols::symbol(*symbol_page, symbol_cursor), stay, true);
     } else if (special == "TAB" || special == "PGDN") {
         symbol_page = (*symbol_page + 1) % pages;
     } else if (special == "STAB" || special == "PGUP") {
@@ -5924,7 +6033,27 @@ bool Composer::may_split(const std::string& r) const {
 bool Composer::chinese_before(size_t i) const {
     if (i == 0) return context_word_.has_value();
     const Token& prev = tokens[i - 1];
-    return prev.kind == Kind::Zh || (prev.kind == Kind::Lit && prev.value != U" ");
+    // (a symbol joined into the text (#52) as a mark is; not the symbol keyboard's letters and digits, as typed:
+    // engine/composer.py)
+    bool alnum = !prev.value.empty() && std::all_of(prev.value.begin(), prev.value.end(), [](char32_t c) {
+        return (c >= U'0' && c <= U'9') || (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z');
+    });
+    return prev.kind == Kind::Zh || (prev.kind == Kind::Lit && prev.value != U" ") ||
+           (prev.kind == Kind::Fix && !joined_space(prev) && !alnum);
+}
+
+void Composer::marks_before_symbols() {
+    // a , . ; after Chinese right before a symbol joined there (#52) is the mark, as with more typed after it or at
+    // Enter (engine/composer.py _marks_before_symbols)
+    std::optional<std::map<char, ustr>> zp;
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        const Token& t = tokens[i];
+        const Token& next = tokens[i + 1];
+        if (t.kind != Kind::Partial || next.kind != Kind::Fix || next.raw != std::string(1, NAME_MARK_KEY)) continue;
+        if (!zp) zp = zhuyin_punct(table_);
+        auto key = t.raw.size() == 1 ? zp->find(t.raw[0]) : zp->end();
+        if (key != zp->end() && chinese_before(i)) tokens[i] = Token{Kind::Lit, t.raw, key->second, t.start};
+    }
 }
 
 bool Composer::is_symbol_key(size_t i) const {
@@ -6101,7 +6230,7 @@ bool Composer::type_full_punct(char32_t ch) {
     if (sym.empty())
         if (auto b = PUNCT().find(k); b != PUNCT().end()) sym = b->second;
     if (sym.empty()) return false;
-    type_symbol(sym, config.flag("symbols_stay_open"));  // (#49: the symbol keyboard stays as it is)
+    type_symbol(sym, config.flag("symbols_stay_open"), true);  // (#49: the symbol keyboard stays as it is)
     return true;
 }
 
@@ -6112,24 +6241,17 @@ bool Composer::type_literal(char32_t ch) {
     if (fill_) return key_fill(ch, "");  // (快速填入: a numpad digit narrows it like any other)
     if (symbol_page && !config.flag("symbols_stay_open")) close_symbols();  // (#49: only Esc / x close it then)
     symbol_fresh_ = false;  // (kept open: no longer new)
-    if (!candidates.empty()) close_candidates();
-    if (repl_index >= 0) {  // it leaves the replacement bar (from the end: back there)
-        repl_index = -1;
-        leave_bar();
-    }
+    ready_for_key();
     if (!caret_) {
         literal_.insert(static_cast<int>(raw.size()));
         raw.push_back(static_cast<char>(ch));
     } else {  // typed in the middle: in at the caret, like any other key
-        int at = *caret_;
         bool before_zh = false;
         for (auto& t : tokens)
-            if (t.start == at && (t.kind == Kind::Zh || t.kind == Kind::Fix)) before_zh = true;
-        splice(at, at, std::string(1, static_cast<char>(ch)));
+            if (t.start == *caret_ && (t.kind == Kind::Zh || t.kind == Kind::Fix)) before_zh = true;
+        int at = insert_key(std::string(1, static_cast<char>(ch)));
         if (before_zh) chinese_.insert(at + 1);
         literal_.insert(at);
-        if (at + 1 < static_cast<int>(raw.size())) caret_ = at + 1;
-        else caret_.reset();
     }
     refresh();
     return true;
@@ -6163,10 +6285,18 @@ bool Composer::key_special(const std::string& special) {
             bool whole = tok->kind == Kind::Zh || tok->kind == Kind::Fix;
             int p = whole ? tok->start : at;
             int q = whole ? tok->start + static_cast<int>(tok->raw.size()) : at + 1;
-            splice(p, q, "");
-            if (p < static_cast<int>(raw.size())) caret_ = p;
-            else caret_.reset();
-            refresh();
+            bool mark = tok->kind == Kind::Fix && tok->raw == std::string(1, NAME_MARK_KEY);  // (#52, or a name's ·)
+            auto take = [&] {
+                splice(p, q, "");
+                if (p < static_cast<int>(raw.size())) caret_ = p;
+                else caret_.reset();
+            };
+            if (mark) {
+                keep_picks_around(p, take);
+            } else {
+                take();
+                refresh();
+            }
         }
     } else if (special == "BACK") {
         const Token* last = tokens.empty() ? nullptr : &tokens.back();

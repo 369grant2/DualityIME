@@ -146,6 +146,11 @@ class Token:
         return f"{self.kind}:{self.value!r}"
 
 
+def _token_key(tokens):
+    """What tells two splits apart (#55)."""
+    return tuple((t.kind, t.raw, t.value) for t in tokens)
+
+
 def _joined_space(tok):
     """A space joined from the symbol keyboard (#52): one between words, a word starts after it (the tokenizer, the
     completions: code-reviewer)."""
@@ -1304,6 +1309,17 @@ def _knows_english(lm):
     return getattr(getattr(lm, "lm", None), "knows_english", False)
 
 
+# #55: where English ends, asked of a model that knows English (docs/superpowers/items/55-model-assisted-split.md): the
+# keys around each English token split otherwise - English cut short at one of its last SPLIT_KEYS keys, or longer by
+# 1..SPLIT_KEYS keys (digits after digits, or into an English word known) with zhuyin from there - each read and scored
+# whole; another split is taken when its log probability plus SPLIT_UNIT_Q a unit (the text one unit shorter reads
+# likelier: Dcard中 against Dcard5j/) beats the engine's by more than SPLIT_MARGIN_Q (Q10). Only with SPLIT_AFTER Chinese
+# characters after the English in both: one alone the model cannot tell (English is one EN to it: CP值 or CP56).
+SPLIT_KEYS = 4
+SPLIT_AFTER = 2
+SPLIT_UNIT_Q = 6 << 10
+SPLIT_MARGIN_Q = 3 << 10
+SEAM_KEYS = frozenset(" ,./;-")  # (zhuyin keys taken as punctuation right after English: G7fu, + space may be G7 切)
 LM_WEIGHT = 0.6  # 長句選字加強: log10 of the model's probability counts this much against the engine's score
 WORD_BONUS = 0.4   # ...and each character inside a cohesive word this much: the model reads characters,
                    # and split 新舊 into 心就 (decisions.md, 2026-11-03)
@@ -1922,35 +1938,30 @@ class Composer:
             self._refresh()
         self._render()
 
-    def _refresh(self):
+    def _refresh(self, old_syllables=None):
+        """old_syllables: the syllables the picks are numbered by, (raw offset, keys) each, when self.tokens are not
+        those (_commit_head, undo_commit)."""
         self.fixed = {a: v for a, v in self.fixed.items() if v[0] <= len(self.raw)}
         self.taken = {a: v for a, v in self.taken.items() if v[0] <= len(self.raw)}
         # 注音自動校正 may read keys another way once more come (今天 picked as 今添, then 我
         # typed: 今篇我); a syllable the user picked on keeps the reading it was picked on
         pinned = {}
-        old = [t for t in getattr(self, "tokens", ()) if t.kind == "zh"]
+        old = [(t.start, t.raw) for t in getattr(self, "tokens", ()) if t.kind == "zh"] if old_syllables is None \
+            else old_syllables
         for (s, l), v in self.overrides.items():
             for k in range(l):
                 if s + k < len(old):
-                    pinned[old[s + k].start] = (old[s + k].raw, v[0][k])
-        self.tokens = tokenize(self.raw, self.table, self.user, self.english, self.forced,
-                               self.after_english, self.digits_as_zhuyin, self.literal, self.chinese, self.fixed,
-                               self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
-                               self._sent_context(), self._context_len(), _knows_english(self._lm()),
-                               self._lit_keys(), self.config.completion)
-        self._marks_before_symbols()
+                    pinned[old[s + k][0]] = (old[s + k][1], v[0][k])
+        self.tokens = self._tokens_with(self.chinese, self.forced)
+        self._split_by_model([start for start, _ in old], pinned)
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
                 if t.kind != "zh" or not pin or pin[0] != t.raw or pin[1] == t.value or t.start in self.exact:
                     continue
-                if t.corrected == "valid" and pin[1] == t.orig:
-                    t.value, t.orig, t.corrected = t.orig, None, None
-                elif t.corrected == "tone" and pin[1] in self.table.toned_forms(t.raw):
-                    t.value = pin[1]  # (the tone of the pick, not the one the sentence now prefers)
-                elif not t.corrected and (pin[1] in self.table.adjacent_parses(t.raw)
-                                          or pin[1] in self.table.nasal_swaps(t.value)):  # (ㄣ/ㄥ too, #38)
-                    t.orig, t.value, t.corrected = t.value, pin[1], "valid"
+                back = self._pin_reading(t, pin[1])
+                if back is not None:
+                    t.value, t.orig, t.corrected = back
         self.readings = [t.value for t in self.tokens if t.kind == "zh"]
         if self.caret is not None:  # (the keys may read differently now)
             self.caret = next((p for p in self._stops() if p >= self.caret), None)
@@ -3470,12 +3481,7 @@ class Composer:
         replaced = {sp: r for sp, r in self.replaced.items() if sp[0] + sp[1] <= before}  # (_splice cut them at it)
         self._refresh()
         moved = [s + len(self.raw) - size if s >= at else s for s in starts]
-        now = {t.start: n for n, t in enumerate(t for t in self.tokens if t.kind == "zh")}
-        self.term_picks = {}
-        for (s, l), v in terms.items():
-            first = now.get(moved[s]) if s + l <= len(moved) else None
-            if first is not None and all(now.get(moved[s + k]) == first + k for k in range(l)):
-                self.term_picks[(first, l)] = v
+        self.term_picks = self._renumber(moved, {}, terms)[1]
         self._picks_back((moved, overrides))  # (read again with them all)
         if [s for s in starts if s < at] == [t.start for t in self.tokens if t.kind == "zh" and t.start < at]:
             self.replaced = replaced
@@ -3641,6 +3647,8 @@ class Composer:
                 if tok is not None:
                     self._forget_english_word(tok)
             self._refresh()
+            # (numbered by the tokens now: the model may split English before it otherwise than tokenize, #55)
+            first = next((n for n, t in enumerate(t for t in self.tokens if t.kind == "zh") if t.start == start), first)
             self.overrides[(first, len(readings))] = (readings, p)
             picked = (first, len(readings))
             self._keep_before(first, len(readings), shown)
@@ -4122,7 +4130,7 @@ class Composer:
                     literal=set(self.literal), caps=set(self.caps), overrides=dict(self.overrides),
                     digits_as_zhuyin=self.digits_as_zhuyin,
                     context_word=self.context_word, after_english=self.after_english, lm_context=self.lm_context,
-                    lm_units=self.lm_units)
+                    lm_units=self.lm_units, syllables=[(t.start, t.raw) for t in self.tokens if t.kind == "zh"])
         learned = []  # what this commit taught, as it was before: for undo_commit to put back
         self.user.simp_dropped = []  # (what a pick in Traditional mode takes of Simplified mode's memory, #32)
         terms = self._learn_terms(save=False)  # (saved with the picks below: one save a commit, #32)
@@ -4193,6 +4201,17 @@ class Composer:
         if tok is not None and (end is None or start + len(tok.raw) == end):
             self.pending[start] = (tok.raw, "")
 
+    def _pin_reading(self, t, r):
+        """A syllable picked on as r that 注音自動校正 now reads otherwise, the same keys: (value, orig, corrected)
+        putting the pick's reading back, or None (_refresh's pinned; _keeps_picks)."""
+        if t.corrected == "valid" and r == t.orig:
+            return t.orig, None, None
+        if t.corrected == "tone" and r in self.table.toned_forms(t.raw):
+            return r, t.orig, t.corrected  # (the tone of the pick, not the one the sentence now prefers)
+        if not t.corrected and (r in self.table.adjacent_parses(t.raw) or r in self.table.nasal_swaps(t.value)):
+            return r, t.value, "valid"  # (ㄣ/ㄥ too, #38)
+        return None
+
     def _picks_by_key(self):
         """The picks (overrides) by the raw offsets of their syllables, for _picks_back: a pick of
         注音自動校正 or 代碼記憶 turns English or a number into a syllable or back, so the syllables
@@ -4200,14 +4219,14 @@ class Composer:
         starts = [t.start for t in self.tokens if t.kind == "zh"]
         return starts, dict(self.overrides)
 
-    def _picks_back(self, before):
-        """The picks saved by _picks_by_key, numbered by the syllables now; those whose keys are
-        no longer syllables are dropped. Then read again with them."""
-        starts, overrides = before
+    def _renumber(self, starts, overrides, terms=None):
+        """Picks (overrides, 簡體輸出's term_picks) numbered by syllables at the raw offsets starts, numbered by the
+        tokens now: (overrides, term_picks); those whose keys are no syllables in a row now go, and a pin kept around
+        a pick (KEPT) goes with it."""
         now = {t.start: n for n, t in enumerate(t for t in self.tokens if t.kind == "zh")}
 
         def moved(s, l):  # syllables s..s+l-1 then, numbered now; None unless all still there in a row
-            if s + l > len(starts) or starts[s] not in now:
+            if s < 0 or s + l > len(starts) or starts[s] not in now:
                 return None
             first = now[starts[s]]
             return first if all(now.get(starts[s + k]) == first + k for k in range(l)) else None
@@ -4223,7 +4242,17 @@ class Composer:
                     continue
                 v = v[:3] + ((by, v[3][1]),)
             kept[(first, l)] = v
-        self.overrides = kept
+        kept_terms = {}
+        for (s, l), v in (terms or {}).items():
+            first = moved(s, l)
+            if first is not None:
+                kept_terms[(first, l)] = v
+        return kept, kept_terms
+
+    def _picks_back(self, before):
+        """The picks saved by _picks_by_key, numbered by the syllables now; those whose keys are
+        no longer syllables are dropped. Then read again with them."""
+        self.overrides = self._renumber(*before)[0]
         self.replaced = {}
         self._refresh()
 
@@ -4399,6 +4428,7 @@ class Composer:
             return ""
         text, undo, learned, corrected, terms, dropped = self.last_commit
         self.last_commit = None
+        syllables = undo.pop("syllables")  # (the syllables the picks are numbered by)
         for name, value in undo.items():
             setattr(self, name, value)
         if learned or dropped:  # picked by mistake: nothing of it learned or forgotten after all
@@ -4417,7 +4447,7 @@ class Composer:
             self.user.corrections.restore(corrected)
         self.caret = None
         self.commit = ""
-        self._refresh()
+        self._refresh(syllables)
         self._open_candidates()
         return text
 
@@ -4439,6 +4469,139 @@ class Composer:
         # the symbol keyboard's letters and digits, as typed: 1 + , is 1, while = + , is =， - code-reviewer)
         return prev.kind == "zh" or (prev.kind == "lit" and prev.value != " ") or \
             (prev.kind == "fix" and not _joined_space(prev) and not (prev.value.isascii() and prev.value.isalnum()))
+
+    def _tokens_with(self, chinese, forced):
+        """The keys as tokens, with these marks of 注音 / English."""
+        self.tokens = tokenize(self.raw, self.table, self.user, self.english, forced,
+                               self.after_english, self.digits_as_zhuyin, self.literal, chinese, self.fixed,
+                               self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
+                               self._sent_context(), self._context_len(), _knows_english(self._lm()),
+                               self._lit_keys(), self.config.completion)
+        self._marks_before_symbols()
+        return self.tokens
+
+    def _seam_marks(self, toks, k, chinese, forced):
+        """#55: the marks of the other splits around the English token toks[k] (SPLIT_KEYS), on top of these:
+        English cut short at one of its last keys (zhuyin from there), or longer by 1..SPLIT_KEYS keys of the syllable
+        after it (digits after digits, or into an English word known) with zhuyin from there: [(chinese, forced)].
+        None where the user asked for English (forced) in it."""
+        t = toks[k]
+        end = t.start + len(t.raw.rstrip(" "))  # (a space after it may be a first tone: 46qu + space is 46 批)
+        out = []
+        if not any(t.start <= f < end for f in self.forced):
+            out += [(chinese | {b}, forced) for b in range(max(t.start + 1, end - SPLIT_KEYS), end)]
+        if t.raw.endswith(" ") or k + 1 >= len(toks) or toks[k + 1].kind not in ("zh", "partial") or \
+                toks[k + 1].start != end:
+            return out
+        core = t.raw.rstrip(" ")
+        for m in range(1, SPLIT_KEYS + 1):  # (longer: 70 + 0米 is 700 + 米 - not zhuyin keys made English)
+            if end + m > len(self.raw) or any(end <= c < end + m for c in chinese):
+                break
+            ext = self.raw[end:end + m]
+            if (ext.isdigit() and core[-1].isdigit()) or (core + ext).lower() in self.english:
+                out.append((chinese | ({end + m} if end + m < len(self.raw) else set()),
+                            forced | set(range(end, end + m))))
+        return out
+
+    def _seam(self, toks, start):
+        """The English token starting at raw offset start and the end of the syllables right after it (the next token
+        that is no syllable, or the end): (its index, how many syllables, raw offset of their end), or None. Spaces and
+        zhuyin keys taken as punctuation right after the English are stepped over (305 + space may be 30 之, the space
+        a first tone; G7fu, + space G7 切)."""
+        k = next((i for i, t in enumerate(toks) if t.start == start), None)
+        if k is None or toks[k].kind != "en":
+            return None
+        j = k + 1
+        if j < len(toks) and toks[j].start != toks[k].start + len(toks[k].raw):
+            return k, 0, toks[j].start
+        while j < len(toks) and toks[j].kind == "lit" and toks[j].raw and set(toks[j].raw) <= SEAM_KEYS and \
+                toks[j].start == toks[j - 1].start + len(toks[j - 1].raw):
+            j += 1
+        first = j
+        while j < len(toks) and toks[j].kind == "zh":
+            j += 1
+        return k, j - first, toks[j].start if j < len(toks) else len(self.raw)
+
+    def _keeps_picks(self, toks, picks, pinned):
+        """The picks (raw offsets of their syllables, their readings) are syllables of these tokens, in a row, read
+        so - or read otherwise by 注音自動校正, the same keys, which _refresh puts back (pinned: raw offset -> (keys,
+        reading picked), _pin_reading). _split_by_model asks it of the picks starting before the end of the stretch
+        decided (English later, still unsplit, has no say)."""
+        now = {t.start: (n, t) for n, t in enumerate(t for t in toks if t.kind == "zh")}
+
+        def read(x, r):
+            t = now[x][1]
+            return t.value == r or (self.table.autocorrect and x not in self.exact and pinned.get(x) == (t.raw, r)
+                                    and self._pin_reading(t, r) is not None)
+        for starts, readings in picks:
+            first = now.get(starts[0], (None,))[0]
+            if first is None or any(x not in now or now[x][0] != first + j or not read(x, r)
+                                    for j, (x, r) in enumerate(zip(starts, readings))):
+                return False
+        return True
+
+    def _split_by_model(self, old, pinned=None):
+        """#55: the split of the keys around each English token the model reads likelier (SPLIT_UNIT_Q,
+        SPLIT_MARGIN_Q), when the model knows English; self.tokens as decided. Each English token alone, on the text up
+        to the end of the SPLIT_AFTER or more syllables right after it (a key being typed or English after it does not
+        change it), read without the picks; a split that would lose a pick is not taken (the picks keep the split they
+        were made on), and the picks follow their keys (old: the syllables' raw offsets before, as the picks number
+        them). The marks stay as they were: decided again at each key."""
+        lm = self._lm()
+        taken_before = getattr(self, "_split_taken", False)
+        self._split_taken = False
+        if not _knows_english(lm):
+            if taken_before:  # (a setting changed: the split taken goes, the picks follow their keys)
+                self._picks_follow(old)
+            return
+        base, kept = self.tokens, (getattr(self, "readings", []), getattr(self, "segments", []))
+        picks = [(tuple(old[s + j] for j in range(l)), v[0]) for (s, l), v in self.overrides.items()
+                 if s + l <= len(old)]
+        chinese, forced, toks = self.chinese, self.forced, base
+        done = -1
+        while True:
+            k = next((i for i, t in enumerate(toks) if t.kind == "en" and t.start > done and t.start not in self.forced),
+                     None)
+            if k is None:
+                break
+            start = toks[k].start
+            done = start
+            seam = self._seam(toks, start)
+            if seam[1] < SPLIT_AFTER:
+                continue
+            best, pick, read = None, None, set()
+            for n, (ch, fo) in enumerate([(chinese, forced)] + self._seam_marks(toks, k, chinese, forced)):
+                trial = toks if n == 0 else self._tokens_with(ch, fo)
+                key = _token_key(trial)
+                if key in read:
+                    continue
+                read.add(key)
+                got = self._seam(trial, start)
+                if got is None or got[1] < SPLIT_AFTER or \
+                        not self._keeps_picks(trial, [p for p in picks if p[0][0] < got[2]], pinned or {}):
+                    continue  # (too few syllables after the English to tell, or a pick lost)
+                self.tokens = trial
+                self.readings = [t.value for t in trial if t.kind == "zh"]
+                self.segments = self._convert_all({})
+                units = self._token_units(got[2])
+                score = lm.units_logp(units) + SPLIT_UNIT_Q * len(units) + (SPLIT_MARGIN_Q if n == 0 else 0)
+                if best is None or score > best:
+                    best, pick = score, (trial, ch, fo)
+            if pick is not None:
+                toks, chinese, forced = pick
+                self._split_taken = self._split_taken or toks is not base
+        self.tokens = toks
+        self.readings, self.segments = kept  # (the trials' reading: _refresh reads the tokens decided anew)
+        if self._split_taken or taken_before:
+            self._picks_follow(old)
+
+    def _picks_follow(self, old):
+        """#55: the picks (overrides, 簡體輸出's term_picks), numbered by the syllables before (old: their raw offsets),
+        numbered by the tokens now; those whose keys are no syllables in a row now go (_picks_back's way)."""
+        overrides, self.term_picks = self._renumber(old, self.overrides, self.term_picks)
+        if list(overrides) != list(self.overrides):
+            self.replaced = {}  # (what Tab replaced, numbered as before)
+        self.overrides = overrides
 
     def _marks_before_symbols(self):
         """A , . ; after Chinese right before a symbol joined there (#52) is the mark, as with more typed after it or
@@ -4501,7 +4664,7 @@ class Composer:
         before = ([t.start - tok.start for t in zh[b:]], dict(self.overrides))
         self._remember(self.commit)
         self.raw = self.raw[tok.start:]
-        self._refresh()
+        self._refresh([(t.start - tok.start, t.raw) for t in zh[b:]])
         self._picks_back(before)
 
     # ---- key entry point ---------------------------------------------------

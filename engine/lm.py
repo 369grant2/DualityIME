@@ -377,6 +377,23 @@ class Scorer:
         """The sum of the characters' scores (Q10), one character per syllable."""
         return sum(self.char_score(text[:k], ch, readings[k]) for k, ch in enumerate(text))
 
+    def units_logp(self, units):
+        """Q10 natural log probability of units (context_units: Chinese characters, EN_MARK for English) after <s>, each
+        among the whole vocabulary (#55: which split of the keys reads likelier)."""
+        every = getattr(self, "_every", None)
+        if every is None:
+            every = self._every = _numpy().arange(len(self.lm.vocab), dtype=np.int64)
+        total = 0
+        for k, u in enumerate(units):
+            key = (units[:k], "\x00" + u)  # (never char_score's or among_score's key)
+            hit = self.score_cache.get(key)
+            if hit is None:
+                hit = int(self.lm.scores(self.state(units[:k]), every)[self.lm.ids.get(u, 0)])
+                self._room()
+                self.score_cache[key] = hit
+            total += hit
+        return total
+
 
 _shared = {}  # tier -> its Scorer (or the light one's, or None), made the first time the tier is asked for
 

@@ -220,10 +220,11 @@ private:
         std::vector<UserModel::SimpDrop> dropped;  // what a pick in Traditional mode took of Simplified mode's memory
         ustr lm_context;  // what 接續前文選字 read before this commit (#37)
         ustr lm_units;    // ...as units (#41)
+        std::vector<std::pair<int, std::string>> syllables;  // the syllables the picks are numbered by: offset, keys
     };
 
     void clear_input();
-    void refresh();
+    void refresh(const std::vector<std::pair<int, std::string>>* old_given = nullptr);
     std::vector<Segment> convert_all(const Overrides* instead = nullptr);
     // the character usually typed right after the English word before tokens[k], syllable a (#42), or none
     std::optional<char32_t> after_english_char(size_t k, int a) const;
@@ -290,6 +291,17 @@ private:
     void ready_for_key(bool to_end = false);
     void keep_picks_around(int at, const std::function<void()>& edit);
     void marks_before_symbols();
+    const std::vector<Token>& tokens_with(const std::set<int>& chinese, const std::set<int>& forced);
+    std::vector<std::pair<std::set<int>, std::set<int>>> seam_marks(const std::vector<Token>& toks, size_t k,
+                                                                    const std::set<int>& chinese,
+                                                                    const std::set<int>& forced) const;
+    std::optional<std::tuple<size_t, int, int>> seam(const std::vector<Token>& toks, int start) const;
+    bool keeps_picks(const std::vector<Token>& toks,
+                     const std::vector<std::pair<std::vector<int>, std::vector<ustr>>>& picks,
+                     const std::map<int, std::pair<std::string, ustr>>& pinned) const;
+    std::optional<std::tuple<ustr, ustr, std::string>> pin_reading(const Token& t, const ustr& r) const;
+    void split_by_model(const std::vector<int>& old, const std::map<int, std::pair<std::string, ustr>>& pinned);
+    void picks_follow(const std::vector<int>& old);
     int insert_key(const std::string& key);
     bool key_symbols(std::optional<char32_t> ch, const std::string& special);
     bool key_fill(std::optional<char32_t> ch, const std::string& special);
@@ -354,7 +366,6 @@ private:
     bool key_bar(std::optional<char32_t> ch, const std::string& special);
     bool bar_at_last();
     void leave_bar();
-    std::vector<Token> retokenize(const std::set<int>& chinese) const;
     void note_as_typed(int start, int end = -1);  // 校正記憶: a corrected syllable put back as typed
     std::vector<CorrectionMemory::Change> learn_corrections(int upto);  // ...the picks before upto, sent
     void correction_choices(const Token* tok, std::vector<ustr>& labels, std::vector<Action>& actions) const;
@@ -366,6 +377,8 @@ private:
     // (a pick of 注音自動校正 or 代碼記憶 turns English or a number into a syllable or back)
     std::pair<std::vector<int>, Overrides> picks_by_key() const;
     void picks_back(const std::pair<std::vector<int>, Overrides>& before);
+    std::pair<Overrides, TermPicks> renumber(const std::vector<int>& starts, const Overrides& overrides,
+                                             const TermPicks* terms) const;
     void note_code_part(int begin, int end);       // ...a code kept as typed where the rest was picked Chinese
     void note_split(int begin, int c, int j);      // #42: keys c..j picked a syllable right after English (CP值)
     void note_split_back(int start);               // ...that syllable put back as typed (CP56)
@@ -399,6 +412,7 @@ private:
     std::vector<Action> cand_actions_, sugg_actions_, repl_actions_;
     Fixed fixed_;
     std::vector<Segment> segments_;
+    bool split_taken_ = false;  // (#55: the last refresh took a split of the model's)
     std::map<int, int> wide_;  // token start -> characters shown, where a syllable is not one (width)
     std::set<int> term_hidden_;  // zh token starts a shorter Mainland word leaves with nothing shown (#32)
     TermPicks term_picks_;

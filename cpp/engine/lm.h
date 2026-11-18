@@ -185,6 +185,9 @@ public:
     // Q16 probability that the character after before is one of the syllable's (candidates, id 0 left
     // out), over the whole vocabulary; 0 for a syllable with none (engine/lm.py Scorer.syllable_mass_q16)
     int64_t syllable_mass_q16(const ustr& before, const ustr& syllable) const;
+    // Q10 natural log probability of units (context units: Chinese characters, EN_MARK for English) after <s>, each among
+    // the whole vocabulary (#55: which split of the keys reads likelier; engine/lm.py Scorer.units_logp)
+    int64_t units_logp(const ustr& units) const;
     // the states of every beginning of the texts, stepped together (text_score then finds them)
     void prepare(const std::vector<ustr>& texts) const;
     const LmModel& model() const { return lm_; }
@@ -209,6 +212,7 @@ private:
     mutable std::unordered_map<ustr, LmState> states_;
     mutable std::unordered_map<ustr, std::vector<int64_t>> score_cache_;  // before + U'\0' + syllable
     mutable std::unordered_map<ustr, int64_t> mass_cache_;               // before + U'\0' + syllable
+    mutable std::vector<int> every_;  // 0 .. V-1 (units_logp), made on first use
 };
 
 // 長句選字加強's models and scorers, one a tier (選字模型, #41: light data/lm.bin, plus lm_plus.bin, max lm_max.bin), each

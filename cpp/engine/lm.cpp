@@ -457,6 +457,35 @@ int64_t LmScorer::among_score(const ustr& before, char32_t ch, const std::vector
     return *std::min_element(scores.begin(), scores.end());
 }
 
+int64_t LmScorer::units_logp(const ustr& units) const {
+    // (#55) each unit among the whole vocabulary (engine/lm.py Scorer.units_logp); kept with the masses, under a key no
+    // syllable's can be (before + U'\0' + U'\x01' + unit)
+    if (every_.empty()) {
+        every_.resize(static_cast<size_t>(lm_.vocab()));
+        for (size_t k = 0; k < every_.size(); ++k) every_[k] = static_cast<int>(k);
+    }
+    int64_t total = 0;
+    for (size_t k = 0; k < units.size(); ++k) {
+        ustr before = units.substr(0, k);
+        ustr key = before;
+        key.push_back(U'\0');
+        key.push_back(U'\x01');
+        key.push_back(units[k]);
+        auto it = mass_cache_.find(key);
+        int64_t hit;
+        if (it == mass_cache_.end()) {
+            std::vector<int64_t> s = lm_.scores(state(before), every_);
+            hit = s[static_cast<size_t>(lm_.id(units[k]))];
+            room();
+            mass_cache_.emplace(std::move(key), hit);
+        } else {
+            hit = it->second;
+        }
+        total += hit;
+    }
+    return total;
+}
+
 int64_t LmScorer::syllable_mass_q16(const ustr& before, const ustr& syllable) const {
     ustr key = before;
     key.push_back(U'\0');

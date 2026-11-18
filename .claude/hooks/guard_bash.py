@@ -92,6 +92,17 @@ BLOCK: list[tuple[str, str]] = [
     #     "Never use `uv run` here: it re-syncs .venv against a stale lock. "
     #     "Use .venv/Scripts/python.exe directly.",
     # ),
+    # (project) Long GPU jobs only through tools/lm/gpu_run.py, which reports a stall, a failure and the end.
+    # 2026-11-14: teacher_train.py, then distill.py, stalled half an hour each (the GPU spilling into system memory)
+    # under a watch that only waited for epoch lines.
+    (
+        r"^(?![\s\S]*\bgpu_run\.py\b)[\s\S]*?(^|[\s;&|(`'\"\\/])(py|python[\d.]*)(\.exe)?[\"']?\s[^\n;&|]*"
+        r"\b(teacher_train|teacher_rerank|ft_teacher|distill|train)\.py\b",
+        "Start long GPU jobs with `py -3 tools/lm/gpu_run.py --log <file> [--stall 600] -- <command>` (a chain: "
+        "`-- sh -c \"a && b\"`), in the background: it reports DONE, FAILED or a STALL with the GPU's memory and power "
+        "(CLAUDE.md Commands).",
+    ),
+
 ]
 # (regex, reason) or (regex, reason, "auto-ask"). Commands the user confirms
 # first. Without "auto-ask" they are blocked in auto mode (see the docstring).

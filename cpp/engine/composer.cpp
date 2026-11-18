@@ -119,6 +119,12 @@ constexpr double LEAD_OVER_PICKS = 2;  // ...unless the user picked another char
 constexpr double DICT_FLOOR = 0.4;
 constexpr size_t LM_CONTEXT_MAX = 64;  // ...kept for plus and max, which may read 64 (選字模型, #41)
 constexpr size_t LM_CONTEXT = 32;  // 接續前文選字 (#37): the Chinese characters just sent that the model reads first, at most
+// #55: where English ends, asked of a model that knows English (engine/composer.py SPLIT_KEYS ...)
+constexpr int SPLIT_KEYS = 4;
+constexpr size_t SPLIT_AFTER = 2;
+constexpr int64_t SPLIT_UNIT_Q = 6 << 10;
+constexpr int64_t SPLIT_MARGIN_Q = 3 << 10;
+constexpr const char* SEAM_KEYS = " ,./;-";  // (zhuyin keys taken as punctuation right after English)
 constexpr double LM_WEIGHT = 0.6;  // 長句選字加強: log10 of the model's probability counts this much against the engine's score
 constexpr double WORD_BONUS = 0.4;  // ...and each character inside a cohesive word this much (engine/composer.py)
 constexpr double WORD_COHESION = 1.0;  // cohesive: log10 count(word) - the sum of its characters' (engine/composer.py)
@@ -1427,6 +1433,13 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
     return tokens;
 }
 
+// what tells two splits apart (#55; engine/composer.py _token_key)
+static std::vector<std::tuple<int, std::string, ustr>> token_key(const std::vector<Token>& tokens) {
+    std::vector<std::tuple<int, std::string, ustr>> out;
+    for (auto& t : tokens) out.emplace_back(static_cast<int>(t.kind), t.raw, t.value);
+    return out;
+}
+
 // a space joined from the symbol keyboard (#52): one between words, a word starts after it (the tokenizer, the
 // completions; engine/composer.py _joined_space)
 static bool joined_space(const Token& t) { return t.kind == Kind::Fix && (t.value == U" " || t.value == FULL_SPACE); }
@@ -2396,12 +2409,6 @@ void Composer::settings_changed() {
     render();
 }
 
-std::vector<Token> Composer::retokenize(const std::set<int>& chinese) const {
-    return tokenize(raw, table_, &user, english_, forced_, after_english_, digits_as_zhuyin_, literal_, chinese,
-                    &fixed_, &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(),
-                    knows_english(), lit_keys(), config.flag("completion"));
-}
-
 bool Composer::knows_english() const {
     // #41: the model in use reads EN_MARK (a version 2 file)
     const LmScorer* m = lm();
@@ -2440,7 +2447,9 @@ size_t Composer::setting_context_len() const {
     return v.is_number() && v.as_number() == static_cast<double>(LM_CONTEXT_MAX) ? LM_CONTEXT_MAX : LM_CONTEXT;
 }
 
-void Composer::refresh() {
+void Composer::refresh(const std::vector<std::pair<int, std::string>>* old_given) {
+    // old_given: the syllables the picks are numbered by, (raw offset, keys) each, when tokens are not those
+    // (commit_head, undo_commit)
     {
         Fixed kept;
         for (auto& [a, v] : fixed_)
@@ -2453,41 +2462,31 @@ void Composer::refresh() {
     }
     // 注音自動校正 may read keys another way once more come (今天 picked as 今添, then 我
     // typed: 今篇我); a syllable the user picked on keeps the reading it was picked on
-    std::map<int, std::pair<std::string, ustr>> pinned;
-    {
-        std::vector<const Token*> old;
+    std::vector<std::pair<int, std::string>> old;  // (the syllables as the picks number them)
+    if (old_given)
+        old = *old_given;
+    else
         for (auto& t : tokens)
-            if (t.kind == Kind::Zh) old.push_back(&t);
-        for (auto& [span, v] : overrides_)
-            for (int k = 0; k < span.second && k < static_cast<int>(v.first.size()); ++k)
-                if (span.first + k < static_cast<int>(old.size()))
-                    pinned[old[span.first + k]->start] = {old[span.first + k]->raw, v.first[k]};
-    }
-    tokens = retokenize(chinese_);
-    marks_before_symbols();
+            if (t.kind == Kind::Zh) old.push_back({t.start, t.raw});
+    std::map<int, std::pair<std::string, ustr>> pinned;
+    for (auto& [span, v] : overrides_)
+        for (int k = 0; k < span.second && k < static_cast<int>(v.first.size()); ++k)
+            if (span.first + k < static_cast<int>(old.size()))
+                pinned[old[span.first + k].first] = {old[span.first + k].second, v.first[k]};
+    std::vector<int> old_starts;
+    for (auto& [start, keys] : old) old_starts.push_back(start);
+    tokens_with(chinese_, forced_);
+    split_by_model(old_starts, pinned);
     if (table_.autocorrect) {
         for (auto& t : tokens) {
             auto pin = pinned.find(t.start);
             if (t.kind != Kind::Zh || pin == pinned.end() || pin->second.first != t.raw ||
                 pin->second.second == t.value || contains(exact_, t.start))
                 continue;
-            const ustr& want = pin->second.second;
-            if (t.corrected == "valid" && want == t.orig) {
-                t.value = t.orig;
-                t.orig.clear();
-                t.corrected.clear();
-            } else if (t.corrected == "tone") {
-                // (the tone of the pick, not the one the sentence now prefers)
-                auto forms = table_.toned_forms(t.raw);
-                if (std::find(forms.begin(), forms.end(), want) != forms.end()) t.value = want;
-            } else if (t.corrected.empty()) {
-                auto alts = table_.adjacent_parses(t.raw);
-                for (auto& a : table_.nasal_swaps(t.value)) alts.push_back(a);  // (ㄣ/ㄥ too, #38)
-                if (std::find(alts.begin(), alts.end(), want) != alts.end()) {
-                    t.orig = t.value;
-                    t.value = want;
-                    t.corrected = "valid";
-                }
+            if (auto back = pin_reading(t, pin->second.second)) {
+                t.value = std::get<0>(*back);
+                t.orig = std::get<1>(*back);
+                t.corrected = std::get<2>(*back);
             }
         }
     }
@@ -4695,23 +4694,7 @@ void Composer::keep_picks_around(int at, const std::function<void()>& edit) {
     std::vector<int> moved = starts;
     for (int& s : moved)
         if (s >= at) s += static_cast<int>(raw.size()) - size;
-    std::map<int, int> now;
-    int n = 0;
-    for (auto& t : tokens)
-        if (t.kind == Kind::Zh) now[t.start] = n++;
-    term_picks_.clear();
-    for (auto& [sp, v] : terms) {
-        auto [s, l] = sp;
-        if (s + l > static_cast<int>(moved.size())) continue;
-        auto first = now.find(moved[s]);
-        if (first == now.end()) continue;
-        bool row = true;
-        for (int k = 0; k < l; ++k) {
-            auto it = now.find(moved[s + k]);
-            if (it == now.end() || it->second != first->second + k) row = false;
-        }
-        if (row) term_picks_[{first->second, l}] = v;
-    }
+    term_picks_ = renumber(moved, {}, &terms).second;
     picks_back({moved, overrides});  // (read again with them all)
     std::vector<int> now_head;
     for (auto& t : tokens)
@@ -4900,8 +4883,19 @@ void Composer::pick(int i, bool from_bar) {
                 }
         }
         refresh();
-        overrides_[{action.first, static_cast<int>(action.readings.size())}] = {action.readings, action.text};
-        picked = {action.first, static_cast<int>(action.readings.size())};
+        // (numbered by the tokens now: the model may split English before it otherwise than tokenize, #55)
+        int first = action.first;
+        int n = 0;
+        for (auto& t : tokens)
+            if (t.kind == Kind::Zh) {
+                if (t.start == action.start) {
+                    first = n;
+                    break;
+                }
+                ++n;
+            }
+        overrides_[{first, static_cast<int>(action.readings.size())}] = {action.readings, action.text};
+        picked = {first, static_cast<int>(action.readings.size())};
         keep_before(picked->first, picked->second, shown_then, false);
     } else if (action.type == "tone") {
         // another tone of a syllable 注音自動校正 put a tone in: the pick, on that reading
@@ -5633,6 +5627,8 @@ void Composer::do_commit() {
     undo.exact = exact_;
     undo.lm_context = lm_context_;
     undo.lm_units = lm_units_;
+    for (auto& t : tokens)
+        if (t.kind == Kind::Zh) undo.syllables.push_back({t.start, t.raw});
     undo.taken = taken_;
     undo.pending = pending_;
     undo.term_picks = term_picks_;
@@ -5728,13 +5724,23 @@ std::pair<std::vector<int>, Overrides> Composer::picks_by_key() const {
 void Composer::picks_back(const std::pair<std::vector<int>, Overrides>& before) {
     // the picks saved by picks_by_key, numbered by the syllables now (有813個好: 好 was the third,
     // is the fourth); those whose keys are no longer syllables are dropped (see composer.py)
-    const auto& [starts, saved] = before;
+    overrides_ = renumber(before.first, before.second, nullptr).first;
+    replaced_.clear();
+    refresh();
+}
+
+std::pair<Overrides, Composer::TermPicks> Composer::renumber(const std::vector<int>& starts,
+                                                                        const Overrides& overrides,
+                                                                        const TermPicks* terms) const {
+    // picks (overrides, 簡體輸出's term_picks) numbered by syllables at the raw offsets starts, numbered by the tokens
+    // now; those whose keys are no syllables in a row now go, and a pin kept around a pick goes with it
+    // (engine/composer.py _renumber)
     std::map<int, int> now;
     int n = 0;
     for (auto& t : tokens)
         if (t.kind == Kind::Zh) now[t.start] = n++;
     auto moved = [&](int s, int l) -> std::optional<int> {  // syllables s..s+l-1 then, numbered now
-        if (s + l > static_cast<int>(starts.size())) return std::nullopt;
+        if (s < 0 || s + l > static_cast<int>(starts.size())) return std::nullopt;
         auto first = now.find(starts[s]);
         if (first == now.end()) return std::nullopt;
         for (int k = 0; k < l; ++k) {
@@ -5744,7 +5750,7 @@ void Composer::picks_back(const std::pair<std::vector<int>, Overrides>& before) 
         return first->second;
     };
     Overrides kept;
-    for (auto& [span, v] : saved) {
+    for (auto& [span, v] : overrides) {
         auto first = moved(span.first, span.second);
         if (!first) continue;
         Pin pin = v;
@@ -5755,9 +5761,11 @@ void Composer::picks_back(const std::pair<std::vector<int>, Overrides>& before) 
         }
         kept[{*first, span.second}] = pin;
     }
-    overrides_ = std::move(kept);
-    replaced_.clear();
-    refresh();
+    TermPicks kept_terms;
+    if (terms)
+        for (auto& [span, v] : *terms)
+            if (auto first = moved(span.first, span.second)) kept_terms[{*first, span.second}] = v;
+    return {std::move(kept), std::move(kept_terms)};
 }
 
 bool Composer::note_code(int start) {
@@ -6003,7 +6011,7 @@ ustr Composer::undo_commit() {
     if (!undo.corrected.empty()) user.corrections.restore(undo.corrected);  // (校正記憶 the same)
     caret_.reset();
     commit.clear();
-    refresh();
+    refresh(&undo.syllables);  // (the syllables the picks are numbered by)
     open_candidates();
     return text;
 }
@@ -6040,6 +6048,211 @@ bool Composer::chinese_before(size_t i) const {
     });
     return prev.kind == Kind::Zh || (prev.kind == Kind::Lit && prev.value != U" ") ||
            (prev.kind == Kind::Fix && !joined_space(prev) && !alnum);
+}
+
+const std::vector<Token>& Composer::tokens_with(const std::set<int>& chinese, const std::set<int>& forced) {
+    // the keys as tokens, with these marks of 注音 / English
+    tokens = tokenize(raw, table_, &user, english_, forced, after_english_, digits_as_zhuyin_, literal_, chinese, &fixed_,
+                      &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(), knows_english(),
+                      lit_keys(), config.flag("completion"));
+    marks_before_symbols();
+    return tokens;
+}
+
+std::vector<std::pair<std::set<int>, std::set<int>>> Composer::seam_marks(const std::vector<Token>& toks, size_t k,
+                                                                          const std::set<int>& chinese,
+                                                                          const std::set<int>& forced) const {
+    // #55: the marks of the other splits around the English token toks[k], on top of these (engine/composer.py
+    // _seam_marks)
+    std::vector<std::pair<std::set<int>, std::set<int>>> out;
+    const Token& t = toks[k];
+    std::string core = t.raw;
+    while (!core.empty() && core.back() == ' ') core.pop_back();
+    int end = t.start + static_cast<int>(core.size());
+    bool user_forced = false;
+    for (int f : forced_)
+        if (t.start <= f && f < end) user_forced = true;
+    if (!user_forced)
+        for (int b = std::max(t.start + 1, end - SPLIT_KEYS); b < end; ++b) {
+            auto ch = chinese;
+            ch.insert(b);
+            out.push_back({ch, forced});
+        }
+    if ((!t.raw.empty() && t.raw.back() == ' ') || k + 1 >= toks.size() ||
+        (toks[k + 1].kind != Kind::Zh && toks[k + 1].kind != Kind::Partial) || toks[k + 1].start != end)
+        return out;
+    for (int m = 1; m <= SPLIT_KEYS; ++m) {
+        if (end + m > static_cast<int>(raw.size())) break;
+        bool cut = false;
+        for (int c : chinese)
+            if (end <= c && c < end + m) cut = true;
+        if (cut) break;
+        std::string ext = raw.substr(static_cast<size_t>(end), static_cast<size_t>(m));
+        bool digits = !core.empty() && core.back() >= '0' && core.back() <= '9' &&
+                      std::all_of(ext.begin(), ext.end(), [](char c) { return c >= '0' && c <= '9'; });
+        if (!digits && !english_.contains(lower(core + ext))) continue;
+        auto ch = chinese;
+        if (end + m < static_cast<int>(raw.size())) ch.insert(end + m);
+        auto fo = forced;
+        for (int x = end; x < end + m; ++x) fo.insert(x);
+        out.push_back({ch, fo});
+    }
+    return out;
+}
+
+std::optional<std::tuple<size_t, int, int>> Composer::seam(const std::vector<Token>& toks, int start) const {
+    // the English token starting at raw offset start and the syllables right after it: (its index, how many, raw
+    // offset of their end); spaces and zhuyin keys taken as punctuation right after the English are stepped over
+    // (engine/composer.py _seam)
+    size_t k = 0;
+    while (k < toks.size() && toks[k].start != start) ++k;
+    if (k == toks.size() || toks[k].kind != Kind::En) return std::nullopt;
+    size_t j = k + 1;
+    if (j < toks.size() && toks[j].start != toks[k].start + static_cast<int>(toks[k].raw.size()))
+        return std::make_tuple(k, 0, toks[j].start);
+    while (j < toks.size() && toks[j].kind == Kind::Lit && !toks[j].raw.empty() &&
+           toks[j].raw.find_first_not_of(SEAM_KEYS) == std::string::npos &&
+           toks[j].start == toks[j - 1].start + static_cast<int>(toks[j - 1].raw.size()))
+        ++j;
+    size_t first = j;
+    while (j < toks.size() && toks[j].kind == Kind::Zh) ++j;
+    return std::make_tuple(k, static_cast<int>(j - first),
+                           j < toks.size() ? toks[j].start : static_cast<int>(raw.size()));
+}
+
+std::optional<std::tuple<ustr, ustr, std::string>> Composer::pin_reading(const Token& t, const ustr& r) const {
+    // a syllable picked on as r that 注音自動校正 now reads otherwise, the same keys: (value, orig, corrected) putting
+    // the pick's reading back (refresh's pinned; keeps_picks; engine/composer.py _pin_reading)
+    if (t.corrected == "valid" && r == t.orig) return std::make_tuple(t.orig, ustr(), std::string());
+    if (t.corrected == "tone") {  // (the tone of the pick, not the one the sentence now prefers)
+        auto forms = table_.toned_forms(t.raw);
+        if (std::find(forms.begin(), forms.end(), r) != forms.end()) return std::make_tuple(r, t.orig, t.corrected);
+    } else if (t.corrected.empty()) {
+        auto alts = table_.adjacent_parses(t.raw);
+        for (auto& a : table_.nasal_swaps(t.value)) alts.push_back(a);  // (ㄣ/ㄥ too, #38)
+        if (std::find(alts.begin(), alts.end(), r) != alts.end()) return std::make_tuple(r, t.value, std::string("valid"));
+    }
+    return std::nullopt;
+}
+
+bool Composer::keeps_picks(const std::vector<Token>& toks,
+                           const std::vector<std::pair<std::vector<int>, std::vector<ustr>>>& picks,
+                           const std::map<int, std::pair<std::string, ustr>>& pinned) const {
+    // the picks (raw offsets of their syllables, their readings) are syllables of these tokens, in a row, read so - or
+    // read otherwise by 注音自動校正, the same keys, which refresh puts back (pinned, pin_reading)
+    std::map<int, const Token*> now;
+    std::map<int, int> number;
+    int n = 0;
+    for (auto& t : toks)
+        if (t.kind == Kind::Zh) {
+            now[t.start] = &t;
+            number[t.start] = n++;
+        }
+    for (auto& [starts, readings] : picks) {
+        auto first = number.find(starts[0]);
+        if (first == number.end()) return false;
+        for (size_t j = 0; j < starts.size(); ++j) {
+            auto it = now.find(starts[j]);
+            if (it == now.end() || number[starts[j]] != first->second + static_cast<int>(j) || j >= readings.size())
+                return false;
+            const Token& t = *it->second;
+            if (t.value == readings[j]) continue;
+            auto pin = pinned.find(t.start);
+            if (!table_.autocorrect || contains(exact_, t.start) || pin == pinned.end() || pin->second.first != t.raw ||
+                pin->second.second != readings[j] || !pin_reading(t, readings[j]))
+                return false;
+        }
+    }
+    return true;
+}
+
+void Composer::split_by_model(const std::vector<int>& old, const std::map<int, std::pair<std::string, ustr>>& pinned) {
+    // #55: the split of the keys around each English token the model reads likelier, each alone on the text up to the
+    // end of the syllables right after it; a split that would lose a pick is not taken, and the picks follow their keys
+    // (engine/composer.py _split_by_model)
+    const LmScorer* scorer = lm();
+    bool taken_before = split_taken_;
+    split_taken_ = false;
+    if (!knows_english() || !scorer) {
+        if (taken_before) picks_follow(old);  // (a setting changed: the split taken goes, the picks follow their keys)
+        return;
+    }
+    std::vector<Token> base = tokens;
+    auto kept_readings = readings;
+    auto kept_segments = segments_;
+    std::vector<std::pair<std::vector<int>, std::vector<ustr>>> picks;
+    for (auto& [span, v] : overrides_) {
+        if (span.first + span.second > static_cast<int>(old.size())) continue;
+        std::vector<int> starts;
+        for (int j = 0; j < span.second; ++j) starts.push_back(old[span.first + j]);
+        picks.push_back({starts, v.first});
+    }
+    std::set<int> chinese = chinese_, forced = forced_;
+    std::vector<Token> toks = base;
+    int done = -1;
+    while (true) {
+        size_t k = 0;
+        while (k < toks.size() && !(toks[k].kind == Kind::En && toks[k].start > done && !forced_.count(toks[k].start)))
+            ++k;
+        if (k == toks.size()) break;
+        int start = toks[k].start;
+        done = start;
+        auto here = seam(toks, start);
+        if (std::get<1>(*here) < static_cast<int>(SPLIT_AFTER)) continue;
+        std::vector<std::pair<std::set<int>, std::set<int>>> marks{{chinese, forced}};
+        for (auto& m : seam_marks(toks, k, chinese, forced)) marks.push_back(std::move(m));
+        std::optional<int64_t> best;
+        std::optional<size_t> pick;
+        std::vector<Token> pick_tokens;
+        std::set<std::vector<std::tuple<int, std::string, ustr>>> read;
+        for (size_t n = 0; n < marks.size(); ++n) {
+            std::vector<Token> trial = n == 0 ? toks : tokens_with(marks[n].first, marks[n].second);
+            auto key = token_key(trial);
+            if (read.count(key)) continue;
+            read.insert(std::move(key));
+            auto got = seam(trial, start);
+            if (!got || std::get<1>(*got) < static_cast<int>(SPLIT_AFTER)) continue;
+            std::vector<std::pair<std::vector<int>, std::vector<ustr>>> here_picks;  // (of this stretch only)
+            for (auto& p : picks)
+                if (p.first[0] < std::get<2>(*got)) here_picks.push_back(p);
+            if (!keeps_picks(trial, here_picks, pinned)) continue;  // (too few syllables after the English, or a pick lost)
+            tokens = trial;
+            readings.clear();
+            for (auto& t : trial)
+                if (t.kind == Kind::Zh) readings.push_back(t.value);
+            const Overrides none;
+            segments_ = convert_all(&none);
+            ustr units = token_units(std::get<2>(*got));
+            int64_t score = scorer->units_logp(units) + SPLIT_UNIT_Q * static_cast<int64_t>(units.size()) +
+                            (n == 0 ? SPLIT_MARGIN_Q : 0);
+            if (!best || score > *best) {
+                best = score;
+                pick = n;
+                pick_tokens = std::move(trial);
+            }
+        }
+        if (pick) {
+            toks = std::move(pick_tokens);
+            chinese = marks[*pick].first;
+            forced = marks[*pick].second;
+            if (*pick > 0) split_taken_ = true;
+        }
+    }
+    tokens = std::move(toks);
+    readings = std::move(kept_readings);  // (the trials' reading: refresh reads the tokens decided anew)
+    segments_ = std::move(kept_segments);
+    if (split_taken_ || taken_before) picks_follow(old);
+}
+
+void Composer::picks_follow(const std::vector<int>& old) {
+    // #55: the picks, numbered by the syllables before (old: their raw offsets), numbered by the tokens now; those whose
+    // keys are no syllables in a row now go (engine/composer.py _picks_follow)
+    auto [kept, terms] = renumber(old, overrides_, &term_picks_);
+    bool same = kept.size() == overrides_.size();
+    for (auto a = kept.begin(), b = overrides_.begin(); same && a != kept.end(); ++a, ++b) same = a->first == b->first;
+    if (!same) replaced_.clear();  // (what Tab replaced, numbered as before)
+    overrides_ = std::move(kept);
+    term_picks_ = std::move(terms);
 }
 
 void Composer::marks_before_symbols() {
@@ -6157,7 +6370,9 @@ void Composer::commit_head() {
     for (size_t k = b; k < zh.size(); ++k) before.first.push_back(zh[k]->start - tok_start);
     remember(commit);
     raw = raw.substr(tok_start);
-    refresh();
+    std::vector<std::pair<int, std::string>> rest;
+    for (size_t k = b; k < zh.size(); ++k) rest.push_back({zh[k]->start - tok_start, zh[k]->raw});
+    refresh(&rest);
     picks_back(before);
 }
 

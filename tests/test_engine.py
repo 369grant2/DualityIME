@@ -4630,6 +4630,221 @@ class PairPickTest(Base):
         self.assertEqual(self.c.user.phrase_count("ㄔㄨㄥˊ-ㄏㄨㄟˋ", "重繪"), 0)
 
 
+class ModelSplitTest(Base):
+    """#55: where English ends, asked of a model that knows English (docs/superpowers/items/55-model-assisted-split.md).
+    A stand-in: the light model told it knows English, its whole-text score given by each test (the real one needs a
+    plus model: docs/superpowers/items/55/engine_split_eval.py, both_engines.py)."""
+
+    def setUp(self):
+        super().setUp()
+        c = self.c
+        c.config.set(long_sentence=True, autocorrect=False)
+        self.scorer = c._lm()
+        if self.scorer is None:
+            self.skipTest("no language model (numpy)")
+        self.scorer.lm.knows_english = True  # (an attribute of this instance: tearDown gives the class's back)
+        self.asked = []
+        self.score = lambda units: 0
+
+        def units_logp(units):
+            self.asked.append(units)
+            return self.score(units)
+        self.scorer.units_logp = units_logp
+
+    def tearDown(self):
+        del self.scorer.units_logp
+        del self.scorer.lm.knows_english
+        self.c.reset()
+
+    def typed(self, keys):
+        for k in keys:
+            self.c.key(k)
+        return self.c.composition
+
+    def test_the_split_the_model_reads_likelier_is_taken(self):
+        # (bug之後: the engine let the English take 之's keys, bug5 後; the model reads bug + 之後 likelier)
+        self.score = lambda units: 10 ** 7 if "之" in units else 0
+        self.assertEqual(self.typed("2/3hk4g4j061u45l32l4bug5 c.4y94e93cjo6"), "等測試完畢找到bug之後再改回")
+        self.assertTrue(self.asked)
+
+    def test_by_the_margin_only(self):
+        # (another split must beat the engine's by more than SPLIT_MARGIN_Q, the units' count weighed alike)
+        def score(units, bonus):
+            return -composer.SPLIT_UNIT_Q * len(units) + (bonus if "更" in units else 0)
+        for bonus, shown in ((composer.SPLIT_MARGIN_Q, "我按F5e/ 心了"), (composer.SPLIT_MARGIN_Q + 1, "我按F5更新了")):
+            with self.subTest(bonus=bonus):
+                self.c.reset()
+                self.score = lambda units, b=bonus: score(units, b)
+                self.assertEqual(self.typed("ji304F5e/ vup xk7"), shown)
+
+    def test_one_character_after_the_english_is_not_asked(self):
+        # (the model sees English as one EN: CP56 or CP值 it cannot tell - asked when two characters follow)
+        self.score = lambda units: 10 ** 7 if len(units) > 2 else 0
+        self.assertEqual(self.typed("ji3CP56"), "我CP56")
+        self.assertEqual(self.asked, [])
+        self.typed("5j/ ")  # (a second character after it: asked now)
+        self.assertTrue(self.asked)
+
+    def test_a_model_that_does_not_know_english_is_not_asked(self):
+        del self.scorer.lm.knows_english
+        self.score = lambda units: 10 ** 7 if "之" in units else 0
+        self.assertEqual(self.typed("2/3hk4g4j061u45l32l4bug5 c.4y94e93cjo6"), "等測試完畢找到bug5 後再改回")
+        self.assertEqual(self.asked, [])
+        self.scorer.lm.knows_english = True  # (for tearDown)
+
+    def test_english_longer_by_digits(self):
+        # (計3800餘字: the engine read 380 + 源自, the 0 of 3800 a syllable's key; the model reads the digit as English)
+        self.score = lambda units: 0 if "源" in units else 10 ** 7  # (the stand-in reads its own characters)
+        self.assertTrue(self.typed("ru43800m6y4").startswith("計3800"))
+
+    def test_a_pick_keeps_its_place(self):
+        # (code-reviewer: 候 picked for bug5 後, then 再 typed - the model's split bug + 之 renumbered the syllables and
+        # the pick went; it follows its keys)
+        c = self.c
+        self.score = lambda units: 10 ** 7 if "之" in units else 0
+        self.typed("bug5 c.4")
+        c.key(special="DOWN")
+        for _ in range(c.candidates.index("候")):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+        self.assertTrue(self.typed("y94").startswith("bug之候"))
+        self.assertIn("候", [v[1] for v in c.overrides.values()])
+
+    def test_a_split_losing_a_pick_is_not_taken(self):
+        # (the picks keep the split they were made on: a character picked for 之, a syllable of the model's split only;
+        # the model then liking the engine's split better, which reads those keys as English, passes it over)
+        c = self.c
+        self.score = lambda units: 10 ** 7 if "之" in units else 0
+        self.assertTrue(self.typed("2/3hk4g4j061u45l32l4bug5 c.4y94").endswith("bug之後再"))
+        c.key(special="END")
+        for _ in range(3):
+            c.key(special="LEFT")
+        c.key(special="DOWN")
+        other = next(ch for ch in c.candidates if len(ch) == 1 and ch != "之")
+        for _ in range(c.candidates.index(other)):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+        self.assertIn("bug" + other, c.composition)
+        self.score = lambda units: -composer.SPLIT_UNIT_Q * len(units)  # (now the engine's split wins by the margin)
+        c.key(special="END")
+        self.typed("e93")
+        self.assertIn("bug" + other, c.composition)
+
+    def test_english_the_user_asked_for_is_not_cut(self):
+        # (keys the user asked to be English, forced, stay one English token whatever the model reads)
+        c = self.c
+        self.score = lambda units: 10 ** 7 if "之" in units else 0
+        self.typed("2/3hk4g4j061u45l32l4bug5 c.4y94e93cjo6")
+        self.assertIn("bug之後", c.composition)
+        c.reset()
+        for k in "2/3hk4g4j061u45l32l4bug5 c.4y94e93cjo6":
+            c.key(k)
+            if k == "g":  # (bug asked as English: the bar and a suggestion taken mark its first key, as here)
+                c.forced = {len(c.raw) - 3}
+        c._refresh()
+        self.assertIn("bug5", c.composition)
+
+    def test_english_words_alone_stay(self):
+        # (English cut short could read likelier: the model is asked only with two characters after the English)
+        self.score = lambda units: 10 ** 7 if len(units) > 1 else 0
+        for word in ("python", "Nespresso", "iPhone15"):
+            with self.subTest(word=word):
+                self.c.reset()
+                self.assertEqual(self.typed(word), word)
+
+    def pick(self, char):
+        c = self.c
+        c.key(special="DOWN")
+        for _ in range(c.candidates.index(char)):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+
+    def test_a_pick_after_english_later_keeps_the_split_before_it(self):
+        # (each English decided on its own: a pick on what the second bug5 split into keeps the first split too)
+        c = self.c
+        self.score = lambda units: 10 ** 7 * units.count("之")
+        self.assertEqual(self.typed("bug5 c.4y94bug5 c.4y94"), "bug之後再bug之後再")
+        c.key(special="END")
+        for _ in range(3):
+            c.key(special="LEFT")
+        self.pick("知")
+        self.assertEqual(c.composition, "bug之後再bug知後再")
+        c.key(special="END")
+        self.assertEqual(self.typed("e93"), "bug之後再bug知後再改")
+
+    def test_a_pick_autocorrect_reads_otherwise_does_not_stop_the_split(self):
+        # (添 picked in 今天, then 的: 注音自動校正 reads the keys as 篇 again, the pick puts 添 back - and the split
+        # after it is still taken)
+        c = self.c
+        c.config.set(autocorrect=True)
+        c.settings_changed()
+        self.score = lambda units: 10 ** 7 * units.count("之")
+        self.typed("rup qu0 ")
+        self.pick("添")
+        c.key(special="END")
+        self.assertEqual(self.typed("2k7bug5 c.4y94"), "今添的bug之後再")
+
+    def test_the_picks_follow_when_the_model_no_longer_knows_english(self):
+        # (a setting changed while typing: the split the model took goes, the picks follow their keys)
+        c = self.c
+        self.score = lambda units: 10 ** 7 * units.count("之")
+        self.typed("bug5 c.4y94e93")
+        c.key(special="LEFT")
+        c.key(special="DOWN")
+        want = next(ch for ch in c.candidates if len(ch) == 1 and ch != "改")
+        for _ in range(c.candidates.index(want)):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+        self.assertEqual(c.composition, "bug之後再" + want)
+        del self.scorer.lm.knows_english
+        c._refresh()
+        self.assertTrue(c.composition.endswith(want), c.composition)
+        self.assertNotIn("之", c.composition)
+        self.scorer.lm.knows_english = True  # (for tearDown)
+
+    def test_undo_keeps_the_picks(self):
+        c = self.c
+        self.score = lambda units: 10 ** 7 * units.count("之")
+        self.typed("bug5 c.4y94e93")
+        c.key(special="LEFT")
+        c.key(special="DOWN")
+        want = next(ch for ch in c.candidates if len(ch) == 1 and ch != "改")
+        c.key(special="ESC")
+        self.pick(want)
+        picked = c.composition
+        self.assertEqual(picked, "bug之後再" + want)
+        c.key(special="ENTER")
+        c.undo_commit()
+        self.assertEqual(c.composition, picked)
+
+    def test_sending_the_head_keeps_the_mainland_words_picked(self):
+        # (a buffer too long sends its head: 簡體輸出's picks follow their keys, numbered anew)
+        c = self.c
+        self.score = lambda units: 10 ** 7 * units.count("之")
+        c.toggle_simplified()
+        self.addCleanup(c.toggle_simplified)  # (back to Traditional for the tests after)
+        self.typed("2/3hk4g4j061u45l32l4" * 3 + "bug5 c.4y94bj03wu3")
+        c.key(special="LEFT")
+        c.key(special="LEFT")
+        self.pick("软件")
+        c.key(special="END")
+        self.assertIn("软件", c.composition)
+        for k in "2/3hk4g4j061u45l32l4" * 3:
+            c.key(k)
+            if c.commit:
+                break
+        self.assertTrue(c.commit)
+        self.assertIn("软件", c.composition)
+
+    def test_a_space_or_zhuyin_punctuation_after_the_english_is_looked_past(self):
+        # (305 + space: the space taken as a separator, though 5 + space is 之; G7fu, + space: fu, + space is 切)
+        for keys, char, shown in (("305 fu06ul42u3286", "之", "30之前要抵達"), ("G7fu, bj42k7ru tj3", "切", "G7切入的基礎")):
+            with self.subTest(keys=keys):
+                self.c.reset()
+                self.score = lambda units, ch=char: 10 ** 7 if ch in units else 0
+                self.assertEqual(self.typed(keys), shown)
+
+
 class CtrlPunctuationTest(Base):
     """Ctrl + a punctuation key types its full-width mark (a setting, on by default)."""
 
@@ -5141,6 +5356,22 @@ class AutocorrectTest(Base):
             c.key(special="RIGHT")
         c.key(special="DOWN")
         return c.candidates
+
+    def test_undo_keeps_a_pick_autocorrect_reads_otherwise(self):
+        # (今天, 添 picked, 的, Enter, undo: 今添的 again, not 今篇的 with the pick gone)
+        c = self.c
+        self.type("rup qu0 ", enter=False)
+        c.key(special="LEFT")
+        c.key(special="DOWN")
+        for _ in range(c.candidates.index("添")):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+        c.key(special="END")
+        self.type("2k7", enter=False)
+        self.assertEqual(c.composition, "今添的")
+        c.key(special="ENTER")
+        c.undo_commit()
+        self.assertEqual(c.composition, "今添的")
 
     def test_off_by_default(self):
         self.c.config.set(autocorrect=False)

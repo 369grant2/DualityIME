@@ -1,7 +1,7 @@
 """Distil the teacher's reranking into a character GRU (a size of tools/lm/train.py's SIZES), same scoring as the engine.
 
     py distill.py <size> <name> --init <pt> [--data train_nbest_500k.jsonl] [--teacher zhtw17_500k]
-                   [--epochs 2] [--lr 3e-4] [--tlam 1.0] [--kdw 0] [--groups 32] [--limit N] [--goldw 0]
+                   [--epochs 2] [--lr 3e-4] [--tlam 1.0] [--kdw 0] [--groups 32] [--limit N] [--goldw 0] [--seed 0]
 
 How data/lm.bin of 3.2.2 was made (decisions.md 2026-11-09; the scripts of this folder, run from it, GPU
 steps on a GPU with 24 GB; WORK is tools/lm/common.WORK: train.u16, dev.u16, vocab.txt from tools/lm/prepare.py,
@@ -42,6 +42,7 @@ Target: softmax over each sentence's n-best of ln10 * (engine + tlam * teacher).
 of the student's softmax against it (listwise distillation). --goldw g: the target is (1 - g) of that and g on the
 sentence as written, where it is among the candidates (#41, the user 2026-11-19: a student can learn past its teacher
 where the teacher is wrong - 在／再, the teacher about 65% with the answer among the candidates 76%).
+--seed s: the order of the training rows (and torch's random numbers): runs from one start that differ by it can be averaged.
 Rows keep their syllables and the index of each character in its syllable's list (numpy int32); the
 candidate matrices are built per batch (prebuilt, 500k rows took tens of GB).
 Out: distill/<name>.pt / .json / .log (eval per epoch vs shipped, on the held-out sets).
@@ -232,6 +233,7 @@ def main():
     limit = arg("--limit", None, int)
     hard = "--hard" in sys.argv
     goldw = arg("--goldw", 0.0, float)
+    seed = arg("--seed", 0, int)
     lmw = arg("--lmw", 0.0, float)
     kdw = arg("--kdw", 0.0, float)
     unkw = arg("--unkw", 0.0, float)
@@ -246,8 +248,8 @@ def main():
         pass
     print(f"{name}: {epochs} epochs", flush=True)
     device = "cuda"
-    torch.manual_seed(0)
-    random.seed(0)
+    torch.manual_seed(seed)
+    random.seed(seed)
     data = Data()
     t0 = time.time()
     teacher = {} if eval_only else json.load(open(os.path.join(DIST, f"teacher_{tname}.json"), encoding="utf-8"))

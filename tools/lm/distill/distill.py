@@ -1,7 +1,7 @@
 """Distil the teacher's reranking into a character GRU (a size of tools/lm/train.py's SIZES), same scoring as the engine.
 
     py distill.py <size> <name> --init <pt> [--data train_nbest_500k.jsonl] [--teacher zhtw17_500k]
-                   [--epochs 2] [--lr 3e-4] [--tlam 1.0] [--kdw 0] [--groups 32] [--limit N]
+                   [--epochs 2] [--lr 3e-4] [--tlam 1.0] [--kdw 0] [--groups 32] [--limit N] [--goldw 0]
 
 How data/lm.bin of 3.2.2 was made (decisions.md 2026-11-09; the scripts of this folder, run from it, GPU
 steps on a GPU with 24 GB; WORK is tools/lm/common.WORK: train.u16, dev.u16, vocab.txt from tools/lm/prepare.py,
@@ -39,7 +39,9 @@ dictionary writes for that syllable (the engine's Scorer.phrase_score); a row wi
 teacher score is the one of the text after that context (key ctx + tab + text). Combined as the engine does:
 engine + w * student, w learnt (starts at the shipped 0.5).
 Target: softmax over each sentence's n-best of ln10 * (engine + tlam * teacher). Loss: cross-entropy
-of the student's softmax against it (listwise distillation).
+of the student's softmax against it (listwise distillation). --goldw g: the target is (1 - g) of that and g on the
+sentence as written, where it is among the candidates (#41, the user 2026-11-19: a student can learn past its teacher
+where the teacher is wrong - 在／再, the teacher about 65% with the answer among the candidates 76%).
 Rows keep their syllables and the index of each character in its syllable's list (numpy int32); the
 candidate matrices are built per batch (prebuilt, 500k rows took tens of GB).
 Out: distill/<name>.pt / .json / .log (eval per epoch vs shipped, on the held-out sets).
@@ -229,6 +231,7 @@ def main():
     groups = arg("--groups", 32, int)
     limit = arg("--limit", None, int)
     hard = "--hard" in sys.argv
+    goldw = arg("--goldw", 0.0, float)
     lmw = arg("--lmw", 0.0, float)
     kdw = arg("--kdw", 0.0, float)
     unkw = arg("--unkw", 0.0, float)
@@ -325,6 +328,10 @@ def main():
                 else:
                     tch = torch.tensor([row["teacher"][k] for k in keep], device=device)
                     target = torch.softmax(LN10 * (eng + tlam * tch), 0)
+                    right = [j for j, k in enumerate(keep) if row["full"][k] == row["text"]] if goldw > 0 else []
+                    if right:  # (--goldw: part of the target on the sentence as written)
+                        target = (1 - goldw) * target
+                        target[right[0]] += goldw
                 logq = torch.log_softmax(LN10 * (eng + w * stu), 0)
                 loss = loss - (target * logq).sum()
                 used += 1

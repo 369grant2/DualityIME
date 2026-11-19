@@ -1201,6 +1201,57 @@ class CompletionTest(Base):
         self.assertEqual(c.composition, "蠻3")
         c.key(special="ESC")
 
+    def test_email_start_after_a_mark_typed_after_chinese(self):
+        # (#52, the user 2026-11-18: 信箱： + a remembered address - a word starts after a mark typed after Chinese,
+        # Ctrl + a punctuation key or the key itself; not after one inside English: abc.a063 stays abc.蠻3)
+        c = self.c
+        c.user.emails.clear()  # (the class shares one engine: no address from another test)
+        c.user.email_used.clear()
+        c.user.learn_word("A06312345@example.org")
+        for how, mark in (("ctrl", "："), ("key", ",")):  # (a mark key before English is sent as typed, as before)
+            for ch in "ji3":
+                c.key(ch)
+            if how == "ctrl":
+                c.type_full_punct(":")
+            else:
+                c.key(",")
+            for ch in "a063":
+                c.key(ch)
+            self.assertEqual(c.tokens[-1].kind, "en", how)
+            self.assertEqual(c.tokens[-1].raw, "a063", how)
+            self.assertEqual(c.suggestions, ["12345@example.org"], how)
+            c.key(special="TAB")
+            c.key(special="ENTER")
+            self.assertEqual(c.commit, "我" + mark + "a06312345@example.org", how)
+        for ch in "abc.a063":
+            c.key(ch)
+        self.assertNotEqual(c.tokens[-1].raw, "a063")
+        self.assertFalse(any("@" in s for s in c.suggestions))
+        c.key(special="ESC")
+        for ch in "ji3":  # (the symbol keyboard's ASCII is as typed: no word starts after =)
+            c.key(ch)
+        c._type_symbol("=", False, True)
+        for ch in "a063":
+            c.key(ch)
+        self.assertNotEqual(c.tokens[-1].raw, "a063")
+        self.assertFalse(any("@" in s for s in c.suggestions))
+        c.key(special="ESC")
+
+    def test_chinese_after_a_mark_gets_the_chinese_hints(self):
+        # (#52: after 我： the Chinese typed is Chinese, its hints Chinese - no address)
+        c = self.c
+        c.user.emails.clear()
+        c.user.email_used.clear()
+        c.user.learn_word("A06312345@example.org")
+        for ch in "ji3":
+            c.key(ch)
+        c.type_full_punct(":")
+        for ch in "a06":
+            c.key(ch)
+        self.assertEqual(c.composition, "我：蠻")
+        self.assertFalse(any("@" in s for s in c.suggestions))
+        c.key(special="ESC")
+
     def test_english_word_start_as_an_address(self):
         # (#54 /code-review: an English word sent twice whose keys start like a syllable is offered as an address is -
         # mp3t of mp3tag reads as typed, not 允 + t)
@@ -7197,6 +7248,98 @@ class LongSentenceTest(unittest.TestCase):
         config = Config()
         config.set(long_sentence=on)
         return composer.Composer(self.table, self.lexicon, self.english, user or self.user(), self.bigram, config)
+
+    def test_the_character_of_a_syllable_picked_from_the_bar_stays(self):
+        # (the user 2026-11-18: 又gpt4, 赤 picked from the bar - t4 a syllable - then 我 made 又gp斥我 with the model
+        # reading them again: the character the bar showed stays, as one picked from the list; not learned)
+        c = self.composer(True)
+        for ch in "u.4gpt4":
+            c.key(ch)
+        while c.caret != 5:
+            c.key(special="LEFT")
+        c.key(special="UP")
+        for _ in range(c.replacements.index("赤")):
+            c.key(special="RIGHT")
+        c.key(special="ENTER")
+        self.assertEqual(c.composition, "又gp赤")
+        c.key(special="END")
+        for ch in "ji3":
+            c.key(ch)
+        self.assertEqual(c.composition, "又gp赤我")
+        c.key(special="ENTER")
+        self.assertEqual(c.user.phrase_count("ㄔˋ", "赤"), 0)
+
+    def test_a_syllable_picked_from_the_bar_gives_way_to_a_word_after_it(self):
+        # (the user 2026-11-19, B: the bar offers one character, the reading - a word the syllables typed after it make
+        # with it comes: 又gp業 + 面 is 又gp頁面, 又gp赤 + 膀 is 又gp翅膀; with 面 deleted 業 is back; nothing learned)
+        c = self.composer(True)
+
+        def pick(keys, ch):
+            for k in keys:
+                c.key(k)
+            while c.caret != 5:
+                c.key(special="LEFT")
+            c.key(special="UP")
+            for _ in range(c.replacements.index(ch)):
+                c.key(special="RIGHT")
+            c.key(special="ENTER")
+            c.key(special="END")
+
+        pick("u.4gpu,4", "業")
+        self.assertEqual(c.composition, "又gp業")
+        for k in "au04":
+            c.key(k)
+        self.assertEqual(c.composition, "又gp頁面")
+        c.key(special="BACK")
+        self.assertEqual(c.composition, "又gp業")
+        for k in "au04":
+            c.key(k)
+        c.key(special="ENTER")
+        self.assertEqual(c.commit, "又gp頁面")
+        self.assertEqual(c.user.phrase_count("ㄧㄝˋ", "業"), 0)
+        self.assertEqual(c.user.phrase_count("ㄧㄝˋ-ㄇㄧㄢˋ", "頁面"), 0)
+        pick("u.4gpt4", "赤")
+        for k in "1;3":
+            c.key(k)
+        self.assertEqual(c.composition, "又gp翅膀")
+        c.key(special="ESC")
+        # (a pick after that looks at what is shown: 頁 stays - 麵 for 面 is 又gp頁麵, the bar's a驗 there 又gp頁a驗,
+        # not 業 again - code-reviewer)
+        for how in ("list", "bar"):
+            pick("u.4gpu,4", "業")
+            for k in "au04":
+                c.key(k)
+            if how == "list":
+                c.key(special="DOWN")
+                for _ in range(c.candidates.index("麵")):
+                    c.key(special="RIGHT")
+            else:
+                while c.caret != 8:
+                    c.key(special="LEFT")
+                c.key(special="UP")
+                for _ in range(c.replacements.index("a驗")):
+                    c.key(special="RIGHT")
+            c.key(special="ENTER")
+            self.assertEqual(c.composition, "又gp頁麵" if how == "list" else "又gp頁a驗", how)
+            c.key(special="ESC")
+        # (...only a character the syllable is written as alone: 咖 of 咖哩 is no ㄍㄚ alone, so a pick for ㄌㄧˇ brings 嘎
+        # back, not the whole run as zhuyin - code-reviewer)
+        for k in "u.4gpe8 ":
+            c.key(k)
+        while c.caret != 5:
+            c.key(special="LEFT")
+        c.key(special="UP")
+        c.key(special="ENTER")
+        c.key(special="END")
+        for k in "xu3":
+            c.key(k)
+        self.assertEqual(c.composition, "又gp咖哩")
+        c.key(special="DOWN")
+        c.key(special="RIGHT")
+        other = c.candidates[c.cand_index]
+        c.key(special="ENTER")
+        self.assertNotEqual(other, "哩")
+        self.assertEqual(c.composition, "又gp嘎" + other)
 
     def zhuyin(self, readings):
         """Keys for the readings (first tone: a space)."""

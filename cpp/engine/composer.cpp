@@ -810,9 +810,17 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         // word's start - the text's, or after a space between words, not the first tone of a syllable (居 + a06 stays
         // 居蠻) - all the keys of the word so far, is English as the word is (a063, not 蠻3; a063ek7 stays 蠻3個), so its
         // completion is offered; only with 補字提示 on (engine/composer.py)
-        // (the text's start, not a run's after a cut: 我 + numpad 1 + a063 stays 我1蠻3 - code-reviewer)
-        const bool word_start =
-            (i == 0 && text_start) || (i > 0 && raw[i - 1] == ' ' && !(cur != 0 && nodes[cur].tok.kind == Kind::Zh));
+        // (the text's start, not a run's after a cut: 我 + numpad 1 + a063 stays 我1蠻3 - code-reviewer); after a mark
+        // typed after Chinese too (我， + a063: #52)
+        bool mark_after_chinese = false;
+        if (starts && i > 0 && cur != 0 && nodes[cur].tok.kind == Kind::Lit && nodes[cur].tok.raw != " ") {
+            size_t p = cur;
+            while (p != 0 && nodes[p].tok.kind == Kind::Lit && nodes[p].tok.raw != " ") p = nodes[p].prev;
+            mark_after_chinese = p != 0 && nodes[p].tok.kind == Kind::Zh;
+        }
+        const bool word_start = (i == 0 && text_start) ||
+                                (i > 0 && raw[i - 1] == ' ' && !(cur != 0 && nodes[cur].tok.kind == Kind::Zh)) ||
+                                mark_after_chinese;
         for (size_t j = i + 1; j <= end; ++j) {
             std::string piece = raw.substr(i, j - i);
             bool word_after = after_word;
@@ -1443,6 +1451,21 @@ static std::vector<std::tuple<int, std::string, ustr>> token_key(const std::vect
 // a space joined from the symbol keyboard (#52): one between words, a word starts after it (the tokenizer, the
 // completions; engine/composer.py _joined_space)
 static bool joined_space(const Token& t) { return t.kind == Kind::Fix && (t.value == U" " || t.value == FULL_SPACE); }
+// a word starts after this joined token: a space from the symbol keyboard, or a mark or symbol joined into the text that
+// is no ASCII (Ctrl + a punctuation key, the symbol keyboard: #52); what is before it is not looked at (α, abc， too);
+// not a name's ·, nor the symbol keyboard's ASCII (engine/composer.py _word_starts_after)
+static bool word_starts_after(const Token& t) {
+    return joined_space(t) ||
+           (t.kind == Kind::Fix && t.raw == std::string(1, NAME_MARK_KEY) && t.value != U"\u00B7" &&
+            !std::all_of(t.value.begin(), t.value.end(), [](char32_t ch) { return ch < 0x80; }));
+}
+// tokens [0, end) end in punctuation keys read as marks right after Chinese: a word starts after them (#52;
+// engine/composer.py _after_chinese_mark)
+static bool after_chinese_mark(const std::vector<Token>& toks, size_t end) {
+    size_t k = end;
+    while (k && toks[k - 1].kind == Kind::Lit && toks[k - 1].raw != " ") --k;
+    return k > 0 && k < end && toks[k - 1].kind == Kind::Zh;
+}
 }  // namespace
 
 std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, const UserModel* user,
@@ -1520,7 +1543,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                 tokens.push_back(Token{Kind::En, std::string(1, raw[cut.a]), U(std::string(1, raw[cut.a])), cut.a});
             else {
                 tokens.push_back(Token{Kind::Fix, raw.substr(cut.a, cut.b - cut.a), *cut.text, cut.a});
-                spaced = joined_space(tokens.back());
+                spaced = word_starts_after(tokens.back());
             }
         }
         start = cut.b;
@@ -2575,10 +2598,51 @@ std::map<int, ustr> Composer::english_gaps() const {
     return gaps;
 }
 
+void Composer::settle_soft() {
+    // before a pick (it looks at what is shown): a syllable picked from the bar whose character gave way to a word (SOFT,
+    // #57) is kept as shown from then on, still SOFT (頁 of 又gp頁面, then 麵 picked for 面: 又gp頁麵, not 又gp業麵;
+    // engine/composer.py _settle_soft); only a character the syllable is written as alone (咖 of 咖哩 is no ㄍㄚ alone)
+    std::map<int, char32_t> chars;
+    for (auto& seg : segments_)
+        if (static_cast<int>(seg.phrase.size()) == seg.length)
+            for (int k = 0; k < seg.length; ++k) chars[seg.start + k] = seg.phrase[k];
+    for (auto& [sp, v] : overrides_) {
+        if (!v.kept || v.by != SOFT || v.second.size() != 1) continue;
+        auto ch = chars.find(sp.first);
+        if (ch == chars.end() || ch->second == v.second[0]) continue;
+        std::vector<ustr> rd{readings[sp.first]};
+        if (lexicon_.has(rd, ustr(1, ch->second))) v.second = ustr(1, ch->second);
+    }
+}
+
+bool Composer::overrides_shown(Overrides& out) {
+    // the picks as shown: the character kept for a syllable picked from the bar (SOFT, #57) gives way to a word the
+    // syllables after it make with it, read without it (又gp業 + 面 is 又gp頁面; engine/composer.py _overrides_shown);
+    // false when none does (out untouched: overrides_ as they are)
+    std::vector<std::pair<int, int>> soft;
+    for (auto& [sp, v] : overrides_)
+        if (v.kept && v.by == SOFT) soft.push_back(sp);
+    if (soft.empty()) return false;
+    Overrides hard = overrides_;
+    for (auto& sp : soft) hard.erase(sp);
+    const auto free = convert_all(&hard);
+    bool any = false;
+    out = overrides_;
+    for (auto& sp : soft)
+        for (auto& seg : free)
+            if (seg.length > 1 && seg.start <= sp.first && sp.first < seg.start + seg.length - 1) {
+                out.erase(sp);
+                any = true;
+                break;
+            }
+    return any;
+}
+
 std::vector<Segment> Composer::convert_all(const Overrides* instead) {
     // convert each maximal run of zh tokens; instead: other picks than the user's ({}: what it
     // would be without them)
-    const Overrides& overrides = instead ? *instead : overrides_;
+    Overrides given;  // (the picks as shown: overrides_shown)
+    const Overrides& overrides = instead ? *instead : overrides_shown(given) ? given : overrides_;
     if (!instead) run_contexts_.clear();  // (what is shown: each run's context kept for the list, #51)
     std::vector<Segment> out;
     std::vector<std::pair<int, int>> runs;
@@ -2930,9 +2994,11 @@ void Composer::suggest() {
     std::set<int> starts;
     size_t sp = raw.rfind(' ');
     int after_space = sp == std::string::npos ? 0 : static_cast<int>(sp) + 1;
-    for (auto& t : tokens)  // (or a space joined from the symbol keyboard: #52)
-        if (joined_space(t))
+    for (size_t k = 0; k < tokens.size(); ++k) {  // (or a space or mark joined from the symbol keyboard, a mark
+        const Token& t = tokens[k];                // after Chinese: #52)
+        if (word_starts_after(t) || (t.kind == Kind::Lit && after_chinese_mark(tokens, k + 1)))
             after_space = std::max(after_space, t.start + static_cast<int>(t.raw.size()));
+    }
     if (after_space >= run) starts.insert(after_space);
     if (last && (last->kind == Kind::En || last->kind == Kind::Partial) && last->start >= run) starts.insert(last->start);
     for (int s : std::set<int>(starts))
@@ -4455,8 +4521,9 @@ void Composer::forget_english_word(const Token& tok) {
 }
 
 void Composer::pick_syllable(const Action& action) {
-    // keys c..j are one syllable, read with the rest again (頁 + 面 can still be 頁面);
-    // what is before stays as typed if the caret was inside a word
+    // keys c..j are one syllable, read with the rest again (頁 + 面 can still be 頁面), its character as the bar
+    // showed it kept from then on, unless what is typed after it makes a word with it (keep_picked_syllable); what is
+    // before stays as typed if the caret was inside a word
     int c = action.start, j = action.end;
     if (action.force < 0) forget_english_at(c);
     keep_before_bar(action.force >= 0 ? action.force : c);
@@ -4497,7 +4564,29 @@ void Composer::pick_syllable(const Action& action) {
         if (v.first <= c || a >= j) taken[a] = v;
     taken_ = std::move(taken);
     refresh();
+    keep_picked_syllable(c);
     caret_past(j);
+}
+
+void Composer::keep_picked_syllable(int c) {
+    // the character shown for the syllable picked from the bar at raw offset c stays (又gpt4, 赤 picked, then 我 made
+    // 又gp斥我): kept as the bar keeps what is before it, not learned; but as SOFT: a word the syllables typed after it
+    // make with it comes (又gp業 + 面 is 又gp頁面; overrides_shown)
+    int k = 0;
+    bool found = false;
+    for (auto& t : tokens) {
+        if (t.kind != Kind::Zh) continue;
+        if (t.start == c) {
+            found = true;
+            break;
+        }
+        ++k;
+    }
+    if (!found) return;
+    const std::vector<Segment> shown = segments_;
+    for (auto& seg : shown)
+        if (static_cast<int>(seg.phrase.size()) == seg.length && seg.start <= k && k < seg.start + seg.length)
+            keep_as_shown(seg.start, seg.phrase, {k}, SOFT);
 }
 
 void Composer::pick_replacement(int i) {
@@ -4675,7 +4764,7 @@ void Composer::keep_picks_around(int at, const std::function<void()>& edit) {
                at <= starts[sp.first + sp.second - 1];
     };
     for (auto it = overrides.begin(); it != overrides.end();)
-        it = across(it->first) || (it->second.kept && it->second.by != BAR && across(it->second.by))
+        it = across(it->first) || (it->second.kept && !by_bar(it->second.by) && across(it->second.by))
                  ? overrides.erase(it)
                  : std::next(it);
     TermPicks terms;
@@ -4821,6 +4910,7 @@ bool Composer::key_fill(std::optional<char32_t> ch, const std::string& special) 
 }
 
 void Composer::pick(int i, bool from_bar) {
+    settle_soft();
     Action action = cand_actions_[i];
     std::optional<ustr> term;  // 簡體輸出 (#32): what is shown for the phrase picked
     if (action.type == "term") {
@@ -5224,6 +5314,7 @@ void Composer::keep_as_shown(int a, const ustr& q, const std::vector<int>& where
 void Composer::keep_before_bar(int start) {
     // a pick from the bar above the text (how the keys from `start` are read): what is shown before
     // them stays, as before a pick from the candidates. Called before the keys are read again.
+    settle_soft();
     int before = 0;
     for (auto& t : tokens)
         if (t.kind == Kind::Zh && t.start < start) ++before;
@@ -5258,7 +5349,7 @@ void Composer::drop_orphans() {
     Overrides kept;
     for (auto& [span, v] : overrides_) {
         auto by = overrides_.find(v.by);
-        if (!v.kept || v.by == BAR || (by != overrides_.end() && !by->second.kept)) {
+        if (!v.kept || by_bar(v.by) || (by != overrides_.end() && !by->second.kept)) {
             kept[span] = v;
             continue;
         }
@@ -5754,7 +5845,7 @@ std::pair<Overrides, Composer::TermPicks> Composer::renumber(const std::vector<i
         auto first = moved(span.first, span.second);
         if (!first) continue;
         Pin pin = v;
-        if (pin.kept && pin.by != BAR) {  // (kept around a pick: that pick's place moves too)
+        if (pin.kept && !by_bar(pin.by)) {  // (kept around a pick: that pick's place moves too)
             auto by = moved(pin.by.first, pin.by.second);
             if (!by) continue;
             pin.by.first = *by;
@@ -6323,7 +6414,7 @@ void Composer::commit_head() {
     for (auto& [sp, v] : overrides_)
         if (sp.first >= b) {
             Pin p = v;
-            if (p.kept && p.by != BAR) p.by.first -= b;  // (the pick it belongs to moves along)
+            if (p.kept && !by_bar(p.by)) p.by.first -= b;  // (the pick it belongs to moves along)
             moved[{sp.first - b, sp.second}] = p;
         }
     overrides_ = std::move(moved);

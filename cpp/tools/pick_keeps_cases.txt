@@ -11,3 +11,8 @@ ul4y94e93cjo6{DOWN}{DOWN}{ENTER}{ENTER} => 要再改迴
 1031p3cl4g4{DOWN}{DOWN}{ENTER}{ENTER} => 版本好事
 # the reported sentence: 會不會去改 sent, 已經選好的自 typed, 字 picked (it came out 以精選好的字)
 cjo41j4cjo4fm4e93{ENTER}u3ru/ vm03cl32k7y4{DOWN}{DOWN}{ENTER}{ENTER} => 會不會去改已經選好的字
+# (#57) a syllable picked from the bar keeps the character the bar showed (又gpt4, 赤 picked, then 我 made 又gp斥我)
+u.4gpt4{LEFT}{LEFT}{UP}{ENTER}{END}ji3{ENTER} => 又gp赤我
+# (#57, the user 2026-11-19) ...but a word the syllables typed after it make with it comes (業 picked, then 面: 頁面)
+u.4gpu,4{LEFT}{LEFT}{LEFT}{UP}{ENTER}{END}au04{ENTER} => 又gp頁面
+u.4gpt4{LEFT}{LEFT}{UP}{ENTER}{END}1;3{ENTER} => 又gp翅膀

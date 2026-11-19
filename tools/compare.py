@@ -348,6 +348,21 @@ CASES = [
     "Abcd1234@example.com{ENTER}Abcd1234@example.com{ENTER}abcd1234@example.net{ENTER}abcd1234@example.net{ENTER}"
     "abcd1234@example.net{ENTER}Abc{TAB}{ENTER}abc{TAB}{ENTER}A06312345@example.org{ENTER}ji3{#1}a063{ENTER}"
     "{CAPS}a{CAPS}bc{TAB}{ENTER}",
+    # (#52) a word starts after a mark typed after Chinese (Ctrl + :, the , key): the address's start is English, its
+    # completion offered; Chinese after it is Chinese (我：蠻); not after a mark inside English (abc.蠻3)
+    "A06312345@example.org{ENTER}ji3{^:}a063{TAB}{ENTER}ji3,a063{TAB}{ENTER}ji3{^:}a06{TAB}{ENTER}abc.a063{TAB}{ENTER}"
+    "ji3{^,}{^:}a063{ENTER}",
+    # (#57) a syllable picked from the bar keeps the character the bar showed: 我 after it (又gp赤我, it came out 又gp斥我);
+    # deleting it ends the keep (又gt4我); typing before it too, like a pick from the list; a word the syllables after it
+    # make with it comes (the user 2026-11-19, B: 又gp業 + 面 is 又gp頁面, 面 deleted: 又gp業; 又gp赤 + 膀 is 又gp翅膀)
+    "u.4gpt4{LEFT}{LEFT}{UP}{ENTER}{END}ji3{ENTER}u.4gpt4{LEFT}{LEFT}{UP}{ENTER}{END}{BACK}{BACK}t4ji3{ENTER}"
+    "u.4gpt4{LEFT}{LEFT}{UP}{ENTER}{HOME}ji3{END}ji3{ENTER}u.4gpu,4{LEFT}{LEFT}{LEFT}{UP}{ENTER}{END}au04{BACK}u04{BACK}"
+    "au04{ENTER}u.4gpt4{LEFT}{LEFT}{UP}{ENTER}{END}1;3ji3{ENTER}",
+    # (#57) a pick after the word took it looks at what is shown: 頁 stays (麵 for 面: 又gp頁麵; the bar's a驗: 又gp頁a驗)
+    "u.4gpu,4{LEFT}{LEFT}{LEFT}{UP}{ENTER}{END}au04{DOWN}{RIGHT}{ENTER}{ENTER}"
+    "u.4gpu,4{LEFT}{LEFT}{LEFT}{UP}{ENTER}{END}au04{LEFT}{UP}{RIGHT}{ENTER}{ENTER}"
+    # (...only a character written alone there: 咖 of 咖哩 is no ㄍㄚ alone, a pick for ㄌㄧˇ brings 嘎 back, no zhuyin)
+    "u.4gpe8 {LEFT}{LEFT}{LEFT}{UP}{ENTER}{END}xu3{DOWN}{RIGHT}{ENTER}{ENTER}",
 ]
 
 PUNCT = list(",.;?!:\"'[]()<>-_=+/\\|@#$%^&*")

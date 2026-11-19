@@ -64,6 +64,10 @@ using Overrides = std::map<std::pair<int, int>, Pin>;  // span -> pin
 // Pin::by of what a pick from the bar above the text keeps: that pick leaves no override of its own
 // (kept until the text is sent or edited there)
 inline constexpr std::pair<int, int> BAR{-1, 0};
+// ...the syllable picked from the bar itself (#57): as BAR, but it gives way to a word the syllables after it make with
+// it (Composer::overrides_shown)
+inline constexpr std::pair<int, int> SOFT{-2, 0};
+inline bool by_bar(std::pair<int, int> by) { return by == BAR || by == SOFT; }
 // what a word Tab fixed took the place of: back when that word goes (Composer::put_back)
 struct Replaced {
     Overrides was;
@@ -226,6 +230,8 @@ private:
     void clear_input();
     void refresh(const std::vector<std::pair<int, std::string>>* old_given = nullptr);
     std::vector<Segment> convert_all(const Overrides* instead = nullptr);
+    bool overrides_shown(Overrides& out);
+    void settle_soft();
     // the character usually typed right after the English word before tokens[k], syllable a (#42), or none
     std::optional<char32_t> after_english_char(size_t k, int a) const;
     size_t token_index(int start) const;              // the token that starts at raw offset start (tokens.size(): none)
@@ -332,6 +338,7 @@ private:
     void forget_replaced(int before);  // an edit from that syllable on: the records of what is after go
     // keep the word shown from syllable a at the syllables of `where` nothing holds yet, for the pick `by`
     void keep_as_shown(int a, const ustr& q, const std::vector<int>& where, std::pair<int, int> by);
+    void keep_picked_syllable(int c);
     void keep_before_bar(int start);  // a pick from the bar: what is shown before those keys stays
     void drop_orphans();           // kept characters go with the pick that kept them
     void drop_mainland_picks();    // back to Traditional: picks of Simplified mode's only words go (#32)

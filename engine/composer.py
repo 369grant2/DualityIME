@@ -157,6 +157,25 @@ def _joined_space(tok):
     return tok.kind == "fix" and tok.value in (" ", FULL_SPACE)
 
 
+def _word_starts_after(tok):
+    """A word starts after this joined token: a space from the symbol keyboard, or a mark or symbol joined into the
+    text that is no ASCII (Ctrl + a punctuation key, the symbol keyboard: #52, the user 2026-11-18 - 信箱： + a
+    remembered address); what is before it is not looked at (α, abc， too). Not a name's ·, nor the symbol keyboard's
+    ASCII (=, @: as typed, inside English)."""
+    return _joined_space(tok) or (tok.kind == "fix" and tok.raw == NAME_MARK_KEY and tok.value != "·" and
+                                  not tok.value.isascii())
+
+
+def _after_chinese_mark(toks, end=None):
+    """toks[:end] (all of them by default) end in punctuation keys read as marks right after Chinese (我， + a063): a
+    word starts after them (#52, the user 2026-11-18); not after ones inside English (abc.def, 10:30)."""
+    end = len(toks) if end is None else end
+    k = end
+    while k and toks[k - 1].kind == "lit" and toks[k - 1].raw != " ":
+        k -= 1
+    return 0 < k < end and toks[k - 1].kind == "zh"
+
+
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
              taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False, starts=False):
@@ -208,7 +227,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                 tokens.append(Token("zh", raw[a:b], text[1], a, "taken"))
             else:
                 tokens.append(Token("fix", raw[a:b], text, a))
-                spaced = _joined_space(tokens[-1])
+                spaced = _word_starts_after(tokens[-1])
         start = b
     return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
                               lit_keys) if table.autocorrect else tokens
@@ -551,8 +570,10 @@ def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=Fa
         # addresses, Chinese the Chinese hints (the user's words); all the keys of the word so far (a063ek7: a063e is no
         # address's start, 蠻3個 as before); only with 補字提示 on (starts: else nothing is offered - /code-review). The
         # text's start, not a run's after a cut (a numpad digit, a pick of the bar or the list: 我 + numpad 1 + a063 stays
-        # 我1蠻3 - code-reviewer)
-        word_start = (i == 0 and text_start) or (i > 0 and raw[i - 1] == " " and not (prev[1] and prev[1][-1].kind == "zh"))
+        # 我1蠻3 - code-reviewer); after a mark typed after Chinese too (我， + a063: #52, the user 2026-11-18)
+        word_start = starts and ((i == 0 and text_start) or
+                                 (i > 0 and raw[i - 1] == " " and not (prev[1] and prev[1][-1].kind == "zh")) or
+                                 (i > 0 and _after_chinese_mark(prev[1])))  # (asked only with starts)
         for j in range(i + 1, end + 1):
             piece = raw[i:j]
             word_after = after_word
@@ -1207,6 +1228,9 @@ def merge_by_score(block, rest):
 KEPT = "kept"      # marks an override that keeps a character as it was around a pick, not picked itself
 BAR = (-1, 0)      # ...kept by a pick from the bar above the text, which leaves no override of its own:
                    # in place of the span of the pick, and kept until the text is sent or edited there
+SOFT = (-2, 0)     # ...the syllable picked from the bar itself (#57): as BAR, but it gives way to a word the syllables
+                   # after it make with it (_overrides_shown)
+BY_BAR = (BAR, SOFT)
 
 
 def place_weight(reading, ch, user):
@@ -2086,7 +2110,7 @@ class Composer:
         """Convert each maximal run of zh tokens; returns per-syllable phrases. overrides:
         instead of the user's picks ({}: what it would be without them)."""
         shown = overrides is None  # (what is shown: each run's context kept for the list, _sentence_order)
-        overrides = self.overrides if overrides is None else overrides
+        overrides = self._overrides_shown() if overrides is None else overrides
         if shown:
             self._run_contexts = {}
         out = []  # list of (global start, length, phrase)
@@ -2133,6 +2157,28 @@ class Composer:
                     earlier += "".join(ch for ch in p if is_han(ch))
         self.runs = runs
         return out
+
+    def _settle_soft(self):
+        """Before a pick (it looks at what is shown): a syllable picked from the bar whose character gave way to a word
+        (SOFT, #57) is kept as shown from then on, still SOFT (頁 of 又gp頁面, then 麵 picked for 面: 又gp頁麵, not
+        又gp業麵 - code-reviewer); only a character the syllable is written as alone (咖 of 咖哩 is no ㄍㄚ alone: kept,
+        the pin would read nothing and the run turn to zhuyin - code-reviewer), as _keep_as_shown."""
+        chars = {a + k: q[k] for a, b, q in self.segments if len(q) == b for k in range(b)}
+        for sp, v in list(self.overrides.items()):
+            ch = chars.get(sp[0], v[1])
+            if len(v) > 2 and v[3] == SOFT and ch != v[1] and self.lexicon.has([self.readings[sp[0]]], ch):
+                self.overrides[sp] = (v[0], ch, KEPT, SOFT)
+
+    def _overrides_shown(self):
+        """The picks as shown: the character kept for a syllable picked from the bar (SOFT, #57) gives way to a word
+        the syllables after it make with it, read without it (the user 2026-11-19: 又gp業 + 面 is 又gp頁面, 又gp赤 + 我
+        stays 又gp赤我)."""
+        soft = [sp for sp, v in self.overrides.items() if len(v) > 2 and v[3] == SOFT]
+        if not soft:
+            return self.overrides
+        free = self._convert_all({sp: v for sp, v in self.overrides.items() if sp not in soft})
+        give = {sp for sp in soft if any(b > 1 and a <= sp[0] < a + b - 1 for a, b, _ in free)}
+        return {sp: v for sp, v in self.overrides.items() if sp not in give} if give else self.overrides
 
     def _render(self):
         chars = {}
@@ -2343,8 +2389,9 @@ class Composer:
             if t.kind == "zh":
                 break
             run = t.start
-        space = max([self.raw.rfind(" ") + 1] +  # (or a space joined from the symbol keyboard: #52)
-                    [t.start + len(t.raw) for t in self.tokens if _joined_space(t)])
+        space = max([self.raw.rfind(" ") + 1] +  # (or a space or mark joined from the symbol keyboard, a mark after
+                    [t.start + len(t.raw) for k, t in enumerate(self.tokens)  # Chinese: #52)
+                     if _word_starts_after(t) or (t.kind == "lit" and _after_chinese_mark(self.tokens, k + 1))])
         starts = {s for s in (space, last.start if last and last.kind in ("en", "partial") else -1) if s >= run}
         starts |= {s + 1 for s in starts if self.raw[s:s + 1] == "/"}  # a slash command: /con -> /continue
         for start in sorted(starts):
@@ -3094,8 +3141,9 @@ class Composer:
         if keep is None:
             self._forget_english_at(c)
         self._keep_before_bar(c if keep is None else keep)
-        # keys c..j are one syllable, read with the rest again (頁 + 面 can still be 頁面);
-        # what is before stays as typed if the caret was inside a word
+        # keys c..j are one syllable, read with the rest again (頁 + 面 can still be 頁面), its character as the bar
+        # showed it kept from then on, unless what is typed after it makes a word with it (_keep_picked_syllable); what
+        # is before stays as typed if the caret was inside a word
         before = sum(1 for t in self.tokens if t.kind == "zh" and t.start < c)
         self.overrides = {sp: v for sp, v in self.overrides.items() if sp[0] + sp[1] <= before}
         self.term_picks = {sp: v for sp, v in self.term_picks.items() if sp[0] + sp[1] <= before}  # (#32)
@@ -3116,7 +3164,20 @@ class Composer:
         self.fixed = {a: v for a, v in self.fixed.items() if v[0] <= c or a >= j}
         self.taken = {a: v for a, v in self.taken.items() if v[0] <= c or a >= j}
         self._refresh()
+        self._keep_picked_syllable(c)
         self._caret_past(j)
+
+    def _keep_picked_syllable(self, c):
+        """The character shown for the syllable picked from the bar at raw offset c stays (the user 2026-11-18: 又gpt4,
+        赤 picked - t4 a syllable - then 我 made 又gp斥我): kept as the bar keeps what is before it (until the text is
+        sent or edited there), not learned; but as SOFT: a word the syllables typed after it make with it comes (the
+        user 2026-11-19, B: the bar offers one character, the reading - 又gp業 + 面 is 又gp頁面; _overrides_shown)."""
+        k = next((n for n, t in enumerate([t for t in self.tokens if t.kind == "zh"]) if t.start == c), None)
+        if k is None:
+            return
+        for a, b, q in list(self.segments):
+            if len(q) == b and a <= k < a + b:
+                self._keep_as_shown(a, q, [k], SOFT)
 
     def _key_bar(self, ch, special):
         """Keys while in the replacement bar (after ↑): ← → choose, Enter takes it."""
@@ -3473,7 +3534,7 @@ class Composer:
             s, l = sp
             return s + l <= len(starts) and starts[s] < at <= starts[s + l - 1]
         overrides = {sp: v for sp, v in overrides.items()
-                     if not across(sp) and not (len(v) > 2 and v[3] != BAR and across(tuple(v[3])))}
+                     if not across(sp) and not (len(v) > 2 and v[3] not in BY_BAR and across(tuple(v[3])))}
         terms = {sp: v for sp, v in self.term_picks.items() if not across(sp)}
         size = len(self.raw)
         edit()
@@ -3602,6 +3663,7 @@ class Composer:
         return True
 
     def _pick(self, i, from_bar=False):
+        self._settle_soft()
         action = self._cand_actions[i]
         picked = None  # (first syllable, count) of a phrase picked from the list
         shown = list(self.segments)  # when the user picked: what comes before stays (_keep_before)
@@ -3930,6 +3992,7 @@ class Composer:
         """A pick from the bar above the text (how the keys from `start` are read): what is shown
         before them stays, as before a pick from the candidates (_keep_before; 搬移師no, ㄙㄟ
         picked for no: 班遺失㩙). Called before the keys are read again."""
+        self._settle_soft()
         before = sum(1 for t in self.tokens if t.kind == "zh" and t.start < start)
         # (a pick or a word of Tab's on those keys goes with them: what it kept before them is the
         # bar's now, and so is its own part before them - 逐字編及, the bar on 及: 逐字邊)
@@ -3952,7 +4015,7 @@ class Composer:
         picks = sorted(sp for sp, v in self.overrides.items() if len(v) == 2)
         kept = {}
         for sp, v in self.overrides.items():
-            if len(v) > 2 and v[3] != BAR and len(self.overrides.get(v[3], ())) != 2:
+            if len(v) > 2 and v[3] not in BY_BAR and len(self.overrides.get(v[3], ())) != 2:
                 after = next((p for p in picks if p[0] >= sp[0] + sp[1]), None)
                 if after is None:
                     continue
@@ -4236,7 +4299,7 @@ class Composer:
             first = moved(s, l)
             if first is None:
                 continue
-            if len(v) > 2 and v[3] != BAR:  # (kept around a pick: that pick's place moves too)
+            if len(v) > 2 and v[3] not in BY_BAR:  # (kept around a pick: that pick's place moves too)
                 by = moved(*v[3])
                 if by is None:
                     continue
@@ -4641,7 +4704,7 @@ class Composer:
             self.overrides = saved
         if head_overrides or terms:
             self.user.save()  # (once: #32)
-        self.overrides = {(s - b, l): v if len(v) == 2 or v[3] == BAR else v[:3] + ((v[3][0] - b, v[3][1]),)
+        self.overrides = {(s - b, l): v if len(v) == 2 or v[3] in BY_BAR else v[:3] + ((v[3][0] - b, v[3][1]),)
                           for (s, l), v in self.overrides.items() if s >= b}
         self.replaced = {}
         self._drop_orphans()

@@ -22,3 +22,9 @@ abcd1234@example.net{ENTER} => abcd1234@example.net
 abcd1234@example.net{ENTER} => abcd1234@example.net
 Abc{TAB}{ENTER} => Abcd1234@example.com
 abc{TAB}{ENTER} => abcd1234@example.net
+# after a mark typed after Chinese a word starts (#52, Ctrl + : or the , key): the address's start is English, Tab
+# completes it (a mark key before English goes out as typed, as before); not after a mark inside English
+ji3{^:}a063{TAB}{ENTER} => 我：a06312345@example.org
+ji3,a063{TAB}{ENTER} => 我,a06312345@example.org
+ji3{^:}a06{TAB}{ENTER} => 我：蠻多
+abc.a063{ENTER} => abc.蠻3

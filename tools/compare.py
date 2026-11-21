@@ -1,13 +1,21 @@
 """Checks that the C++ engine gives exactly the same results as the Python one.
 
-    python tools/compare.py [count] [seed] [--lm-plus <file>]
+    python tools/compare.py [count] [seed] [--tier plus|max <file>] [--jobs N] [--exe <sz_trace.exe>] [--cases N]
 
 Types the same key scripts into both (tools/trace.py and cpp's sz_trace.exe):
 hand-written cases plus `count` random ones (sentences from the dictionary,
 English words, punctuation, numbers, candidate picks, Tab, undo, Caps Lock,
 the symbol keyboard and random keys), and compares the state after every key.
---lm-plus: every setting with 選字模型 plus reading that model file (a version 2 file, #41: engine/lm_next.py), both
-engines (C++ on a copy of data/ with it as lm_plus.bin).
+--tier: every setting with that 選字模型 tier (lm_model plus or max, its 64 characters where a setting has none)
+reading that model file (a version 2 file, #41: engine/lm_next.py), both engines (C++ on a copy of data/ with it
+as lm_plus.bin or lm_max.bin): the tier by its own name, so with its own parameters (#58's REFINE; 2026-11-21 a
+--lm-plus run of max's file compared plus's for 13 hours).
+--jobs: settings compared at once, each in a process of its own with its own temporary folder (the same cases, seed
+and checks; each setting starts from fresh files either way); default half the processors, at most one a setting.
+--jobs 1 runs them one after another in this process. --exe: another build's sz_trace.exe for the C++ side.
+--cases N: only the first N hand-written cases (a small sample before a run of hours: CLAUDE.md Workflow 2). (2026-11-21: plus and max made a setting take hours - max about
+7 - and one after another the 13 settings took 13-20 hours.) main() itself always runs them in turn: callers that set
+CONFIGS, CASES, TIER, DATA or EXE first keep what they set.
 Build the C++ side first: cpp\\build.cmd
 """
 import json
@@ -17,6 +25,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -476,7 +486,7 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, check=True).stdout.decode("utf-8").split("\n")
 
 
-LM_PLUS = None  # (--lm-plus: the model file; the C++ side's data folder then)
+TIER = None  # (--tier: (tier, the model file); the C++ side's data folder then)
 DATA = os.path.join(ROOT, "data")
 
 
@@ -503,7 +513,7 @@ def compare(cases, config, tmp):
             with open(os.path.join(tmp, side, name), "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
     py = run([sys.executable, os.path.join(ROOT, "tools", "trace.py"), os.path.join(tmp, "py", "user.json"), script,
-              os.path.join(tmp, "py", "config.json")] + (["--lm-plus", LM_PLUS] if LM_PLUS else []))
+              os.path.join(tmp, "py", "config.json")] + (["--tier", *TIER] if TIER else []))
     cc = run([EXE, DATA, os.path.join(tmp, "cpp", "user.json"), script,
               os.path.join(tmp, "cpp", "config.json")])
     case, keys = None, 0
@@ -582,20 +592,30 @@ def compare_frames():
     return len(table) + len(places)
 
 
-def main(count=2000, seed=1):
+def tier_configs(tier):
+    """compare.py's settings, each on one 選字模型 tier by its own name (--tier)."""
+    return [{f"lm_context_len_{tier}": 64, **c, "lm_model": tier} for c in CONFIGS]
+
+
+def main(count=2000, seed=1, only=None):
+    """only: the index of one setting, alone and without the photo frames (main_jobs' processes)."""
     global DATA
     if not os.path.exists(EXE):
         sys.exit(f"build the C++ engine first: {EXE} not found")
     configs = CONFIGS
     lm_dir = None
-    if LM_PLUS:
-        # (every setting on the plus model: its 64 characters where a setting has none, long_sentence as the setting)
-        configs = [{"lm_context_len_plus": 64, **c, "lm_model": "plus"} for c in CONFIGS]
+    if TIER:
+        tier, model = TIER
+        # (every setting on the tier: its 64 characters where a setting has none, long_sentence as the setting)
+        configs = tier_configs(tier)
+    if only is not None:
+        configs = [configs[only]]
+    if TIER:
         lm_dir = tempfile.TemporaryDirectory()
         DATA = os.path.join(lm_dir.name, "data")
         shutil.copytree(os.path.join(ROOT, "data"), DATA)
-        shutil.copyfile(LM_PLUS, os.path.join(DATA, "lm_plus.bin"))
-    frames = compare_frames()
+        shutil.copyfile(model, os.path.join(DATA, f"lm_{tier}.bin"))
+    frames = compare_frames() if only is None else 0
     lexicon = Lexicon()
     ranks = load_english()
     english = sorted(ranks, key=ranks.get)[:3000]
@@ -608,15 +628,98 @@ def main(count=2000, seed=1):
             total += compare(cases, config, tmp)
             cases_run += len(cases)
     print(f"same: {cases_run} cases, {total} keys, {len(configs)} settings, {frames} photo frames"
-          + (f", 選字模型 plus {os.path.basename(LM_PLUS)}" if LM_PLUS else ""))
+          + (f", 選字模型 {TIER[0]} {os.path.basename(TIER[1])}" if TIER else ""))
     if lm_dir:
         lm_dir.cleanup()
+
+
+def main_jobs(count, seed, jobs):
+    """main()'s settings at once, jobs at a time, each `compare.py count seed --only i` in a process of its own; the
+    first that is not "same" stops the rest and is printed. The same summary line as main()."""
+    if not os.path.exists(EXE):
+        sys.exit(f"build the C++ engine first: {EXE} not found")
+    n = len(CONFIGS)
+    frames = compare_frames()
+    extra = (["--tier", *TIER] if TIER else []) + ["--exe", EXE, "--cases", str(len(CASES))]
+    procs, failed = {}, []
+    lock = threading.Lock()  # (a process is started, or all are stopped, never both at once)
+    # (the children's temporary folders - with --tier a copy of data/ each - inside one of ours, removed at the end:
+    # a child stopped by taskkill cleans up nothing itself)
+    root = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", TEMP=root.name, TMP=root.name)
+
+    def one(i):
+        cmd = [sys.executable, os.path.abspath(__file__), str(count), str(seed), "--only", str(i)] + extra
+        with lock:
+            if failed:
+                return i, None, ""
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+            procs[i] = p
+        out = p.communicate()[0].decode("utf-8", "replace")
+        return i, p.returncode, out
+
+    cases_run, total = 0, 0
+    with ThreadPoolExecutor(max(1, min(jobs, n))) as pool:
+        futures = [pool.submit(one, i) for i in range(n)]
+        for fut in as_completed(futures):
+            i, code, out = fut.result()
+            last = [line for line in out.splitlines() if line.strip()]
+            if code == 0 and last and last[-1].startswith("same: "):
+                words = last[-1].split()
+                cases_run += int(words[1])
+                total += int(words[3])
+                continue
+            with lock:
+                failed.append((i, code, out))
+                for f in futures:
+                    f.cancel()
+                for p in procs.values():
+                    if p.poll() is None:  # (with what it started: trace.py, sz_trace - a child outlives its parent)
+                        if os.name == "nt":
+                            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+                        else:
+                            p.kill()
+            break
+    root.cleanup()
+    if failed:
+        i, code, out = failed[0]
+        print(out.rstrip())
+        sys.exit(f"setting {i} {CONFIGS[i] if not TIER else tier_configs(TIER[0])[i]} stopped (exit {code})")
+    print(f"same: {cases_run} cases, {total} keys, {n} settings, {frames} photo frames"
+          + (f", 選字模型 {TIER[0]} {os.path.basename(TIER[1])}" if TIER else ""))
 
 
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--lm-plus" in args:
-        i = args.index("--lm-plus")
-        LM_PLUS = os.path.abspath(args[i + 1])
+        sys.exit("--lm-plus is gone: use --tier plus|max <file> (every setting then runs as that tier, with its own parameters; --lm-plus ran any file as plus)")
+    if "--tier" in args:
+        i = args.index("--tier")
+        if args[i + 1] not in ("plus", "max"):
+            sys.exit(f"--tier plus|max <file>, not {args[i + 1]}")
+        TIER = (args[i + 1], os.path.abspath(args[i + 2]))
+        del args[i:i + 3]
+    only = jobs = None
+    if "--cases" in args:
+        i = args.index("--cases")
+        CASES = CASES[:int(args[i + 1])]
         del args[i:i + 2]
-    main(*(int(a) for a in args[:2]))
+    if "--exe" in args:
+        i = args.index("--exe")
+        EXE = os.path.abspath(args[i + 1])
+        del args[i:i + 2]
+    if "--only" in args:
+        i = args.index("--only")
+        only = int(args[i + 1])
+        del args[i:i + 2]
+    if "--jobs" in args:
+        i = args.index("--jobs")
+        jobs = int(args[i + 1])
+        del args[i:i + 2]
+    if jobs is None:
+        jobs = max(1, (os.cpu_count() or 2) // 2)
+    nums = [int(a) for a in args[:2]]
+    if only is not None or jobs <= 1:
+        main(*nums, only=only)
+    else:
+        main_jobs(nums[0] if nums else 2000, nums[1] if len(nums) > 1 else 1, jobs)

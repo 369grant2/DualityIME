@@ -52,5 +52,14 @@ up jo4{ENTER} => 因為
 # ...英 picked on the swapped one, then ㄅㄢˋ typed (the sentence no longer swaps it): the pick stays
 up e9 {HOME}{DOWN}6{END}104{ENTER} => 英該辦
 # a swapped syllable lists what the keys typed among its own characters by how they read in the sentence (#51, reported
-# 2026-11-17: 寄個 came out 幾個 and 寄 was the 47th, after every ㄐㄧˇ): 寄 6th, by the sentence
-ji3ru0320 ru4ek7u.6ru04{LEFT}{LEFT}{LEFT}{LEFT}{DOWN}6{ENTER} => 我簡單寄個郵件
+# 2026-11-17: 寄個 came out 幾個 and 寄 was the 47th, after every ㄐㄧˇ): 你老嗎 swapped to 你好嗎, 老 2nd
+su3xl3a87{LEFT}{LEFT}{DOWN}2{ENTER} => 你老嗎
+# ...and 寄個 is not swapped any more: the model finds 幾個 hardly likelier (#43; this model writes 記, plus and max 寄: #58)
+ji3ru0320 ru4ek7u.6ru04{ENTER} => 我簡單記個郵件
+# 因該 meant (because of that plan, that unknown source) stays; 因該 for 應該 is still fixed (#43, the user 2026-11-20)
+up e9 vu;4ru4cj842l354ej/ t/6u062;4{ENTER} => 因該項計劃導致工程延宕
+up e9 1j4au/6x96m06cji4qup31o4d.4xu.6{ENTER} => 因該不明來源貨品被扣留
+# ...and after a sentence sent (the model reads it: after 警方現在正在調查 this model made it 應該; a swap takes the lower of the model with and
+# without it, code-reviewer 2026-11-21)
+ru/3z; vu04y945/4y942ul4t86{ENTER}up e9 1j4au/6x96m06cji4qup31o4d.4xu.6{ENTER} => 警方現在正在調查因該不明來源貨品被扣留
+ji3up e9 ul4fm4{ENTER} => 我應該要去

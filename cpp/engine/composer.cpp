@@ -63,6 +63,17 @@ constexpr size_t SENTENCE_POOL = 12;  // ...and this many characters of each syl
 constexpr size_t SENTENCE_RIGHT = 2;  // ...the model reading this many after it (engine/composer.py: the time it takes)
 constexpr size_t ORIG_FIRST = 3;  // 注音自動校正 swapped a syllable: this many of what the keys typed spell come second in ↓
 constexpr int SWAP_WINDOW = 3;             // syllables on each side of it that count (run_score)
+// ...with 長句選字加強's model, its say on the run read with the swap against as typed (#43; swap_lm_gain, Q10 natural
+// log; 2358 is one in log10; the values: engine/composer.py): close to its gain, not made when the model finds it hardly
+// likelier; ㄣ/ㄥ short of its gain made when the model finds it far likelier
+constexpr double SWAP_LM_VETO_MARGIN = 0.5;
+constexpr int64_t SWAP_LM_VETO_Q10 = 1179;
+constexpr int64_t SWAP_LM_VETO_NASAL_Q10 = 0;
+constexpr double SWAP_LM_SHORT_NASAL = 0.4;
+constexpr int64_t SWAP_LM_BOOST_Q10 = 4716;
+constexpr size_t SWAP_LM_CHARS = 10;
+constexpr double NEIGHBOUR_LM_WEIGHT = 0.5;
+constexpr double NEIGHBOUR_LM_MARGIN = 1.0;
 constexpr size_t RUN_SCORES_KEPT = 50000;  // run_score results kept across keys (then all dropped and started again)
 constexpr double ORDER_DIGITS_GAIN = 1.0;    // ...and for digits out of order to stay zhuyin (好吧, not 有813個 -> 有把個)
 constexpr double COST_RARE = 3.0;
@@ -131,6 +142,18 @@ constexpr double WORD_COHESION = 1.0;  // cohesive: log10 count(word) - the sum 
 constexpr double LN10 = 2.302585092994046;  // (written out: engine/composer.py uses the same digits)
 constexpr size_t NBEST_K = 5;   // n-best: paths kept per (position, last phrase)
 constexpr size_t NBEST_N = 10;  // ...and distinct texts the model scores
+// ...then each single-character place may take another character of its syllable (#58; engine/composer.py REFINE):
+// w and m of the model's tier (none: not done), the characters tried, how far below d is not weighed, and the
+// dictionary weight a character tried must be above (tools/build_lexicon.py UNK_SCORE)
+static bool refine_of(const std::string& tier, double& w, double& m) {
+    if (tier == "light") { w = 2.0; m = 4.0; return true; }
+    if (tier == "plus") { w = 2.5; m = 4.0; return true; }
+    if (tier == "max") { w = 5.0; m = 4.0; return true; }
+    return false;
+}
+constexpr size_t REFINE_CHARS = 4;
+constexpr double REFINE_D_MAX = 3.0;
+constexpr double REFINE_MIN_WEIGHT = -8.0;
 
 // punctuation keys that are zhuyin -> punctuation (, . ;)
 std::map<char, ustr> zhuyin_punct(const SyllableTable& table) {
@@ -1110,6 +1133,55 @@ bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>&
     return lm->syllable_mass_q16(before, t.value) >= threshold->second;
 }
 
+// #43: how much likelier the model (scorer, after its context) finds the run read with alt at k than with base there
+// (Q10 natural log): each the text convert writes (no model, no user), at k the character of that syllable the model
+// finds the run likeliest with, of convert's and the SWAP_LM_CHARS likeliest after the text before it; nullopt when
+// convert writes either with other than one character a syllable. Kept across keys (engine/composer.py _swap_lm_gain)
+static std::optional<int64_t> swap_lm_gain(const std::vector<ustr>& rds, size_t k, const ustr& alt, const ustr& base,
+                                           const Lexicon& lexicon, const BigramModel* bigram, const LmScorer& scorer) {
+    static std::unordered_map<ustr, std::optional<int64_t>> kept;
+    ustr key = U(std::to_string(reinterpret_cast<std::uintptr_t>(&scorer.model())));
+    for (const ustr* part : {&scorer.context(), &alt, &base}) {
+        key.push_back(U'\x01');
+        key += *part;
+    }
+    key.push_back(U'\x01');
+    key += U(std::to_string(k));
+    key.push_back(U'\x01');
+    key += join(rds, U'-');
+    if (auto it = kept.find(key); it != kept.end()) return it->second;
+    // (the texts of each reading, then all read together by units_logp_many: the same numbers as one by one)
+    auto texts_of = [&](const ustr& reading, std::vector<ustr>& out) -> bool {
+        auto trial = rds;
+        trial[k] = reading;
+        ustr text;
+        for (auto& seg : convert(trial, lexicon, nullptr, {}, bigram, std::nullopt)) text += seg.phrase;
+        if (text.size() != trial.size()) return false;
+        std::vector<char32_t> chars{text[k]};
+        for (char32_t ch : scorer.top_chars(text.substr(0, k), reading, SWAP_LM_CHARS)) chars.push_back(ch);
+        for (char32_t ch : chars) {
+            ustr x = text;
+            x[k] = ch;
+            out.push_back(std::move(x));
+        }
+        return true;
+    };
+    std::vector<ustr> ta, tb;
+    const bool ok_a = texts_of(alt, ta);
+    const bool ok_b = texts_of(base, tb);
+    std::optional<int64_t> gain;
+    if (ok_a && ok_b) {
+        std::vector<ustr> all = ta;
+        all.insert(all.end(), tb.begin(), tb.end());
+        std::vector<int64_t> lp = scorer.units_logp_many(all);
+        const int64_t a = *std::max_element(lp.begin(), lp.begin() + static_cast<std::ptrdiff_t>(ta.size()));
+        const int64_t b = *std::max_element(lp.begin() + static_cast<std::ptrdiff_t>(ta.size()), lp.end());
+        gain = a - b;
+    }
+    if (kept.size() >= RUN_SCORES_KEPT) kept.clear();
+    return kept[key] = gain;
+}
+
 // (after NFKC: full-width letters and digits are ASCII by then)
 static bool unit_char(char32_t ch) {
     return (ch >= U'0' && ch <= U'9') || (ch >= U'A' && ch <= U'Z') || (ch >= U'a' && ch <= U'z');
@@ -1226,6 +1298,7 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
     // what lies before the next run; its marks are worked out together, as convert sees the number next to it - 824ok
     // is one run of letters and digits)
     ustr pending;
+    std::map<int, size_t> starts;  // start of the first token of each part of earlier -> its index (the swaps' runs)
     auto units = [&](const ustr& text) { return marks ? context_units(text) : ustr(); };
     auto context = [&]() {
         ustr ctx = sent;
@@ -1269,6 +1342,7 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
                 }
                 pending += U(tokens[run[k]].raw);  // (the number: digits before what follows it)
             } else {
+                if (part.empty()) starts[tokens[run[k]].start] = earlier.size();
                 part.push_back(rds[k]);
             }
         }
@@ -1308,27 +1382,76 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
         auto score = run_score(window, *lexicon, nullptr, bigram);
         return kept[key] = score ? *score : -99.0 * static_cast<double>(window.size());
     };
+    // 長句選字加強's model: its say too (#43, the SWAP_LM_ constants; the neighbour keys for plus and max), the run
+    // read after what model_reads_it reads before it (what was sent, the runs before it as the engine reads them, the
+    // marks before it)
+    bool strong = lm && lm->model().knows_english();
     for (auto& run : zh_runs(tokens)) {
         std::vector<ustr> rds;
         for (size_t i : run) rds.push_back(tokens[i].value);
         bool swapped = false;  // (two syllables side by side are not both swapped)
+        const LmScorer* view = nullptr;
+        auto model_gain = [&](size_t k, const ustr& alt, const ustr& base) {
+            if (!view) {
+                auto at = starts.find(tokens[run[0]].start);
+                size_t n = at != starts.end() ? at->second : earlier.size();
+                ustr ctx = sent;
+                for (size_t j = 0; j < n; ++j) {
+                    ctx += earlier[j].first;
+                    for (auto& seg : convert(earlier[j].second, *lexicon, user, {}, bigram, std::nullopt))
+                        for (char32_t ch : seg.phrase)
+                            if (is_han(ch)) ctx.push_back(ch);
+                }
+                if (n < earlier.size()) ctx += earlier[n].first;
+                size_t keep = context_len ? context_len : LM_CONTEXT;
+                if (ctx.size() > keep) ctx.erase(0, ctx.size() - keep);
+                view = ctx.empty() ? lm : lm->view(ctx);
+            }
+            return swap_lm_gain(rds, k, alt, base, *lexicon, bigram, *view);
+        };
+        // (a swap: model_gain and the same with nothing before, the lower - the rules were picked on runs typed alone,
+        // and what was sent tipped a 因該 meant; engine/composer.py swap_gain)
+        auto swap_gain = [&](size_t k, const ustr& alt, const ustr& base) -> std::optional<int64_t> {
+            auto g = model_gain(k, alt, base);
+            if (!g || view == lm) return g;
+            auto alone = swap_lm_gain(rds, k, alt, base, *lexicon, bigram, *lm);
+            if (!alone) return std::nullopt;
+            return std::min(*g, *alone);
+        };
         for (size_t k = 0; k < run.size(); ++k) {
             Token& t = tokens[run[k]];
-            auto best_word = [&](std::optional<ustr>& best_alt, double& best) {
+            if (t.corrected == "adjacent") {
+                // (each neighbour's word score once, kept for the model's turn below - /code-review high 2026-11-21)
+                std::vector<std::pair<ustr, double>> scored;
+                std::optional<ustr> best_alt;
+                double best = 0;
                 for (auto& alt : table.adjacent_parses(t.raw)) {
                     auto trial = rds;
                     trial[k] = alt;
                     auto score = word_score(trial, k, *lexicon, user);
-                    if (score && (!best_alt || *score > best)) {
+                    if (!score) continue;
+                    scored.emplace_back(alt, *score);
+                    if (!best_alt || *score > best) {
                         best_alt = alt;
                         best = *score;
                     }
                 }
-            };
-            if (t.corrected == "adjacent") {
-                std::optional<ustr> best_alt;
-                double best = 0;
-                best_word(best_alt, best);
+                if (best_alt && strong) {
+                    // (the best word score with the model's gain over the best word's, when that beats it clearly)
+                    double top = best + NEIGHBOUR_LM_MARGIN;
+                    std::optional<ustr> top_alt;
+                    for (auto& [alt, word] : scored) {
+                        if (alt == *best_alt) continue;
+                        auto g = model_gain(k, alt, *best_alt);
+                        if (!g) continue;
+                        double total = word + NEIGHBOUR_LM_WEIGHT * (static_cast<double>(*g) / (1024 * LN10));
+                        if (total > top) {
+                            top = total;
+                            top_alt = alt;
+                        }
+                    }
+                    if (top_alt) best_alt = top_alt;
+                }
                 if (best_alt) t.value = rds[k] = *best_alt;
                 swapped = false;
                 continue;
@@ -1419,7 +1542,18 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
             double best = 0;
             for (auto& f : found) {  // (the best of those passing their gain; the first of equals, as Python's max)
                 double gain = typed_word ? SWAP_GAIN_WORD : f.nasal ? SWAP_GAIN_NASAL : SWAP_GAIN_NO_WORD;
-                if (f.score - typed > gain && (!best_alt || f.score > best)) {
+                bool passes = f.score - typed > gain;
+                if (passes) {
+                    // (close to its gain and the model finds it unlikely: not made)
+                    if (lm && f.score - typed <= gain + SWAP_LM_VETO_MARGIN) {
+                        auto g = swap_gain(k, f.alt, t.value);
+                        passes = !g || *g > (f.nasal ? SWAP_LM_VETO_NASAL_Q10 : SWAP_LM_VETO_Q10);
+                    }
+                } else if (lm && f.nasal && !typed_word && f.score - typed > gain - SWAP_LM_SHORT_NASAL) {
+                    auto g = swap_gain(k, f.alt, t.value);  // (short of its gain: made when the model finds it far likelier)
+                    passes = g && *g >= SWAP_LM_BOOST_Q10;
+                }
+                if (passes && (!best_alt || f.score > best)) {
                     best_alt = f.alt;
                     best = f.score;
                 }
@@ -2208,6 +2342,82 @@ static bool taught(const ustr& key, const ustr& phrase, const UserModel* user) {
     return user->learned(key, phrase);
 }
 
+// path with its single-character places that the model reads far better with another character of the syllable
+// changed (#58, refine_of; a pick's place never; engine/composer.py _refine)
+static std::vector<Segment> refine(std::vector<Segment> path, const std::vector<ustr>& readings, const Lexicon& lexicon,
+                                   const std::map<std::pair<int, int>, ustr>& overrides, const BigramModel* bigram,
+                                   const std::optional<ustr>& prev_word, const Options& options, const LmScorer& lm) {
+    double w = 0, m = 0;
+    ustr text = text_of(path);
+    if (!refine_of(lm.model().tier, w, m) || text.size() != readings.size()) return path;
+    // the path's own score (nbest's transitions, word_term); a place's unigram from options, the new character's
+    // at i_new; nullopt when a phrase is not in options (repick's)
+    auto own = [&](const std::vector<Segment>& hyp, int i_new, double unigram) -> std::optional<double> {
+        double s = 0.0;
+        std::optional<ustr> prev = prev_word;
+        for (auto& seg : hyp) {
+            std::optional<double> u;
+            if (auto it = options.find({seg.start, seg.length}); it != options.end())
+                for (auto& [p, uu] : it->second)
+                    if (p == seg.phrase) u = uu;  // (the last, as a Python dict of them)
+            if (!u && seg.start == i_new) u = unigram;
+            if (!u) return std::nullopt;
+            s += seg.start == 0 ? context_transition(bigram, prev, seg.phrase, *u)
+                                : transition(bigram, prev, seg.phrase, *u);
+            prev = seg.phrase;
+        }
+        return s + word_term(hyp, bigram);
+    };
+    auto base_own = own(path, -1, 0.0);
+    if (!base_own) return path;
+    std::vector<std::tuple<int, char32_t, double>> tries;  // (place, character, d against the path's own)
+    std::vector<ustr> texts{text};                         // (the text as it is, then each try's)
+    std::map<int, std::pair<double, char32_t>> best;
+    for (size_t j = 0; j < path.size(); ++j) {
+        const int i = path[j].start;
+        if (path[j].length != 1) continue;
+        bool picked = false;
+        for (auto& [span, _] : overrides)
+            if (span.first <= i && i < span.first + span.second) picked = true;
+        if (picked) continue;
+        auto lex = phrase_candidates({readings[i]}, lexicon, nullptr, false);
+        auto weight_of = [&](char32_t ch) -> std::optional<double> {
+            std::optional<double> got;
+            for (auto& [p, s] : lex)
+                if (p.size() == 1 && p[0] == ch) got = s;  // (the last, as a Python dict of them)
+            return got;
+        };
+        size_t tried = 0;
+        for (char32_t ch : lm.top_chars(text.substr(0, i), readings[i], SWAP_LM_CHARS)) {
+            if (ustr(1, ch) == path[j].phrase) continue;
+            auto weight = weight_of(ch);
+            if (!weight) continue;
+            if (++tried > REFINE_CHARS) break;
+            if (*weight <= REFINE_MIN_WEIGHT) continue;
+            auto hyp = path;
+            hyp[j].phrase = ustr(1, ch);
+            auto d = own(hyp, i, corpus_unigram(bigram, lexicon, hyp[j].phrase, *weight));
+            if (!d || *d - *base_own <= -REFINE_D_MAX) continue;
+            ustr t = text;
+            t[i] = ch;
+            tries.push_back({i, ch, *d - *base_own});
+            texts.push_back(std::move(t));
+        }
+    }
+    // (the texts read together, then weighed in the order tried: engine/composer.py _refine one by one, the same)
+    if (!tries.empty()) {
+        std::vector<int64_t> lp = lm.units_logp_many(texts);
+        for (size_t q = 0; q < tries.size(); ++q) {
+            auto& [i, ch, dd] = tries[q];
+            double v = dd + w * (static_cast<double>(lp[q + 1] - lp[0]) / (1024 * LN10));
+            if (v > m && (!best.count(i) || v > best[i].first)) best[i] = {v, ch};
+        }
+    }
+    for (auto& seg : path)
+        if (auto it = best.find(seg.start); it != best.end() && seg.length == 1) seg.phrase = ustr(1, it->second.second);
+    return path;
+}
+
 // 長句選字加強: the best of the n-best by score + LM_WEIGHT * the model's log10 probability. Each
 // text as repick makes it (同音字偏好 still counts, and the model judges what is shown); the
 // engine's own choice comes first and only a strictly better one replaces it. What the user taught
@@ -2258,7 +2468,7 @@ static std::vector<Segment> with_lm(double score, std::vector<Segment> path, con
             best_score = sc;
         }
     }
-    return best;
+    return refine(std::move(best), readings, lexicon, overrides, bigram, prev_word, found.options, lm);
 }
 
 std::vector<Segment> convert(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
@@ -2566,6 +2776,12 @@ const ustr* Composer::sent_ptr() const {
     if (!config.flag("lm_context")) return nullptr;
     const ustr& s = knows_english() ? lm_units_ : lm_context_;
     return s.empty() ? nullptr : &s;
+}
+
+void Composer::warm() const {
+    if (!raw.empty() || !lm_ || !config.flag("long_sentence")) return;
+    if (const LmScorer* model = lm())
+        if (ustr ctx = run_context({}, nullptr); !ctx.empty()) model->view(ctx);  // (the first run's: nothing before it)
 }
 
 ustr Composer::run_context(const std::vector<Segment>& before, const ustr* earlier) const {

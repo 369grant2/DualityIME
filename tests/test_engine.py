@@ -4701,6 +4701,12 @@ class ModelSplitTest(Base):
             self.asked.append(units)
             return self.score(units)
         self.scorer.units_logp = units_logp
+        # (the stand-in's score is the split's alone: no say on 注音自動校正's swaps, #43 - AutocorrectModelTest - nor
+        # on the characters past PER_SPAN, #58 - RefineTierTest)
+        for patcher in (unittest.mock.patch.object(composer, "_swap_lm_gain", lambda *a: None),
+                        unittest.mock.patch.object(composer, "REFINE", {})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self):
         del self.scorer.units_logp
@@ -5693,9 +5699,11 @@ class AutocorrectTest(Base):
         # 47th, after every character of ㄐㄧˇ, 魕 and 㧗 too. 注音自動校正 may be wrong, but what the user typed must
         # be easy to pick back: the rest of ㄐㄧˋ among the characters of ㄐㄧˇ by how common they are)
         c = self.c
-        for ch in keys("ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"):
-            c.key(ch)
-        self.assertEqual(c.readings[3], "ㄐㄧˇ")  # (the swap: #43 may stop it, then this test needs another case)
+        # (the swap itself: the model's say made to let it through, AutocorrectLMTest - #43 stops it)
+        with unittest.mock.patch.object(composer, "_swap_lm_gain", lambda *a: 99999):
+            for ch in keys("ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"):
+                c.key(ch)
+        self.assertEqual(c.readings[3], "ㄐㄧˇ")
         for _ in range(4):
             c.key(special="LEFT")
         c.key(special="DOWN")
@@ -5707,11 +5715,13 @@ class AutocorrectTest(Base):
 
     def test_what_the_keys_typed_spell_by_the_sentence(self):
         # (#51) with 長句選字加強 on, by how each reads in the sentence (_sentence_order): 寄 on the first page, the best
-        # three of ㄐㄧˋ right after the first candidate, a rare character of ㄐㄧˇ after the common ones
+        # three of ㄐㄧˋ right after the first candidate, a rare character of ㄐㄧˇ after the common ones. (The swap
+        # itself: the model's say made to let it through - #43 stops it, the model finding 幾個 hardly likelier.)
         c = self.c
         c.config.set(long_sentence=True)
-        for ch in keys("ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"):
-            c.key(ch)
+        with unittest.mock.patch.object(composer, "_swap_lm_gain", lambda *a: 99999):
+            for ch in keys("ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"):
+                c.key(ch)
         self.assertEqual(c.readings[3], "ㄐㄧˇ")
         for _ in range(4):
             c.key(special="LEFT")
@@ -5836,6 +5846,282 @@ class AutocorrectTest(Base):
         c._pick(cands.index("篇"))
         c.key(special="HOME")
         self.assertTrue(self.type("ji3").endswith("篇"))
+
+
+class AutocorrectModelTest(Base):
+    """注音自動校正 with 長句選字加強's model (#43): its say on a swap (composer.SWAP_LM_*) and, plus or max, on a key next
+    to the one typed (NEIGHBOUR_LM_*). A stand-in: the light model told it is a version 2 one, the model's gain of each
+    syllable (composer._swap_lm_gain) given by each test; the real models in AutocorrectTierTest."""
+
+    NA = "xu;3u6gj bj4s83gk42u/4"  # 兩儀輸入哪設定: ㄋㄚˇ for ㄈㄚˇ (s next to z), short of its gain
+    JIN = "t;6vm032k7wj/6up y41j6y94cj04rup4rup3au42k7h6"  # 常選的同音字不再換進緊密的詞, typed right (ㄐㄧㄣˋ: 幻境 close)
+    XIAO = "w961o3g4vuo4u4fm "  # 台北市信義區 with the ㄒㄧㄣˋ typed vuo4 (o next to p): 孝 makes the better word alone
+    HUAN = "u ek71j6cj;6m062k7h0 gj4"  # 一個不還原的參數 with ㄏㄨㄤˊ: short of its gain (tools/autocorrect_eval.py natural)
+
+    def setUp(self):
+        super().setUp()
+        c = self.c
+        c.user.corrections.forget()
+        c.user.phrases.clear()
+        c.user.phrase_used.clear()
+        c.config.set(long_sentence=True, autocorrect=True, lm_context=False)
+        c.settings_changed()
+        self.scorer = c._lm()
+        if self.scorer is None:
+            self.skipTest("no language model (numpy)")
+        self.scorer.lm.knows_english = True  # (an attribute of this instance: tearDown gives the class's back)
+        self.gains, self.asked = {}, []
+
+        def gain(readings, k, alt, base, *rest):
+            self.asked.append((k, alt, base))
+            return self.gains.get(alt, 0)
+        patcher = unittest.mock.patch.object(composer, "_swap_lm_gain", gain)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        if "knows_english" in vars(self.scorer.lm):
+            del self.scorer.lm.knows_english
+        c = self.c
+        c.key(special="ESC")
+        c.key(special="ESC")
+        c.config.set(autocorrect=False)
+        c.settings_changed()
+        c.user.corrections.forget()
+
+    def typed(self, keys, **gains):
+        """The composition and its readings after keys, the model's gain of each syllable gains (others 0)."""
+        c = self.c
+        c.key(special="ESC")
+        c.key(special="ESC")
+        self.gains = gains
+        for ch in keys:
+            c.key(ch)
+        return c.composition, list(c.readings)
+
+    def test_front_back_nasal_short_of_its_gain_is_made_when_the_model_finds_it_far_likelier(self):
+        boost = composer.SWAP_LM_BOOST_Q10
+        self.assertEqual(self.typed(self.HUAN, **{"ㄏㄨㄢˊ": boost - 1})[1][3], "ㄏㄨㄤˊ")
+        self.assertIn("不還原", self.typed(self.HUAN, **{"ㄏㄨㄢˊ": boost})[0])
+        self.assertIn((3, "ㄏㄨㄢˊ", "ㄏㄨㄤˊ"), self.asked)
+
+    def test_other_slips_short_of_their_gain_are_not_made_whatever_the_model_says(self):
+        # (made on the cases the rule was picked on, on others they changed more words typed right: #43)
+        self.assertEqual(self.typed(self.NA, **{"ㄈㄚˇ": 99999})[0], "兩儀輸入哪設定")
+
+    def test_a_swap_close_to_its_gain_is_not_made_when_the_model_finds_it_hardly_likelier(self):
+        # (你老嗎 -> 你好嗎 passes SWAP_GAIN_WORD: test_a_word_typed_is_swapped_too_when_the_sentence_reads_better)
+        self.assertEqual(self.typed("su3xl3a87", **{"ㄏㄠˇ": composer.SWAP_LM_VETO_Q10})[0][:2], "你老")
+        self.assertEqual(self.typed("su3xl3a87", **{"ㄏㄠˇ": composer.SWAP_LM_VETO_Q10 + 1})[0][:2], "你好")
+
+    def test_front_back_nasal_close_to_its_gain_is_not_made_when_the_model_finds_it_no_likelier(self):
+        veto = composer.SWAP_LM_VETO_NASAL_Q10
+        self.assertIn("換進", self.typed(self.JIN, **{"ㄐㄧㄥˋ": veto})[0])
+        self.assertIn("幻境", self.typed(self.JIN, **{"ㄐㄧㄥˋ": veto + 1})[0])
+
+    def test_a_swap_clearing_its_gain_by_far_is_made_whatever_the_model_says(self):
+        self.assertEqual(self.typed("".join(keys("ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ")), **{"ㄧㄥ": -99999})[0], "我應該要去")
+        self.assertNotIn((1, "ㄧㄥ", "ㄧㄣ"), self.asked)
+
+    def test_a_key_next_to_the_one_typed_takes_the_syllable_the_model_finds_clearly_likelier(self):
+        self.assertEqual(self.typed(self.XIAO)[1][3], "ㄒㄧㄠˋ")
+        self.assertEqual(self.typed(self.XIAO, **{"ㄒㄧㄣˋ": 99999})[0], "台北市信義區")
+
+    def test_the_model_reads_what_was_sent_and_the_runs_before_never_the_run_itself(self):
+        # (#43: a trial harness once gave it the run being checked too, and every gain leaned to what was typed)
+        c = self.c
+        c.config.set(lm_context=True)
+        contexts = []
+
+        def gain(readings, k, alt, base, lexicon, bigram, scorer):
+            contexts.append(getattr(scorer, "_context", ""))
+            return 0
+        self.type("".join(keys("ㄨㄛˇ ㄇㄣ˙")))
+        with unittest.mock.patch.object(composer, "_swap_lm_gain", gain):
+            self.typed(self.HUAN + "123" + self.HUAN)
+        first = "".join(p for _, _, p in composer.convert("ㄧ ㄍㄜ˙ ㄅㄨˊ ㄏㄨㄤˊ ㄩㄢˊ ㄉㄜ˙ ㄘㄢ ㄕㄨˋ".split(), c.lexicon, c.user,
+                                                          {}, c.bigram))
+        self.assertEqual(set(contexts), {"我們", "我們" + first + lm.EN_MARK, ""})  # ("": a swap's look without it)
+
+    def test_a_swap_takes_the_lower_of_the_model_with_and_without_what_was_sent(self):
+        # (the rules were picked on runs typed alone; what was sent tipped a 因該 meant: AutocorrectTierTest)
+        c = self.c
+        c.config.set(lm_context=True)
+        self.type("".join(keys("ㄨㄛˇ ㄇㄣ˙")))
+        boost = composer.SWAP_LM_BOOST_Q10
+        for read, alone, kept in ((1, 0, True), (0, 1, True), (1, 1, False)):
+            def gain(readings, k, alt, base, lexicon, bigram, scorer, read=read, alone=alone):
+                return read if getattr(scorer, "_context", "") else alone
+            with self.subTest(read=read, alone=alone), unittest.mock.patch.object(composer, "_swap_lm_gain", gain):
+                self.assertEqual("換進" in self.typed(self.JIN)[0], kept)
+        for read, alone, made in ((boost, boost - 1, False), (boost - 1, boost, False), (boost, boost, True)):
+            def gain(readings, k, alt, base, lexicon, bigram, scorer, read=read, alone=alone):
+                return read if getattr(scorer, "_context", "") else alone
+            with self.subTest(read=read, alone=alone), unittest.mock.patch.object(composer, "_swap_lm_gain", gain):
+                self.assertEqual("不還原" in self.typed(self.HUAN)[0], made)
+
+    def test_the_light_model_has_its_say_on_swaps_not_on_keys_next_to_the_one_typed(self):
+        vars(self.scorer.lm).pop("knows_english")
+        boost = composer.SWAP_LM_BOOST_Q10
+        self.assertEqual(self.typed(self.HUAN, **{"ㄏㄨㄢˊ": boost - 1})[1][3], "ㄏㄨㄤˊ")
+        self.assertIn("不還原", self.typed(self.HUAN, **{"ㄏㄨㄢˊ": boost})[0])
+        self.assertEqual(self.typed("su3xl3a87", **{"ㄏㄠˇ": composer.SWAP_LM_VETO_Q10})[0][:2], "你老")
+        self.assertIn("換進", self.typed(self.JIN, **{"ㄐㄧㄥˋ": 0})[0])
+        self.assertIn("幻境", self.typed(self.JIN, **{"ㄐㄧㄥˋ": 1})[0])
+        self.assertEqual(self.typed(self.XIAO, **{"ㄒㄧㄣˋ": 99999})[1][3], "ㄒㄧㄠˋ")
+        self.assertNotIn("ㄒㄧㄣˋ", [alt for _, alt, _ in self.asked])
+
+    def test_not_without_autocorrect(self):
+        self.c.config.set(autocorrect=False)
+        self.c.settings_changed()
+        self.assertEqual(self.typed(self.NA, **{"ㄈㄚˇ": 99999})[0], "兩儀輸入哪設定")
+        self.assertEqual(self.asked, [])
+
+
+class AutocorrectTierTest(unittest.TestCase):
+    """注音自動校正 with the real plus and max models (#43; tools/autocorrect_eval.py measures it on many more), each
+    reading 64 characters before; skipped where data/ has not the tier's file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def typed(self, tier, raw, before=""):
+        """(composition, readings) after raw (keys, or readings split by spaces), on its own or after before (readings)
+        sent with Enter (接續前文選字 on, the default: the model reads it)."""
+        from engine.lexicon import DATA_DIR
+        if not os.path.exists(os.path.join(DATA_DIR, lm.TIER_FILES[tier])):
+            self.skipTest(f"no data/{lm.TIER_FILES[tier]}")
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS, long_sentence=True, autocorrect=True, lm_model=tier, lm_context=True,
+                               **{f"lm_context_len_{tier}": 64})
+        c.settings_changed()
+        if before:
+            for ch in keys(before):
+                c.key(ch)
+            c.key(special="ENTER")
+            assert c.commit, before
+        for ch in raw if raw.isascii() else keys(raw):
+            c.key(ch)
+        return c.composition, list(c.readings)
+
+    def test_what_the_user_reported_is_not_swapped(self):
+        # (the user 2026-11-17: 我簡單寄個郵件 came out 幾個 - ㄐㄧˋ swapped for ㄐㄧˇ; with 寄 the model finds both alike)
+        for tier in ("light", "plus", "max"):
+            with self.subTest(tier):
+                self.assertEqual(self.typed(tier, "ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ")[1][3], "ㄐㄧˋ")
+
+    def test_a_slip_the_model_is_sure_of_is_fixed(self):
+        for tier in ("plus", "max"):
+            with self.subTest(tier):
+                self.assertIn("不還原", self.typed(tier, AutocorrectModelTest.HUAN)[0])
+                self.assertEqual(self.typed(tier, AutocorrectModelTest.XIAO)[0], "台北市信義區")
+
+    def test_front_back_nasal_still_fixed(self):
+        for tier in ("plus", "max"):
+            with self.subTest(tier):
+                self.assertEqual(self.typed(tier, "ㄧㄣ ㄍㄞ")[0], "應該")
+                self.assertEqual(self.typed(tier, "ㄒㄧㄥ ㄑㄧㄥˊ")[0], "心情")
+
+    def test_chinese_typed_right_stays(self):
+        for tier in ("plus", "max"):
+            with self.subTest(tier):
+                self.assertIn("換進", self.typed(tier, AutocorrectModelTest.JIN)[0])
+
+    def test_yin_gai_where_it_is_meant(self):
+        # (the user 2026-11-20: 因該 is right in 因該項計畫導致工程延宕 - because of that plan - and 因該不明來源貨品...: 應該 is
+        # the slip only where the sentence says so; every tier, light too: its model tells them apart as well)
+        stays = ["ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄐㄧˋ ㄏㄨㄚˋ ㄉㄠˇ ㄓˋ ㄍㄨㄥ ㄔㄥˊ ㄧㄢˊ ㄉㄤˋ",
+                 "ㄧㄣ ㄍㄞ ㄅㄨˋ ㄇㄧㄥˊ ㄌㄞˊ ㄩㄢˊ ㄏㄨㄛˋ ㄆㄧㄣˇ ㄅㄟˋ ㄎㄡˋ ㄌㄧㄡˊ",
+                 "ㄧㄣ ㄍㄞ ㄉㄧˋ ㄑㄩ ㄉㄧㄢˋ ㄌㄧˋ ㄅㄨˋ ㄗㄨˊ"]
+        fixed = {"ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ": "我應該要去", "ㄋㄧˇ ㄧㄣ ㄍㄞ ㄓ ㄉㄠˋ": "你應該知道",
+                 "ㄧㄣ ㄍㄞ ㄅㄨˋ ㄏㄨㄟˋ ㄌㄞˊ": "應該不會來", "ㄧㄣ ㄍㄞ": "應該"}
+        for tier in ("light", "plus", "max"):
+            for raw in stays:
+                with self.subTest(tier=tier, raw=raw):
+                    got, readings = self.typed(tier, raw)
+                    self.assertEqual(readings[0], "ㄧㄣ", got)
+            for raw, want in fixed.items():
+                with self.subTest(tier=tier, raw=raw):
+                    self.assertEqual(self.typed(tier, raw)[0], want)
+
+    def test_yin_gai_where_it_is_meant_after_what_was_sent(self):
+        # (/code-review's code-reviewer 2026-11-21: after 今天天氣很好 the model read it and 因該不明來源 became 應該 for plus
+        # and max, after 警方現在正在調查 for light and plus; a swap now takes the lower of the model with and without it)
+        befores = ["ㄐㄧㄣ ㄊㄧㄢ ㄊㄧㄢ ㄑㄧˋ ㄏㄣˇ ㄏㄠˇ", "ㄐㄧㄥˇ ㄈㄤ ㄒㄧㄢˋ ㄗㄞˋ ㄓㄥˋ ㄗㄞˋ ㄉㄧㄠˋ ㄔㄚˊ"]
+        stay = "ㄧㄣ ㄍㄞ ㄅㄨˋ ㄇㄧㄥˊ ㄌㄞˊ ㄩㄢˊ ㄏㄨㄛˋ ㄆㄧㄣˇ ㄅㄟˋ ㄎㄡˋ ㄌㄧㄡˊ"
+        for tier in ("light", "plus", "max"):
+            for before in befores:
+                with self.subTest(tier=tier, before=before):
+                    got, readings = self.typed(tier, stay, before)
+                    self.assertEqual(readings[0], "ㄧㄣ", got)
+                with self.subTest(tier=tier, before=before, slip="你應該知道"):
+                    self.assertEqual(self.typed(tier, "ㄋㄧˇ ㄧㄣ ㄍㄞ ㄓ ㄉㄠˋ", before)[0], "你應該知道")
+
+
+class RefineTierTest(unittest.TestCase):
+    """長句選字加強 trying characters past the PER_SPAN the search tries (#58, composer.REFINE), with the real models;
+    skipped where data/ has not the tier's file."""
+    USER = "ㄨㄛˇ ㄐㄧㄢˇ ㄉㄢ ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ"  # (the user 2026-11-20: 寄 came out 記 in every tier)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def composer(self, tier, **values):
+        from engine.lexicon import DATA_DIR
+        if not os.path.exists(os.path.join(DATA_DIR, lm.TIER_FILES[tier])):
+            self.skipTest(f"no data/{lm.TIER_FILES[tier]}")
+        c = create_composer(os.path.join(self.tmp.name, "user.json"))
+        c.config.values = dict(DEFAULTS, **{"long_sentence": True, "lm_model": tier, **values})
+        c.settings_changed()
+        return c
+
+    def typed(self, tier, raw, **values):
+        c = self.composer(tier, **values)
+        for ch in keys(raw):
+            c.key(ch)
+        return c.composition
+
+    def test_what_the_user_reported(self):
+        for tier in ("plus", "max"):
+            with self.subTest(tier):
+                self.assertEqual(self.typed(tier, self.USER), "我簡單寄個郵件")
+        # (light's own model finds 記個郵件 likelier: the user 2026-11-20, light need not)
+        self.assertEqual(self.typed("light", self.USER), "我簡單記個郵件")
+
+    def test_not_without_long_sentence(self):
+        self.assertEqual(self.typed("plus", self.USER, long_sentence=False), "我簡單記個郵件")
+
+    def test_a_pick_stays(self):
+        c = self.composer("plus")
+        for ch in keys(self.USER):
+            c.key(ch)
+        c.key(special="HOME")
+        for _ in range(3):
+            c.key(special="RIGHT")
+        c.key(special="DOWN")
+        for _ in range(c.candidates.index("記")):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+        self.assertEqual(c.composition, "我簡單記個郵件")
+
+    def test_never_a_character_the_dictionary_has_no_count_for(self):
+        # (别 for 別: tools/build_lexicon.py UNK_SCORE; the model knows Simplified characters too)
+        c = self.composer("plus")
+        weights = dict(composer.phrase_candidates(["ㄅㄧㄝˊ"], c.lexicon))
+        self.assertEqual(weights["别"], -8.0)
+        # (the model all for it, and however far the dictionary's score: only the count keeps it out)
+        with unittest.mock.patch.object(lm.Scorer, "top_chars", lambda self, before, syllable, n: ["别"]), \
+                unittest.mock.patch.object(lm.Scorer, "units_logp", lambda self, units: 999999 if "别" in units else 0), \
+                unittest.mock.patch.object(composer, "REFINE_D_MAX", 999.0):
+            for ch in keys("ㄨㄛˇ ㄅㄧㄝˊ"):
+                c.key(ch)
+        self.assertNotIn("别", c.composition)
 
 
 class AutocorrectMemoryTest(unittest.TestCase):
@@ -7580,6 +7866,18 @@ class SyllableMassTest(unittest.TestCase):
     def test_syllable_without_characters_is_zero(self):
         self.assertEqual(self.scorer.syllable_mass_q16("我們", "ㄅㄧㄤ"), 0)
 
+    def test_top_chars_are_the_likeliest_of_the_syllable(self):
+        # (#43: the characters 注音自動校正 tries where it would swap a syllable)
+        top = self.scorer.top_chars("我簡單", "ㄐㄧˋ", 10)
+        self.assertEqual(len(top), 10)
+        scores = [self.scorer.char_score("我簡單", ch, "ㄐㄧˋ") for ch in top]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        ids = self.scorer.candidates("ㄐㄧˋ")
+        rest = [self.scorer.lm.vocab[int(i)] for i in ids if int(i) != 0 and self.scorer.lm.vocab[int(i)] not in top]
+        self.assertLessEqual(max(self.scorer.char_score("我簡單", ch, "ㄐㄧˋ") for ch in rest), scores[-1])
+        self.assertEqual(self.scorer.top_chars("我簡單", "ㄐㄧˋ", 3), top[:3])
+        self.assertEqual(self.scorer.top_chars("我們", "ㄅㄧㄤ", 10), [])
+
 
 class OrderDigitsWithModelTest(Base):
     """注音自動校正 with 長句選字加強: digits out of order at the end of a run of Chinese read as the
@@ -8162,7 +8460,7 @@ class LmTierTest(unittest.TestCase):
 
     def test_defaults(self):
         self.assertEqual((DEFAULTS["lm_model"], DEFAULTS["lm_context_len_plus"], DEFAULTS["lm_context_len_max"]),
-                         ("light", 32, 32))
+                         ("light", 64, 64))
 
     def test_tier_files(self):
         self.assertEqual(lm.TIER_FILES, {"light": "lm.bin", "plus": "lm_plus.bin", "max": "lm_max.bin"})

@@ -1,0 +1,13 @@
+# End-to-end checks with 選字模型 加強 (plus) and 注音自動校正 on (one engine for all lines):
+#   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 cpp\tools\plus_model_cases.txt -Config cpp\tools\plus_model_config.json
+# e2e-args: -Config cpp\tools\plus_model_config.json
+# 寄 is not among the characters of ㄐㄧˋ the search tries; the model finds 寄個郵件 far likelier (#58, the user 2026-11-20),
+# and 注音自動校正 no longer makes it 幾個 (#43)
+ji3ru0320 ru4ek7u.6ru04{ENTER} => 我簡單寄個郵件
+# 因該 meant stays, 因該 for 應該 is fixed (#43, the user 2026-11-20)
+up e9 vu;4ru4cj842l354ej/ t/6u062;4{ENTER} => 因該項計畫導致工程延宕
+up e9 1j4au/6x96m06cji4qup31o4d.4xu.6{ENTER} => 因該不明來源貨品被扣留
+# ...and after a sentence sent (the model reads it: after 今天天氣很好 this model made it 應該; a swap takes the lower of the model with and
+# without it, code-reviewer 2026-11-21)
+rup wu0 wu0 fu4cp3cl3{ENTER}up e9 1j4au/6x96m06cji4qup31o4d.4xu.6{ENTER} => 今天天氣很好因該不明來源貨品被扣留
+ji3up e9 ul4fm4{ENTER} => 我應該要去

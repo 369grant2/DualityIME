@@ -29,15 +29,25 @@ public:
     virtual ~LmModel() = default;
     // the model in the file (version 1 or 2), or nullptr (no file, another format, wrong sizes, cut short)
     static std::unique_ptr<LmModel> load(const std::wstring& path);
+    std::string tier = "light";  // the tier it was read for (LanguageModel::get; composer.cpp REFINE, #58)
 
     virtual LmState start() const = 0;                          // after <s> (id 1)
     virtual LmState step(const LmState& state, int c) const = 0;  // after character id c
     // step() for each state and character id at once (the same results)
     virtual std::vector<LmState> steps(const std::vector<const LmState*>& states, const std::vector<int>& cs) const;
+    // the states after each of cs in turn, from state (step() one after another: the same results)
+    virtual std::vector<LmState> run(const LmState& state, const std::vector<int>& cs) const;
+    // a tree of states at once: item b after cs[b], from *prev[b] or, when link[b] >= 0, from item link[b] (an earlier
+    // one); the same results as step() one by one (a Transformer reads each layer's weights once for all: #58)
+    virtual std::vector<LmState> tree(const std::vector<const LmState*>& prev, const std::vector<int>& link,
+                                      const std::vector<int>& cs) const;
     // Q10 natural log probability of each candidate id, among the candidates alone (<= 0)
     virtual std::vector<int64_t> scores(const LmState& state, const std::vector<int>& cands) const = 0;
     // Q16 probability that the next character is one of ids, over the whole vocabulary (integers only, the exp table)
     virtual int64_t mass_q16(const LmState& state, const std::vector<int>& ids) const = 0;
+    // for each state, scores(*states[b], every id)[ids[b]]: one unit among the whole vocabulary (the same numbers; a
+    // model computes them together, each row of its embedding read once for all of them: #58)
+    virtual std::vector<int64_t> unit_scores(const std::vector<const LmState*>& states, const std::vector<int>& ids) const;
     virtual int id(char32_t ch) const = 0;  // the character's vocabulary id, 0 (<unk>) if the model does not know it
     virtual int vocab() const = 0;
     virtual bool avx2() const = 0;  // the vector path (off: no AVX2, or DUALITYIME_LM_SCALAR=1)
@@ -60,6 +70,7 @@ public:
     std::vector<LmState> steps(const std::vector<const LmState*>& states, const std::vector<int>& cs) const override;
     std::vector<int64_t> scores(const LmState& state, const std::vector<int>& cands) const override;
     int64_t mass_q16(const LmState& state, const std::vector<int>& ids) const override;
+    std::vector<int64_t> unit_scores(const std::vector<const LmState*>& states, const std::vector<int>& ids) const override;
     int id(char32_t ch) const override;
     int vocab() const override { return V_; }
     bool avx2() const override { return avx2_; }
@@ -98,8 +109,13 @@ public:
 
     LmState start() const override;
     LmState step(const LmState& state, int c) const override;
+    std::vector<LmState> steps(const std::vector<const LmState*>& states, const std::vector<int>& cs) const override;
+    std::vector<LmState> run(const LmState& state, const std::vector<int>& cs) const override;
+    std::vector<LmState> tree(const std::vector<const LmState*>& prev, const std::vector<int>& link,
+                              const std::vector<int>& cs) const override;
     std::vector<int64_t> scores(const LmState& state, const std::vector<int>& cands) const override;
     int64_t mass_q16(const LmState& state, const std::vector<int>& ids) const override;
+    std::vector<int64_t> unit_scores(const std::vector<const LmState*>& states, const std::vector<int>& ids) const override;
     int id(char32_t ch) const override;
     int vocab() const override { return V_; }
     bool avx2() const override { return avx2_; }
@@ -126,10 +142,20 @@ private:
         Linear qkv, out, up, down;
     };
     std::vector<int64_t> matvec(const Linear& l, const std::vector<int64_t>& x) const;
+    // matvec of each x, each row of l read once for all of them (the same results: a large model is slow from reading
+    // its weights, one position at a time - #41 Task 18)
+    std::vector<std::vector<int64_t>> matvecs(const Linear& l, const std::vector<std::vector<int64_t>>& xs) const;
     std::vector<int64_t> rmsnorm(const std::vector<int64_t>& x, const std::vector<int32_t>& g) const;
     // the attention of the position after prev, reading every position up to it: its k and v, and the output
     void attention(const std::vector<int64_t>& x, const Block& blk, const NextNode* prev, int layer,
                    std::vector<int32_t>& k, std::vector<int32_t>& v, std::vector<int64_t>& out) const;
+    // the same from the position's qkv (blk.qkv's output), before blk.out
+    void attend(const std::vector<int64_t>& qkv, const NextNode* prev, int layer, std::vector<int32_t>& k,
+                std::vector<int32_t>& v, std::vector<int64_t>& att) const;
+    // arch 1: the positions after the characters cs, item b after prev[b] or, when link[b] >= 0, after item link[b]
+    // (an earlier one), all computed together layer by layer
+    std::vector<LmState> forward(const std::vector<std::shared_ptr<const NextNode>>& prev, const std::vector<int>& link,
+                                 const std::vector<int>& cs) const;
     std::vector<int64_t> embed(int c) const;
     std::vector<int64_t> logits(const LmState& state, const std::vector<int>& cands) const;
     int32_t dot(const int8_t* row, const int16_t* x, int n) const;
@@ -179,6 +205,9 @@ public:
     int64_t char_score(const ustr& before, char32_t ch, const ustr& syllable) const;
     // the sum of the characters' scores (Q10), one character per syllable
     int64_t text_score(const ustr& text, const std::vector<ustr>& readings) const;
+    // #43: the n characters of the syllable likeliest after before (char_score's), likeliest first, of equals the one
+    // with the lower id first; none the model does not know, none for a syllable with no list (engine/lm.py top_chars)
+    std::vector<char32_t> top_chars(const ustr& before, const ustr& syllable, size_t n) const;
     // Q10 log probability of ch after before among the characters of these syllables together (#51: the syllable
     // typed against the one 注音自動校正 read); one not among them gets the lowest of theirs, no list at all 0
     int64_t among_score(const ustr& before, char32_t ch, const std::vector<ustr>& syllables) const;
@@ -188,9 +217,14 @@ public:
     // Q10 natural log probability of units (context units: Chinese characters, EN_MARK for English) after <s>, each among
     // the whole vocabulary (#55: which split of the keys reads likelier; engine/lm.py Scorer.units_logp)
     int64_t units_logp(const ustr& units) const;
+    // units_logp of each text (the same numbers): the states they need stepped together and the places not kept scored
+    // together (LmModel::unit_scores), a group of texts at a time within the budget (#58: refine's tries; one at a time
+    // a long sentence's tries outgrew the budget, dropping and stepping again every key)
+    std::vector<int64_t> units_logp_many(const std::vector<ustr>& texts) const;
     // the states of every beginning of the texts, stepped together (text_score then finds them)
     void prepare(const std::vector<ustr>& texts) const;
     const LmModel& model() const { return lm_; }
+    const ustr& context() const { return context_; }  // a view's context ("" for the scorer itself)
     // 接續前文選字 (#37): a scorer of the same model whose texts come after context (<s> + context + text), with
     // caches of its own; the last LM_VIEWS_KEPT contexts asked for are kept and given again (engine/lm.py Scorer.view)
     const LmScorer* view(const ustr& context) const;
@@ -199,11 +233,15 @@ private:
     LmScorer(const LmScorer& base, const ustr& context);  // (view's)
     void clear() const;
     void room() const;
+    // room's test with this many states and masses more (all the views together for a view), and what room drops
+    bool full(size_t states, size_t masses) const;
+    void drop() const;
     LmState state(const ustr& text) const;
 
     const LmModel& lm_;
     const Lexicon& lexicon_;
     std::shared_ptr<const std::unordered_map<ustr, std::vector<int>>> cands_;  // (shared with the views)
+    std::shared_ptr<const std::unordered_map<int, char32_t>> chars_;  // a character of each id of cands_ (top_chars)
     ustr context_;                    // a view's context ("" for the scorer itself)
     const LmScorer* base_ = nullptr;  // a view's scorer (its views share one budget: room)
     LmState start_;                   // <s>, then the context

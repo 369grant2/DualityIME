@@ -2,9 +2,9 @@
 key, in the same format as cpp/tools/trace.cpp (see there), so
 tools/compare.py can diff the two engines.
 
-    python tools/trace.py <user.json> <script file> [config.json] [--lm-plus <file>]
+    python tools/trace.py <user.json> <script file> [config.json] [--tier plus|max <file>]
 
---lm-plus: 選字模型 plus reads that model file (tools/compare.py --lm-plus, #41).
+--tier: that 選字模型 tier reads that model file (tools/compare.py --tier, #41).
 """
 import os
 import sys
@@ -83,8 +83,12 @@ def main(user_path, script_path, config_path=None):
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--lm-plus" in args:
-        i = args.index("--lm-plus")
+        sys.exit("--lm-plus is gone: use --tier plus|max <file> (every setting then runs as that tier, with its own parameters; --lm-plus ran any file as plus)")
+    if "--tier" in args:
+        i = args.index("--tier")
         from engine import lm
-        lm.TIER_FILES["plus"] = os.path.abspath(args[i + 1])  # (an absolute path: os.path.join keeps it as it is)
-        del args[i:i + 2]
+        if args[i + 1] not in ("plus", "max"):
+            sys.exit(f"--tier plus|max <file>, not {args[i + 1]}")
+        lm.TIER_FILES[args[i + 1]] = os.path.abspath(args[i + 2])  # (absolute: os.path.join keeps it as it is)
+        del args[i:i + 3]
     main(*args[:3])

@@ -111,6 +111,72 @@ inline int32_t dot(bool avx2, const int8_t* row, const int16_t* x, int n) {
     return dot_scalar(row, x, n);
 }
 
+// The score of ids[b] among the whole vocabulary after the state projected to ps[b] (E values), as the model's
+// scores(state, every id)[ids[b]]: the same logits (each row's dot requantized, plus its bias; the 32-bit sums when
+// exact, as logits() tests) and the same normalization, but each row of emb read once for several states (#58: the
+// texts refine tries are many places of one whole-vocabulary score each; one by one they read emb again and again)
+inline std::vector<int64_t> unit_scores(bool avx2, const std::vector<int8_t>& emb_q, const std::vector<int32_t>& emb_m,
+                                        const std::vector<int32_t>& bias, int V, int E,
+                                        const std::vector<int32_t>& exp_table, const std::vector<int32_t>& log_table,
+                                        const std::vector<const std::vector<int64_t>*>& ps, const std::vector<int>& ids) {
+    constexpr size_t CHUNK = 32;  // (states at a time: their int16 copies stay in the cache)
+    const size_t V_ = static_cast<size_t>(V), E_ = static_cast<size_t>(E);
+    std::vector<int64_t> out(ps.size());
+    std::vector<int64_t> lg;
+    for (size_t b0 = 0; b0 < ps.size(); b0 += CHUNK) {
+        const size_t B = std::min(CHUNK, ps.size() - b0);
+        lg.assign(B * V_, 0);
+        std::vector<size_t> fast;  // (the states logits() reads with 32-bit sums)
+        std::vector<std::vector<int16_t>> p16;
+        for (size_t b = 0; b < B; ++b) {
+            const std::vector<int64_t>& p = *ps[b0 + b];
+            int64_t total = 0, top = 0;
+            for (size_t j = 0; j < p.size(); ++j) {  // (all of p, as logits())
+                int64_t a = p[j] < 0 ? -p[j] : p[j];
+                total += a;
+                top = std::max(top, a);
+            }
+            if (top <= 32767 && 127 * total < INT32_LIMIT) {
+                fast.push_back(b);
+                p16.emplace_back(p.size());
+                for (size_t j = 0; j < p.size(); ++j) p16.back()[j] = static_cast<int16_t>(p[j]);
+            } else {
+                for (size_t c = 0; c < V_; ++c) {
+                    const int8_t* e = emb_q.data() + c * E_;
+                    int64_t acc = 0;
+                    for (size_t j = 0; j < E_; ++j) acc += e[j] * p[j];
+                    lg[b * V_ + c] = requant(acc, emb_m[c]) + bias[c];
+                }
+            }
+        }
+        size_t c = 0;
+#ifdef SZ_LM_X86
+        if (avx2)
+            for (; c + 4 <= V_; c += 4) {  // (four rows, then every state: the rows stay in the cache)
+                const int8_t* w = emb_q.data() + c * E_;
+                for (size_t f = 0; f < fast.size(); ++f) {
+                    int32_t acc[4];
+                    dot4_avx2(w, E_, p16[f].data(), E, acc);
+                    for (size_t i = 0; i < 4; ++i) lg[fast[f] * V_ + c + i] = requant(acc[i], emb_m[c + i]) + bias[c + i];
+                }
+            }
+#endif
+        for (; c < V_; ++c) {
+            const int8_t* w = emb_q.data() + c * E_;
+            for (size_t f = 0; f < fast.size(); ++f)
+                lg[fast[f] * V_ + c] = requant(dot(avx2, w, p16[f].data(), E), emb_m[c]) + bias[c];
+        }
+        for (size_t b = 0; b < B; ++b) {  // (scores(): minus the top, minus the log of the sum of exp)
+            const int64_t* d = lg.data() + b * V_;
+            const int64_t top = *std::max_element(d, d + V_);
+            int64_t s = 0;
+            for (size_t k = 0; k < V_; ++k) s += exp_table[static_cast<size_t>(std::min(top - d[k], EXP_RANGE))];
+            out[b0 + b] = d[static_cast<size_t>(ids[b0 + b])] - top - log_q10(s, log_table);
+        }
+    }
+    return out;
+}
+
 struct File {
     FILE* f = nullptr;
     ~File() {

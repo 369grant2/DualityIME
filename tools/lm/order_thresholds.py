@@ -2,18 +2,21 @@
 ORDER_LM_THRESHOLDS_Q16 in engine/composer.py and cpp/engine/composer.cpp
 (docs/superpowers/specs/2026-11-04-reversed-digits-lm-design.md).
 
-    py tools/lm/order_thresholds.py collect [--numbers 6000] [--per-syllable 300]
-    py tools/lm/order_thresholds.py table [--cap 0.0025]
+    py tools/lm/order_thresholds.py collect [--numbers 6000] [--per-syllable 300] [--tier light] [--data-dir DIR]
+    py tools/lm/order_thresholds.py table [--cap 0.0025] [--tier light] [--write FILE]
 
 collect: held-out web text (common.EVAL["web"], never trained on). For each syllable the digits
     spell out of order (initial 1 2 5, final 8 9 0, tone 3 4 6 7, typed final first), runs of Chinese
     that end in one of its characters (followed by the end, a punctuation mark, a space or a Latin
     letter); and runs of Chinese followed by a number there. The engine's own
     Scorer.syllable_mass_q16 of each syllable after the Chinese before it, saved to
-    <WORK>/order_thresholds.pkl. About 15 minutes.
+    <WORK>/order_thresholds.pkl (another --tier: order_thresholds_<tier>.pkl). About 15 minutes, on half the CPUs.
+    --tier / --data-dir: the model of that tier (engine/lm.py TIER_FILES) in that folder (default data/), e.g. a
+    version 2 file exported --no-thresholds before its thresholds are known (#41).
 table: per syllable, the lowest threshold (Q16, at least 0.02) at which at most --cap of the numbers
     turn into the syllable; how many real end-of-run characters it keeps; the same threshold taken
-    from one half of the numbers and checked on the other. Prints both engines' tables.
+    from one half of the numbers and checked on the other. Prints both engines' tables; --write FILE also
+    writes "reading<TAB>q16" lines (tools/lm/next/quantize_next.py --thresholds: a version 2 file's own).
 Run collect again after data/lm.bin is retrained, then paste the tables into both engines. (Since
 2026-11-09 data/lm.bin is distilled, not tools/lm/train.py's output: see docs/architecture/decisions.md
 2026-11-09 and docs/status.md before retraining.)
@@ -34,8 +37,11 @@ INITIALS = {"ㄅ": "1", "ㄉ": "2", "ㄓ": "5"}
 FINALS = {"ㄚ": "8", "ㄞ": "9", "ㄢ": "0"}
 TONES = {"ˇ": "3", "ˋ": "4", "ˊ": "6", "˙": "7"}
 FLOOR_Q16 = round(0.02 * 65536)
-OUT = os.path.join(WORK, "order_thresholds.pkl")
 _scorer = None
+
+
+def out_path(tier):
+    return os.path.join(WORK, "order_thresholds.pkl" if tier == "light" else f"order_thresholds_{tier}.pkl")
 
 
 def syllables(lexicon):
@@ -51,11 +57,13 @@ def syllables(lexicon):
     return out
 
 
-def _init():
+def _init(tier, data_dir):
     global _scorer
     from engine import load_resources, lm
     _, lexicon, _, _, _, _ = load_resources(None)
-    _scorer = lm.shared(lexicon=lexicon)
+    _scorer = lm.shared(data_dir=data_dir, lexicon=lexicon, tier=tier)
+    if _scorer is None or (tier != "light" and _scorer is lm.shared(data_dir=data_dir, lexicon=lexicon)):
+        raise SystemExit(f"no {tier} model in {data_dir or 'data/'}")
 
 
 def _job(args):
@@ -92,18 +100,19 @@ def samples(syls, numbers, per_syllable):
     return pos, neg
 
 
-def collect(numbers, per_syllable):
+def collect(numbers, per_syllable, tier, data_dir):
     from engine.lexicon import Lexicon
+    _init(tier, data_dir)  # (here first: a missing model stops before the pool, whose workers would restart forever)
     syls = syllables(Lexicon())
     pos, neg = samples(syls, numbers, per_syllable)
     names = list(syls)
-    with multiprocessing.Pool(initializer=_init) as pool:
+    with multiprocessing.Pool(max(1, (os.cpu_count() or 2) // 2), initializer=_init, initargs=(tier, data_dir)) as pool:
         m_neg = pool.map(_job, [(b, names) for b in neg], chunksize=16)
         m_pos = {s: [r[s] for r in pool.map(_job, [(b, [s]) for b in pos[s]], chunksize=16)] for s in names if pos[s]}
     os.makedirs(WORK, exist_ok=True)
-    with open(OUT, "wb") as f:
+    with open(out_path(tier), "wb") as f:
         pickle.dump({"syls": syls, "neg": m_neg, "pos": m_pos}, f)
-    print(f"{len(neg)} numbers, end-of-run samples per syllable up to {per_syllable}: saved {OUT}")
+    print(f"{len(neg)} numbers, end-of-run samples per syllable up to {per_syllable}: saved {out_path(tier)}")
 
 
 def threshold(masses, cap):
@@ -113,8 +122,8 @@ def threshold(masses, cap):
     return max(FLOOR_Q16, ms[len(ms) - allowed - 1] + 1) if len(ms) > allowed else FLOOR_Q16
 
 
-def table(cap):
-    with open(OUT, "rb") as f:
+def table(cap, tier, write):
+    with open(out_path(tier), "rb") as f:
         d = pickle.load(f)
     neg, half = d["neg"], len(d["neg"]) // 2
     print(f"{len(neg)} numbers, cap {cap:.2%}")
@@ -136,6 +145,10 @@ def table(cap):
     print("\n// cpp/engine/composer.cpp ORDER_LM_THRESHOLDS_Q16")
     for s, keys, th in rows:
         print(f'    {{U"{s}", {th}}},')
+    if write:
+        with open(write, "w", encoding="utf-8", newline="\n") as f:
+            f.writelines(f"{s}\t{th}\n" for s, keys, th in rows)
+        print(f"\nwrote {write}")
 
 
 def main(argv):
@@ -144,9 +157,10 @@ def main(argv):
         return
     opt = {argv[i]: argv[i + 1] for i in range(1, len(argv) - 1, 2)}
     if argv[0] == "collect":
-        collect(int(opt.get("--numbers", 6000)), int(opt.get("--per-syllable", 300)))
+        collect(int(opt.get("--numbers", 6000)), int(opt.get("--per-syllable", 300)), opt.get("--tier", "light"),
+                opt.get("--data-dir"))
     else:
-        table(float(opt.get("--cap", 0.0025)))
+        table(float(opt.get("--cap", 0.0025)), opt.get("--tier", "light"), opt.get("--write"))
 
 
 if __name__ == "__main__":

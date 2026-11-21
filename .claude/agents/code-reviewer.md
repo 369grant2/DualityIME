@@ -65,6 +65,11 @@ and list what you checked.
 
 When you find an issue that is likely to recur in this repo, record it in your memory.
 
+Record every finding you report, low ones too, in the project's findings list (one command each; the user's rule
+2026-11-21: nothing found is left unfixed without their yes, and the release's full check refuses while one is open):
+`py -3 tools/findings.py add --source code-reviewer --where "<file:line>" --what "<the defect, one line>"`.
+Put the ids it prints in your report. Never run `findings.py skip` or `fixed`: the caller fixes, the user leaves.
+
 Last, after every review (findings or not, a re-check too): run
 `py -3 .claude/scripts/review_mark.py reviewer`. It records that you reviewed the code as it is
 now (outside the tree, in .git); check.py refuses to run until the code-reviewer has reviewed the

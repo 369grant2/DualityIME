@@ -102,6 +102,35 @@ BLOCK: list[tuple[str, str]] = [
         "`-- sh -c \"a && b\"`), in the background: it reports DONE, FAILED or a STALL with the GPU's memory and power "
         "(CLAUDE.md Commands).",
     ),
+    # (project) Long evaluations only through tools/longrun.py, which records the folder and the fingerprint of the
+    # code a run measures and, after every change, lists the runs that no longer stand for it. 2026-11-21, three times
+    # in one day, hours each: another natural sentence set on a copy, max's model compared under plus's parameters, a
+    # parity run left running on a copy after the copy was moved back.
+    (
+        r"^(?![\s\S]*\blongrun\.py\b)(?![\s\S]*\s-m\s+(py_compile|pyflakes|pycodestyle|pylint)\b)"
+        r"(?![\s\S]*\s--help\b)"
+        r"[\s\S]*?(^|[\s;&|(`'\"\\/])(py|python[\d.]*)(\.exe)?[\"']?\s[\s\S]*?"
+        r"\b((autocorrect_eval|tier_eval|base_emul|ac_log|compare_jobs|refine_same)\.py\b"
+        r"(?![\s\S]*--(sentences-only|status)\b)"
+        r"|refine_eval\.py\s+log\b"
+        r"|compare\.py\b(?![\s\S]*--cases\b))",
+        "Start long runs with `py -3 tools/longrun.py start --name <name> [--code <folder>] [--fixed-code \"<why>\"] "
+        "[--log <file>] -- <command>`, in the background: it records which code the run measures and, after every "
+        "change, lists the runs that no longer stand for it (CLAUDE.md Workflow 2). A sample of compare.py: --cases N.",
+    ),
+    # (project) A review finding is left unfixed only by the user (2026-11-21: one went into docs/review-backlog.md as
+    # "not fixed" on Claude's word; the user: every one not fixed is listed for them, and only their yes lets it pass).
+    (
+        r"\bfindings\.py\b[^\n;&|]*\bskip\b[^\n;&|]*--direct\b",
+        "Leaving a review finding unfixed is the user's call: ask them (AskUserQuestion, a question naming "
+        "\"findings #<id>\", options \"同意不修\" and \"要修\"), then `findings.py skip <id>` (it needs their answer); "
+        "--direct is for the user's own terminal (CLAUDE.md Workflow 3).",
+    ),
+    (
+        r"(>>?|\btee\b|\s-i\b|Set-Content|Add-Content|Out-File)[^\n;&|]*review-backlog\.md",
+        "docs/review-backlog.md is written only by tools/findings.py: `skip` (the user's) adds a line, `unlist` takes "
+        "one out (CLAUDE.md Workflow 3).",
+    ),
 
 ]
 # (regex, reason) or (regex, reason, "auto-ask"). Commands the user confirms

@@ -113,12 +113,26 @@ static int lm_check(const char* ids_path, const char* model) {
         std::vector<int> known;
         for (int c : cands)
             if (c > 0) known.push_back(c);
-        LmState st = lm->start();
+        // (#41: the positions one at a time, all together after <s> (run), and each after the one before it as a batch
+        // of separate states (steps) must agree; the one-at-a-time scores are printed for check_cpp.py)
+        std::vector<LmState> one{lm->start()};
+        for (int c : ids) one.push_back(lm->step(one.back(), c));
+        std::vector<LmState> ran = lm->run(one[0], ids);
+        std::vector<const LmState*> parents;
+        for (size_t k = 0; k < ids.size(); ++k) parents.push_back(&one[k]);
+        std::vector<LmState> batch = lm->steps(parents, ids);
         for (size_t k = 0; k <= ids.size(); ++k) {
+            const LmState& st = one[k];
             auto sc = lm->scores(st, cands);
+            const int64_t mass = known.empty() ? 0 : lm->mass_q16(st, known);
+            if (k > 0)
+                for (const LmState* other : {&ran[k - 1], &batch[k - 1]})
+                    if (lm->scores(*other, cands) != sc || (!known.empty() && lm->mass_q16(*other, known) != mass)) {
+                        std::fprintf(stderr, "run or steps differ from step at position %zu\n", k);
+                        return 4;
+                    }
             for (size_t i = 0; i < sc.size(); ++i) out += (i ? " " : "") + std::to_string(sc[i]);
-            out += " | " + std::to_string(known.empty() ? 0 : lm->mass_q16(st, known)) + "\n";
-            if (k < ids.size()) st = lm->step(st, ids[k]);
+            out += " | " + std::to_string(mass) + "\n";
         }
     }
     _setmode(_fileno(stdout), _O_BINARY);
@@ -225,6 +239,7 @@ int main(int argc, char** argv) {
                 i += len;
             }
             if (timing) times.push_back({ms_since(t0), line_no, ++key_no});
+            c.warm();  // (as engine_main after each reply, outside the time; compare.py: it changes no output)
             out += state(c, extra) + "\n";
           } catch (const std::exception& e) {  // (shown, not hidden: the engine must never throw)
             std::fprintf(stderr, "exception \"%s\" in line \"%s\" at key %zu; raw before: \"%s\"\n", e.what(),
@@ -239,6 +254,7 @@ int main(int argc, char** argv) {
             Clock::time_point t0 = Clock::now();
             c.key(std::nullopt, "ENTER");
             if (timing) times.push_back({ms_since(t0), line_no, ++key_no});
+            c.warm();
             out += state(c, "end") + "\n";
         }
     }

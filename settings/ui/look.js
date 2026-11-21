@@ -303,7 +303,10 @@ function lookCard() {
     body.replaceChildren(
       row("現成配色", "挑一組再微調下面的顏色", swatches()),
       row("顏色", null, h("span", { class: "look-colors" }, colorInput("bg", "背景"), colorInput("text", "文字"), colorInput("select", "選取框")), resetColors),
-      h("div", { class: "look-tabs-row" }, tabsBox),
+      h("div", { class: "look-tabs-row" }, tabsBox,
+        // (many users never found that each window takes its own photo and settings: the user, 2026-11-21)
+        h("div", { class: "look-hint look-tabs-hint" },
+          "每個視窗都可以用不同的照片與調整：點上面的視窗名稱再調整；調整過的視窗旁會有小圓點")),
       ...photoRows(),
       h("div", { class: "look-preview-wrap" },
         // (only with a photo: there is nothing to move without one)

@@ -219,8 +219,11 @@ def load(data_dir=DATA_DIR, tier="light"):
             magic = f.read(4)
         if magic == b"DLM2":  # (#41: the next student, engine/lm_next.py)
             from .lm_next import NextLM
-            return NextLM(path)
-        return CharLM(path)
+            model = NextLM(path)
+        else:
+            model = CharLM(path)
+        model.tier = tier if tier in TIER_FILES else "light"  # (the tier it was read for: composer.REFINE)
+        return model
     except Exception:
         return None
 
@@ -338,6 +341,21 @@ class Scorer:
         c = self.lm.ids.get(ch, 0)
         i = int(np.searchsorted(cands, c))
         return int(scores[i]) if i < len(cands) and cands[i] == c else int(scores.min())
+
+    def top_chars(self, before, syllable, n):
+        """#43: the n characters of the syllable likeliest after before (char_score's), likeliest first, of equals the
+        one with the lower id first; none the model does not know, none for a syllable with no list."""
+        cands = self.candidates(syllable)
+        if cands is None:
+            return []
+        key = (before, syllable)
+        scores = self.score_cache.get(key)
+        if scores is None:
+            scores = self.lm.scores(self.state(before), cands)
+            self._room()
+            self.score_cache[key] = scores
+        order = sorted((i for i in range(len(cands)) if int(cands[i]) != 0), key=lambda i: (-int(scores[i]), int(cands[i])))
+        return [self.lm.vocab[int(cands[i])] for i in order[:n]]
 
     def among_score(self, before, ch, syllables):
         """Q10 natural log probability of ch after before among the characters of these syllables together (#51: a

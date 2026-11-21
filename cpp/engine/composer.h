@@ -136,6 +136,9 @@ public:
     }
     const ustr& lm_context() const { return lm_context_; }
     const ustr& lm_units() const { return lm_units_; }  // (the same as units: EN_MARK too, #41)
+    // between keys (engine_main, after a reply), nothing typed: the model reads now the context the next run starts
+    // from, not on its first syllable (#41: 141 ms on max). Only the time moves: no output changes (no Python twin)
+    void warm() const;
     bool toggle_full_width();
     bool toggle_simplified();  // 簡體輸出 (#32): Traditional <-> Simplified, remembered in the settings
     void settings_changed();

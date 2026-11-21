@@ -87,6 +87,18 @@ SWAP_GAIN_WORD = 3.0      # ...and one that makes a word of the dictionary (你�
 SWAP_GAIN_NASAL = 2.0      # ...and ㄣ/ㄥ or ㄢ/ㄤ the other way round, the keys typed making no word (因該 -> 應該, #38): a
                           # slip of the ear, far more common than a key next to the right one (tools/autocorrect_eval.py N)
 SWAP_WINDOW = 3           # syllables on each side of it that count (run_score)
+# ...with 長句選字加強's model, its say on the run read with the swap against as typed (#43; _swap_lm_gain, Q10 natural
+# log; 2358 is one in log10), the user's rule 2026-11-20: a word typed right changed weighs as 2-3 slips fixed:
+SWAP_LM_VETO_MARGIN = 0.5  # a swap clearing its gain by no more than this (log10) is not made when the model finds the run
+SWAP_LM_VETO_Q10 = 1179   # likelier with it by no more than this (0.5 in log10: 我簡單寄個郵件, not 幾個)...
+SWAP_LM_VETO_NASAL_Q10 = 0  # ...ㄣ/ㄥ, ㄢ/ㄤ: no likelier (因該不明來源, 因該項計畫 stay; 我因該要去 clears it by far)
+SWAP_LM_SHORT_NASAL = 0.4  # ㄣ/ㄥ, ㄢ/ㄤ short of its gain by (every model; at 0.5 max changed 說法新需要 to 形)
+SWAP_LM_BOOST_Q10 = 4716  # less than this, the keys typed making no word, passes when the model finds it likelier by this
+                          # (2 in log10); not the other kinds (on cases it was not picked on, more words typed right changed)
+SWAP_LM_CHARS = 10        # (_swap_lm_gain: the characters tried at the place of the swap)
+_SWAP_GAINS = {}          # (_swap_lm_gain's, kept across keys: (model, context, syllables, k, alt, base) -> gain)
+NEIGHBOUR_LM_WEIGHT = 0.5  # a key next to the one typed: of the syllables it may be, the best word score plus this times
+NEIGHBOUR_LM_MARGIN = 1.0  # the model's log10 gain over the best word's, when that beats the best word by more than this
 RUN_SCORES_KEPT = 50000   # run_score results kept across keys (then all dropped and started again)
 _RUN_SCORES = {}
 ORDER_DIGITS_GAIN = 1.0    # ...and for digits out of order to stay zhuyin (好吧, not 有813個 -> 有把個)
@@ -756,14 +768,43 @@ def _better_word(readings, k, lexicon, user):
 
 
 def _best_neighbour(table, tok, readings, k, lexicon, user):
-    """(reading, score) of the syllable a key next to one of tok's makes the best word with (see
-    _word_score), syllable k of readings; (None, None) if none makes a word."""
-    best_alt, best = None, None
+    """(reading, score, scored) of the syllable a key next to one of tok's makes the best word with (see
+    _word_score), syllable k of readings - (None, None, []) if none makes a word - and every neighbour that makes one,
+    with its score, in order (the model's turn reads them again: scored once, /code-review high 2026-11-21)."""
+    best_alt, best, scored = None, None, []
     for alt in table.adjacent_parses(tok.raw):
         score = _word_score(readings[:k] + [alt] + readings[k + 1:], k, lexicon, user)
-        if score is not None and (best is None or score > best):
+        if score is None:
+            continue
+        scored.append((alt, score))
+        if best is None or score > best:
             best_alt, best = alt, score
-    return best_alt, best
+    return best_alt, best, scored
+
+
+def _swap_lm_gain(readings, k, alt, base, lexicon, bigram, scorer):
+    """#43: how much likelier the model (scorer, after its context) finds the run read with alt at k than with base
+    there (Q10 natural log): each the text convert writes (no model, no user: the dictionary and the corpus), at k the
+    character of that syllable the model finds the run likeliest with, of convert's and the SWAP_LM_CHARS likeliest
+    after the text before it (convert writes 記個郵件 for ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ - 寄 is not among the characters it tries -
+    and 記 loses to 幾 where 寄 ties). None when convert writes either with other than one character a syllable. The
+    same syllables give the same: kept across keys (_SWAP_GAINS). The whole run: cut after k (as SWAP_WINDOW), 換進 in
+    常選的同音字不再換進緊密的詞 became 幻境."""
+    rds = list(readings)
+    key = (id(scorer.lm), getattr(scorer, "_context", ""), tuple(rds), k, alt, base)
+    if key in _SWAP_GAINS:
+        return _SWAP_GAINS[key]
+
+    def best(r):
+        t = "".join(p for _, _, p in convert(rds[:k] + [r] + rds[k + 1:], lexicon, None, {}, bigram))
+        if len(t) != len(rds):
+            return None
+        return max(scorer.units_logp(t[:k] + ch + t[k + 1:]) for ch in [t[k]] + scorer.top_chars(t[:k], r, SWAP_LM_CHARS))
+    a, b = best(alt), best(base)
+    if len(_SWAP_GAINS) >= RUN_SCORES_KEPT:
+        _SWAP_GAINS.clear()
+    _SWAP_GAINS[key] = None if a is None or b is None else a - b
+    return _SWAP_GAINS[key]
 
 
 def _zh_runs(tokens):
@@ -844,6 +885,7 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
     # what lies before the next run; its marks are worked out together, as convert sees the number next to it - 824ok
     # is one run of letters and digits)
     pending = ""
+    starts = {}  # start of the first token of each part of earlier -> its index (the runs the swaps below go through)
 
     def context():
         text = "".join(m + "".join(ch for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p if is_han(ch))
@@ -870,6 +912,8 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
                     part, pending = [], ""
                 pending += t.raw  # (the number: digits before what follows it)
             else:
+                if not part:
+                    starts[t.start] = len(earlier)
                 part.append(t.value)
         if part:
             earlier.append((context_units(pending) if marks else "", part))
@@ -904,12 +948,47 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
             score = _RUN_SCORES[window] = -99.0 * len(window) if score is None else score
         return score
 
+    # 長句選字加強's model: its say too (#43, the SWAP_LM_ constants; the neighbour keys for plus and max), the run read
+    # after what _model_reads_it reads before it (what was sent, the runs before it as the engine reads them, the marks
+    # before it)
+    strong = _knows_english(lm)
     for run in _zh_runs(tokens):
         readings = [t.value for t in run]
         swapped = False  # (two syllables side by side are not both swapped)
+        view = []
+
+        def model_gain(k, alt, base):
+            if not view:
+                n = starts.get(run[0].start, len(earlier))
+                text = "".join(m + "".join(ch for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p
+                                           if is_han(ch)) for m, e in earlier[:n])
+                ctx = (sent + text + (earlier[n][0] if n < len(earlier) else ""))[-(context_len or LM_CONTEXT):]
+                view.append(lm.view(ctx) if ctx else lm)
+            return _swap_lm_gain(readings, k, alt, base, lexicon, bigram, view[0])
+
+        def swap_gain(k, alt, base):
+            # (a swap: model_gain and the same with nothing before, the lower - the rules were picked on runs typed
+            # alone, and what was sent tipped a 因該 meant: 因該不明來源貨品被扣留 after 今天天氣很好, plus and max;
+            # the user 2026-11-20)
+            g = model_gain(k, alt, base)
+            if g is None or view[0] is lm:
+                return g
+            alone = _swap_lm_gain(readings, k, alt, base, lexicon, bigram, lm)
+            return None if alone is None else min(g, alone)
+
         for k, t in enumerate(run):
             if t.corrected == "adjacent":
-                best_alt, best = _best_neighbour(table, t, readings, k, lexicon, user)
+                best_alt, best, scored = _best_neighbour(table, t, readings, k, lexicon, user)
+                if best_alt is not None and strong:
+                    # (the best word score with the model's gain over the best word's, when that beats it clearly)
+                    top, top_alt = best + NEIGHBOUR_LM_MARGIN, None
+                    for alt, score in scored:
+                        if alt == best_alt:
+                            continue
+                        g = model_gain(k, alt, best_alt)
+                        if g is not None and score + NEIGHBOUR_LM_WEIGHT * (g / (1024 * LN10)) > top:
+                            top, top_alt = score + NEIGHBOUR_LM_WEIGHT * (g / (1024 * LN10)), alt
+                    best_alt = top_alt or best_alt
                 if best_alt is not None:
                     t.value = readings[k] = best_alt
                 swapped = False
@@ -968,8 +1047,18 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
             if variant is not None:
                 typed = max(typed, in_sentence(variant, k, variant[k]))
             typed_word = _word_score(readings, k, lexicon, None) is not None
-            passing = [(best, alt) for best, alt, nasal in found
-                       if best - typed > (SWAP_GAIN_WORD if typed_word else SWAP_GAIN_NASAL if nasal else SWAP_GAIN_NO_WORD)]
+            passing = []
+            for best, alt, nasal in found:
+                need = SWAP_GAIN_WORD if typed_word else SWAP_GAIN_NASAL if nasal else SWAP_GAIN_NO_WORD
+                if best - typed > need:
+                    # (close to its gain and the model finds it unlikely: not made)
+                    g = swap_gain(k, alt, t.value) if lm is not None and best - typed <= need + SWAP_LM_VETO_MARGIN else None
+                    if g is None or g > (SWAP_LM_VETO_NASAL_Q10 if nasal else SWAP_LM_VETO_Q10):
+                        passing.append((best, alt))
+                elif lm is not None and nasal and not typed_word and best - typed > need - SWAP_LM_SHORT_NASAL:
+                    g = swap_gain(k, alt, t.value)  # (short of its gain: made when the model finds it far likelier)
+                    if g is not None and g >= SWAP_LM_BOOST_Q10:
+                        passing.append((best, alt))
             # ...and where the tones differ in another syllable (匹配 for ㄆㄧ ㄆㄟˋ: ㄆㄟˋ as there),
             # this one is no slip at all: left alone (not 批判, o next to 0); a pick makes it the
             # word (_learn_tone_variant_words)
@@ -1352,6 +1441,17 @@ WORD_COHESION = 1.0  # cohesive: log10 count(word) - the sum of its characters' 
 LN10 = 2.302585092994046  # (written out: the C++ engine uses the same digits)
 NBEST_K = 5        # n-best: paths kept per (position, last phrase)
 NBEST_N = 10       # ...and distinct texts the model scores
+# ...then each single-character place of the path chosen may take another character of its syllable (#58: 寄 in
+# 我簡單寄個郵件 is not among the PER_SPAN characters tried, and the homophone score above cancels out what follows it):
+# of the REFINE_CHARS likeliest by the model after the text before it (of the SWAP_LM_CHARS it ranks, those of the
+# dictionary), the one with the best d + w * u above m, d the path's own score with it minus without (transitions,
+# WORD_BONUS), u the model's log10 of the whole text with it minus without (units_logp, the whole vocabulary); w, m those
+# of the model's tier (docs: picked on the evaluation's pick sets, checked on others, one right -> wrong weighing 2.5)
+REFINE = {"light": (2.0, 4.0), "plus": (2.5, 4.0), "max": (5.0, 4.0)}
+REFINE_CHARS = 4
+REFINE_D_MAX = 3.0        # (d this far below or more: not weighed)
+REFINE_MIN_WEIGHT = -8.0  # (a character the dictionary weighs no more than this, never seen in its corpus: not tried -
+                          # 别 嘅 麽; tools/build_lexicon.py UNK_SCORE)
 
 
 NO_CHAR_SCORE = -8.0  # a syllable written as zhuyin: no character has it (convert)
@@ -1454,7 +1554,56 @@ def _with_lm(score, path, readings, lexicon, user, overrides, bigram, prev_word,
         s = s + weight * (lm.text_score(text, readings) / (1024 * LN10)) + WORD_BONUS * _word_chars(hyp, bigram)
         if s > best_score:
             best, best_score = hyp, s
-    return best
+    return _refine(best, readings, lexicon, overrides, bigram, prev_word, options, lm)
+
+
+def _refine(path, readings, lexicon, overrides, bigram, prev_word, options, lm):
+    """path with its single-character places that the model reads far better with another character of the syllable
+    changed (REFINE; a pick's place never)."""
+    w, m = REFINE.get(getattr(getattr(lm, "lm", None), "tier", "light"), (None, None))
+    text = "".join(p for _, _, p in path)
+    if w is None or len(text) != len(readings):
+        return path
+
+    def own(hyp, i_new=None, unigram=None):
+        s, prev = 0.0, prev_word
+        for i, l, p in hyp:
+            u = dict(options.get((i, l), ())).get(p)
+            if u is None and i == i_new:
+                u = unigram
+            if u is None:
+                return None
+            s += (context_transition if i == 0 else transition)(bigram, prev, p, u)
+            prev = p
+        return s + WORD_BONUS * _word_chars(hyp, bigram)
+    base_own = own(path)
+    if base_own is None:  # (a phrase the search did not offer: repick's)
+        return path
+    base_lm, best = None, {}
+    for j, (i, l, p) in enumerate(path):
+        if l != 1 or any(a <= i < a + b for a, b in overrides):
+            continue
+        lex = dict(phrase_candidates([readings[i]], lexicon))
+        tried = 0
+        for ch in lm.top_chars(text[:i], readings[i], SWAP_LM_CHARS):
+            if ch == p or ch not in lex:
+                continue
+            tried += 1
+            if tried > REFINE_CHARS:
+                break
+            if lex[ch] <= REFINE_MIN_WEIGHT:
+                continue
+            hyp = path[:j] + [(i, 1, ch)] + path[j + 1:]
+            d = own(hyp, i, corpus_unigram(bigram, lexicon, ch, lex[ch]))
+            if d is None or d - base_own <= -REFINE_D_MAX:
+                continue
+            d -= base_own
+            if base_lm is None:
+                base_lm = lm.units_logp(text)
+            v = d + w * ((lm.units_logp(text[:i] + ch + text[i + 1:]) - base_lm) / (1024 * LN10))
+            if v > m and (i not in best or v > best[i][0]):
+                best[i] = (v, ch)
+    return [(i, l, best[i][1]) if i in best else (i, l, p) for i, l, p in path] if best else path
 
 
 def nbest(readings, options, bigram, prev_word, k, n):

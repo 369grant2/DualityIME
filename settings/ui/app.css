@@ -302,6 +302,7 @@ table.list input::placeholder { color: var(--sub); }
 .look-value { min-width: 40px; font-size: 13px; color: var(--sub); }
 .look-preview-wrap { padding: 4px 16px 16px; }
 .look-hint { font-size: 12px; color: var(--sub); margin-bottom: 6px; }
+.look-tabs-hint { margin: 6px 0 0; }
 .look-preview { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; padding: 16px; border-radius: 8px; background: #f4f4f4; }
 .lp-box { text-align: center; font-size: 11px; color: #666; }
 .lp-name { margin-top: 6px; }

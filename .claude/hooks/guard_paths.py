@@ -33,6 +33,10 @@ PROTECTED = {
     ".git/": "git's own configuration holds the privacy hooks and the identity: only the user changes it.",
     ".claude/hooks/": "The hooks hold the user's rules (protected files, commands to ask, git): only the user "
                       "changes them; propose the change.",
+    # (the user, 2026-11-21: a finding not fixed is listed for them; only their yes puts it here)
+    "docs/review-backlog.md": "Review findings left unfixed with the user's agreement: tools/findings.py writes it "
+                              "(`skip`, run by the user, adds; `unlist` takes a line out). List the finding for the "
+                              "user instead.",
 }
 # Regexes (full relative path) for files inside a protected prefix that Claude
 # is expected to write.

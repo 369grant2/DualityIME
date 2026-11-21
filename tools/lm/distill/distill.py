@@ -119,6 +119,9 @@ class Data:
             ctx_ids = [2 if u == EN else self.ids.get(u, 0) for u in to_units(c)]
         else:  # (today's model reads the Chinese characters alone: a context as written loses the rest)
             ctx_ids = [self.ids.get(ch, 0) for ch in c if is_han(ch)]
+        if os.environ.get("TR_CTXLEN"):  # (the engine's 前文長度: only the last N units, #41)
+            n_ctx = int(os.environ["TR_CTXLEN"])
+            ctx_ids = ctx_ids[max(0, len(ctx_ids) - n_ctx):]  # (0: none; [-0:] would keep them all)
         hyps, eng, tgt, tch, full = [], [], [], [], []
         for t, e, _ in r["hyps"]:
             eng.append(e)

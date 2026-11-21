@@ -32,7 +32,11 @@ NPM = shutil.which("npm") or "npm"
 # list steps before the code they check exists. None = always run.
 STEPS: list[tuple[str, list[str], Path, str | None]] = [
     # (test_gpu: long GPU jobs watched by tools/lm/gpu_run.py, every GPU loop tidies - /collab:correct 2026-11-14)
-    ("unittest", [PYTHON, "-m", "unittest", "tests.test_engine", "tests.test_gpu"], ROOT, "tests/test_engine.py"),
+    # (no open review finding: each fixed, or left by the user with tools/findings.py skip - /collab:correct 2026-11-21)
+    ("findings", [PYTHON, "tools/findings.py", "gate"], ROOT, "tools/findings.py"),
+    # (test_longrun, test_findings: the long-run and findings gates - /collab:correct 2026-11-21)
+    ("unittest", [PYTHON, "-m", "unittest", "tests.test_engine", "tests.test_gpu", "tests.test_longrun",
+                  "tests.test_findings"], ROOT, "tests/test_engine.py"),
     # The C++ engine (cpp\build.cmd: Visual Studio Build Tools with C++), then both engines
     # key by key: same output, same user.json and keys.json.
     ("cpp build", ["cmd", "/c", str(ROOT / "cpp" / "build.cmd")], ROOT, "cpp/build.cmd"),

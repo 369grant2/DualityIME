@@ -40,9 +40,9 @@ static class SettingsTest {
 
             // 接續前文選字 (#37): on as it comes, with 長句選字加強
             Check("接續前文選字 default", (bool)cfg["lm_context"] && (bool)cfg["long_sentence"], json.Serialize(cfg));
-            // 選字模型 (#41): light as it comes, plus and max each reading 32 characters (engine/config.py)
-            Check("選字模型 defaults", (string)cfg["lm_model"] == "light" && (int)cfg["lm_context_len_plus"] == 32 &&
-                  (int)cfg["lm_context_len_max"] == 32, json.Serialize(cfg));
+            // 選字模型 (#41): light as it comes, plus and max each reading 64 characters (engine/config.py)
+            Check("選字模型 defaults", (string)cfg["lm_model"] == "light" && (int)cfg["lm_context_len_plus"] == 64 &&
+                  (int)cfg["lm_context_len_max"] == 64, json.Serialize(cfg));
             // 簡體輸出 (#32): off, its key off, Ctrl+F1 as it comes; a key that is no shortcut is refused
             Check("簡體輸出 defaults", !(bool)cfg["simplified"] && !(bool)cfg["simplified_hotkey"] &&
                   (string)cfg["simplified_key"] == "Ctrl+F1", json.Serialize(cfg));
@@ -907,6 +907,13 @@ static class SettingsTest {
         Check("newest beta after release", Updater.Newest(after, true) == "3.3.0", Updater.Newest(after, true));
         Check("newest of nothing", Updater.Newest("[]", true) == "", "");
         Check("pick ignores newer beta when off", Updater.Pick(lines, false, "3.3.0") == null, "");
+        // (beta on, a pre-release installed, then a stable release with a higher number: beta takes it too - 3.2.5 to 3.3.0)
+        string toStable = Releases(Rel("v3.2.5", true, false, Setup("3.2.5")), Rel("v3.2.4", false, false, Setup("3.2.4")),
+                                   Rel("v3.3.0", false, false, Setup("3.3.0")));
+        r = Updater.Pick(toStable, true, "3.2.5");
+        Check("pick beta takes a newer stable release", r != null && r.Version == "3.3.0", r == null ? "null" : r.Version);
+        r = Updater.Pick(toStable, false, "3.2.4");
+        Check("pick stable takes the newer stable release", r != null && r.Version == "3.3.0", r == null ? "null" : r.Version);
 
         string work = Path.Combine(dir, "update");
         Directory.CreateDirectory(work);

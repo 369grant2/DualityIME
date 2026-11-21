@@ -396,10 +396,12 @@ function pageTyping() {
 }
 
 // 選字模型 (#41): the tiers released (only theirs go into the installer: installer\build.ps1) and each tier and context
-// length's median time a key on the development computer (tools/key_latency_ab.py, measured before a release and
-// written here). One tier alone: no 選字模型 row.
-const LM_TIERS_SHIPPED = ["light"];
-const LM_LATENCY_MS = { "light-32": "1.1", "plus-32": "", "plus-64": "", "max-32": "", "max-64": "" };
+// length's median time a key on the development computer (docs/superpowers/items/41/tier_latency.py, 2026-11-20, measured
+// before a release and written here). One tier alone: no 選字模型 row.
+const LM_TIERS_SHIPPED = ["light", "plus", "max"];
+// (median key, docs/superpowers/items/41/tier_latency.py on this computer, 5 runs in turn, 2026-11-21 with #43/#58
+// and the stepping done together: light 1.097, plus 1.215 / 1.219, max 1.222 / 1.221 ms)
+const LM_LATENCY_MS = { "light-32": "1.1", "plus-32": "1.2", "plus-64": "1.2", "max-32": "1.2", "max-64": "1.2" };
 const LM_TIER_NAMES = { light: "輕量", plus: "加強", max: "最強" };
 
 // 長句選字加強 and, under it, 接續前文選字 (#37), 選字模型 and, for 加強／最強, 前文長度 (#41): greyed while
@@ -407,7 +409,7 @@ const LM_TIER_NAMES = { light: "輕量", plus: "加強", max: "最強" };
 function longSentenceRows() {
   const sub = toggle(S.config.lm_context, (v) => setConfig("lm_context", v),
     { label: "接續前文選字", disabled: !S.config.long_sentence });
-  const subRow = row("接續前文選字", "選字時參考剛送出、游標前面的字（最多 32 字），讓接著打的句子選得更準。", sub);
+  const subRow = row("接續前文選字", "選字時參考剛送出、游標前面的字，讓接著打的句子選得更準。", sub);
   subRow.classList.add("row-sub");
   const model = modelRows();
   const grey = (off) => {

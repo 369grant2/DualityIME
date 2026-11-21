@@ -279,10 +279,41 @@ std::vector<int64_t> NextLM::embed(int c) const {
     return x;
 }
 
+std::vector<std::vector<int64_t>> NextLM::matvecs(const Linear& l, const std::vector<std::vector<int64_t>>& xs) const {
+    const size_t B = xs.size();
+    std::vector<std::vector<int16_t>> x16(B);
+    std::vector<int> ks(B);
+    for (size_t b = 0; b < B; ++b) ks[b] = shifted(xs[b], l.n, x16[b]);
+    std::vector<std::vector<int64_t>> out(B, std::vector<int64_t>(static_cast<size_t>(l.rows)));
+    int r = 0;
+#ifdef SZ_LM_X86
+    if (avx2_)
+        for (; r + 4 <= l.rows; r += 4) {  // (four rows, then every x: the rows stay in the cache)
+            const int8_t* w = l.q.data() + static_cast<size_t>(r) * l.n;
+            for (size_t b = 0; b < B; ++b) {
+                int32_t acc[4];
+                dot4_avx2(w, static_cast<size_t>(l.n), x16[b].data(), l.n, acc);
+                for (int i = 0; i < 4; ++i) out[b][r + i] = requant_shift(acc[i], l.m[r + i], ks[b]) + l.b[r + i];
+            }
+        }
+#endif
+    for (; r < l.rows; ++r) {
+        const int8_t* w = l.q.data() + static_cast<size_t>(r) * l.n;
+        for (size_t b = 0; b < B; ++b) out[b][r] = requant_shift(dot(w, x16[b].data(), l.n), l.m[r], ks[b]) + l.b[r];
+    }
+    return out;
+}
+
 void NextLM::attention(const std::vector<int64_t>& x, const Block& blk, const NextNode* prev, int layer,
                        std::vector<int32_t>& k, std::vector<int32_t>& v, std::vector<int64_t>& out) const {
+    std::vector<int64_t> att;
+    attend(matvec(blk.qkv, x), prev, layer, k, v, att);
+    out = matvec(blk.out, att);
+}
+
+void NextLM::attend(const std::vector<int64_t>& qkv, const NextNode* prev, int layer, std::vector<int32_t>& k,
+                    std::vector<int32_t>& v, std::vector<int64_t>& att) const {
     const int D = D_, dh = dh_;
-    std::vector<int64_t> qkv = matvec(blk.qkv, x);
     const int64_t* q = qkv.data();
     k.resize(static_cast<size_t>(D));
     v.resize(static_cast<size_t>(D));
@@ -296,7 +327,8 @@ void NextLM::attention(const std::vector<int64_t>& x, const Block& blk, const Ne
         vals.push_back(s->v[static_cast<size_t>(layer)].data());
     }
     const size_t n = keys.size();
-    std::vector<int64_t> att(static_cast<size_t>(D)), sc(n), w(n);
+    att.assign(static_cast<size_t>(D), 0);
+    std::vector<int64_t> sc(n), w(n);
     for (int hd = 0; hd < heads_; ++hd) {
         const int a = hd * dh;
         const int64_t slope = slopes_q16_[static_cast<size_t>(hd)];
@@ -322,12 +354,78 @@ void NextLM::attention(const std::vector<int64_t>& x, const Block& blk, const Ne
             att[static_cast<size_t>(a + i)] = acc >> 16;
         }
     }
-    out = matvec(blk.out, att);
 }
 
 LmState NextLM::start() const { return step(LmState{}, 1); }
 
+std::vector<LmState> NextLM::forward(const std::vector<std::shared_ptr<const NextNode>>& prev,
+                                     const std::vector<int>& link, const std::vector<int>& cs) const {
+    // step()'s arch 1 for every item, layer by layer: each Linear's rows read once for all the items (matvecs); the
+    // attention item by item, in order, so an item linked to an earlier one reads its k and v of this layer
+    const size_t B = cs.size();
+    std::vector<std::shared_ptr<NextNode>> nodes(B);
+    std::vector<std::vector<int64_t>> x(B), t(B), att(B);
+    for (size_t b = 0; b < B; ++b) {
+        nodes[b] = std::make_shared<NextNode>();
+        nodes[b]->prev = link[b] >= 0 ? std::shared_ptr<const NextNode>(nodes[static_cast<size_t>(link[b])]) : prev[b];
+        nodes[b]->k.resize(static_cast<size_t>(layers_));
+        nodes[b]->v.resize(static_cast<size_t>(layers_));
+        x[b] = embed(cs[b]);
+    }
+    for (int l = 0; l < layers_; ++l) {
+        const Block& blk = blocks_[static_cast<size_t>(l)];
+        for (size_t b = 0; b < B; ++b) t[b] = rmsnorm(x[b], blk.n1);
+        std::vector<std::vector<int64_t>> qkv = matvecs(blk.qkv, t);
+        for (size_t b = 0; b < B; ++b)
+            attend(qkv[b], nodes[b]->prev.get(), l, nodes[b]->k[static_cast<size_t>(l)],
+                   nodes[b]->v[static_cast<size_t>(l)], att[b]);
+        std::vector<std::vector<int64_t>> o = matvecs(blk.out, att);
+        for (size_t b = 0; b < B; ++b) {
+            for (int j = 0; j < D_; ++j) x[b][j] += o[b][j];
+            t[b] = rmsnorm(x[b], blk.n2);
+        }
+        std::vector<std::vector<int64_t>> up = matvecs(blk.up, t);
+        for (auto& u : up)
+            for (int64_t& e : u) e = std::max<int64_t>(e, 0);
+        std::vector<std::vector<int64_t>> down = matvecs(blk.down, up);
+        for (size_t b = 0; b < B; ++b)
+            for (int j = 0; j < D_; ++j) x[b][j] += down[b][j];
+    }
+    std::vector<LmState> out(B);
+    for (size_t b = 0; b < B; ++b) {
+        nodes[b]->p = rmsnorm(x[b], norm_g_);
+        out[b].node = std::move(nodes[b]);
+    }
+    return out;
+}
+
+std::vector<LmState> NextLM::steps(const std::vector<const LmState*>& states, const std::vector<int>& cs) const {
+    if (arch_ != static_cast<int>(ARCH_TF)) return LmModel::steps(states, cs);
+    std::vector<std::shared_ptr<const NextNode>> prev;
+    for (const LmState* s : states) prev.push_back(s->node);
+    return forward(prev, std::vector<int>(cs.size(), -1), cs);
+}
+
+std::vector<LmState> NextLM::run(const LmState& state, const std::vector<int>& cs) const {
+    if (arch_ != static_cast<int>(ARCH_TF)) return LmModel::run(state, cs);
+    std::vector<std::shared_ptr<const NextNode>> prev(cs.size());
+    std::vector<int> link(cs.size());
+    for (size_t b = 0; b < cs.size(); ++b) link[b] = static_cast<int>(b) - 1;
+    if (!cs.empty()) prev[0] = state.node;
+    return forward(prev, link, cs);
+}
+
+std::vector<LmState> NextLM::tree(const std::vector<const LmState*>& prev, const std::vector<int>& link,
+                                  const std::vector<int>& cs) const {
+    if (arch_ != static_cast<int>(ARCH_TF)) return LmModel::tree(prev, link, cs);
+    std::vector<std::shared_ptr<const NextNode>> nodes(cs.size());
+    for (size_t b = 0; b < cs.size(); ++b)
+        if (link[b] < 0) nodes[b] = prev[b]->node;
+    return forward(nodes, link, cs);
+}
+
 LmState NextLM::step(const LmState& state, int c) const {
+    if (arch_ == static_cast<int>(ARCH_TF)) return std::move(forward({state.node}, {-1}, {c})[0]);
     const NextNode* prev = state.node.get();
     auto node = std::make_shared<NextNode>();
     node->prev = state.node;
@@ -371,20 +469,6 @@ LmState NextLM::step(const LmState& state, int c) const {
         attention(rmsnorm(y, b.n1), b, prev, 0, node->k[0], node->v[0], a);
         for (int j = 0; j < H; ++j) y[j] += a[j];
         node->p = matvec(proj_, rmsnorm(y, b.n2));
-    } else {
-        node->k.resize(static_cast<size_t>(layers_));
-        node->v.resize(static_cast<size_t>(layers_));
-        std::vector<int64_t> a;
-        for (int l = 0; l < layers_; ++l) {
-            const Block& b = blocks_[static_cast<size_t>(l)];
-            attention(rmsnorm(x, b.n1), b, prev, l, node->k[l], node->v[l], a);
-            for (int j = 0; j < D_; ++j) x[j] += a[j];
-            std::vector<int64_t> up = matvec(b.up, rmsnorm(x, b.n2));
-            for (int64_t& u : up) u = std::max<int64_t>(u, 0);
-            std::vector<int64_t> down = matvec(b.down, up);
-            for (int j = 0; j < D_; ++j) x[j] += down[j];
-        }
-        node->p = rmsnorm(x, norm_g_);
     }
     LmState out;
     out.node = std::move(node);
@@ -431,6 +515,13 @@ std::vector<int64_t> NextLM::scores(const LmState& state, const std::vector<int>
     int64_t log_s = log_q10(s, log_);
     for (auto& v : d) v -= log_s;
     return d;
+}
+
+std::vector<int64_t> NextLM::unit_scores(const std::vector<const LmState*>& states, const std::vector<int>& ids) const {
+    // (logits() reads each state's p: lmq::unit_scores gives the same numbers as scores())
+    std::vector<const std::vector<int64_t>*> ps;
+    for (const LmState* s : states) ps.push_back(&s->node->p);
+    return lmq::unit_scores(avx2_, emb_q_, emb_m_, bias_, V_, E_, exp_, log_, ps, ids);
 }
 
 int64_t NextLM::mass_q16(const LmState& state, const std::vector<int>& ids) const {

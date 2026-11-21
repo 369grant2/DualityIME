@@ -315,6 +315,11 @@ void serve(HANDLE pipe) {
         std::string out = reply.dump();
         DWORD written = 0;
         if (!WriteFile(pipe, out.data(), static_cast<DWORD>(out.size()), &written, nullptr)) break;
+        try {  // (replied: the time before the next key reads what was just sent, #41)
+            std::lock_guard<std::mutex> guard(g->lock);
+            s.c->warm();
+        } catch (...) {
+        }
     }
     {
         std::lock_guard<std::mutex> guard(g->lock);

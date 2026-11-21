@@ -2,8 +2,11 @@
 the text typed right.
 
     py tools/autocorrect_eval.py [--seed N] [--count N] [--natural-count N] [--show] [--bigram FILE] [--no-lm]
+                                 [--sentences-only]
 
 --no-lm turns 長句選字加強 (the setting long_sentence) off: the 3.0.2 numbers; --lm (the default) on.
+The first lines name the sentences (a fingerprint of each set): two runs compare only when those match;
+--sentences-only prints them and stops (check it before a run of hours).
 
 Fixed (setting on): a sentence of common words with one syllable mistyped comes out
 as the sentence typed right does with the setting off. Kinds of mistakes:
@@ -13,8 +16,8 @@ as the sentence typed right does with the setting off. Kinds of mistakes:
   C  a key typed twice (ssu3)
   E  a tone key (or the space of a first tone) left out, another syllable after it (5k1u0 for 這邊)
   N  ㄣ and ㄥ (or ㄢ and ㄤ) the other way round, spelling another syllable (因該 for 應該, #38)
-Two sets: random strings of common words (--count), and the Chinese of this repo's own text
-(README, docs, the settings page; --natural-count of them), where the context model matters.
+Two sets: random strings of common words (--count), and the Chinese of this repo's own public text
+(README, docs but the internal ones, the settings page; --natural-count of them), where the context model matters.
 Broken (setting on vs off, the keys typed right):
   English  dictionary words, tools/tune_english.py MIXED, cpp/tools/mixed_cases.txt,
            numbers 0-999 alone (but those that are zhuyin out of order: 817 is 吧)
@@ -60,13 +63,19 @@ def sentences(lexicon, rng, count):
     return out
 
 
+# The internal files (CLAUDE.md "Internal files"): not public, edited nearly every day, absent on a computer without the
+# private repo - sentences drawn from them would differ between two runs of the same engine (#43, 2026-11-21: a copy's
+# older docs/status.md gave another natural set, and the first comparison of two engines had to run again)
+INTERNAL_DOCS = ("superpowers", "architecture", "status.md", "review-backlog.md")
+
+
 def natural_sentences(lexicon):
-    """[[syllable keys]] of the Chinese in this repo's own text (README, docs but the plans,
-    the settings page): runs of 6-24 characters, each word read the way the dictionary reads it
-    most often. Real sentences, where the context model matters (the random ones above are not)."""
+    """[[syllable keys]] of the Chinese in this repo's own public text (README, docs but the internal ones, the settings
+    page): runs of 6-24 characters, each word read the way the dictionary reads it most often. Real sentences, where the
+    context model matters (the random ones above are not)."""
     files = [os.path.join(ROOT, "README.md")]
     files += [f for f in glob.glob(os.path.join(ROOT, "docs", "**", "*.md"), recursive=True)
-              if os.sep + "superpowers" + os.sep not in f]
+              if os.path.relpath(f, os.path.join(ROOT, "docs")).split(os.sep)[0] not in INTERNAL_DOCS]
     files += glob.glob(os.path.join(ROOT, "settings", "ui", "*.js"))
     best = {}
     for reading, lst in lexicon.entries.items():
@@ -86,6 +95,12 @@ def natural_sentences(lexicon):
             if readings and len(readings) == len(run):
                 out.append([reading_to_keys(r) for r in readings])
     return out
+
+
+def fingerprint(sents):
+    """12 hex digits of the sentences (their keys, in order): equal in two runs only when they typed the same ones."""
+    import hashlib
+    return hashlib.sha256("\n".join(" ".join(s) for s in sents).encode("utf-8")).hexdigest()[:12]
 
 
 def typo(c, syllables, kind, rng):
@@ -189,12 +204,17 @@ def main(argv):
     # fixed: the random word strings (rng, as before E existed: the same sentences and typos), and
     # the repo's own sentences (rng_natural); E draws from its own generator so as not to move them
     clean = sentences(c.lexicon, rng, count)
-    rng_tone = random.Random(seed + 1)
-    fixed = run_fixed(c, "random words", clean, rng, rng_tone, show)
     rng_natural = random.Random(seed + 2)
     natural = natural_sentences(c.lexicon)
     if len(natural) > natural_count:
         natural = rng_natural.sample(natural, natural_count)
+    # (two runs compare only when these match: the same sentences; --sentences-only prints them and stops, to check
+    # before a long run - the natural ones come from the docs of the folder this file is in)
+    print(f"sentences: random words {fingerprint(clean)}, natural {fingerprint(natural)} ({len(natural)})", flush=True)
+    if "--sentences-only" in argv:
+        return
+    rng_tone = random.Random(seed + 1)
+    fixed = run_fixed(c, "random words", clean, rng, rng_tone, show)
     fixed_natural = run_fixed(c, "natural", natural, rng_natural, rng_natural, show)
 
     # broken: English and numbers

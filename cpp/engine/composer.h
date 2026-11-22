@@ -31,9 +31,18 @@ struct Token {
     // swapped for its neighbour's to make a word: 你老 -> 你好, orig the reading typed); "" none
     std::string corrected;
     ustr orig;
+    bool undone = false;  // (#60: a swap a pick of the user's undid: a later pick keeps it loose)
 };
 
 using Fixed = std::map<int, std::pair<int, ustr>>;  // start -> (end, text shown)
+// #60: a character the user picked, by the raw offset of its syllable: 注音自動校正 judges the syllables around it with
+// it (engine/composer.py tokenize's picks)
+struct Picked {
+    std::string keys;
+    ustr reading;
+    char32_t ch;
+};
+using Picks = std::map<int, Picked>;
 std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, const UserModel* user,
                             const English& english, const std::set<int>& forced, bool after_english,
                             bool digits_as_zhuyin, const std::set<int>& literal, const std::set<int>& chinese,
@@ -46,7 +55,8 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             size_t context_len = 0,       // ...the last context_len with the runs before (0: 32)
                             bool marks = false,           // marks: EN_MARK where English came before a run (#41)
                             bool lit_keys = false,        // ...punctuation sent as the key typed (half width)
-                            bool starts = false);         // starts: 補字提示 on - what Tab completes starts English (#54)
+                            bool starts = false,          // starts: 補字提示 on - what Tab completes starts English (#54)
+                            const Picks* picks = nullptr);  // picks: the user's (#60)
 
 struct Segment {
     int start, length;
@@ -86,7 +96,9 @@ std::vector<Segment> convert(const std::vector<ustr>& readings, const Lexicon& l
 // before): how well a reading of a syllable reads with the ones around it, for 注音自動校正
 // (老 or 好 in 你老嗎). Empty if some syllable has no character.
 std::optional<double> run_score(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
-                                const BigramModel* bigram);
+                                const BigramModel* bigram,
+                                // the characters the user picked there (#60), each worth convert's pick bonus
+                                const std::map<std::pair<int, int>, ustr>& overrides = {});
 double log10_add(double x, double y);
 ustr to_full_width(const ustr& text);
 // English words worth remembering in text sent (UTF-8): 4 letters or more, each once
@@ -413,6 +425,8 @@ private:
     std::set<int> breaks_;  // raw offsets where a syllable picked from the bar ends: nothing reads across
     std::set<int> exact_;   // raw offsets of syllables read as typed, not autocorrected (picked so)
     Fixed taken_;           // start -> (end, reading): keys read as a syllable picked from the list (注音自動校正)
+    const Picks* picks_ = nullptr;  // while refresh reads the keys: the user's picks, for 注音自動校正 (#60)
+    std::vector<Segment> loose_words_;  // the words the pick's keeping left free, as shown then (keep_before, #60)
     std::map<int, std::pair<std::string, ustr>> pending_;  // start -> (keys, choice): 校正記憶 picks, learned once sent
     bool caps_lock_ = false;
     bool digits_as_zhuyin_ = false;

@@ -1,5 +1,7 @@
+# e2e-args: -Mode:--tsf
 # 接續前文選字 (#37): what was just sent is read before the next sentence while the caret is still right after it
-# (as it comes: 長句選字加強 and 接續前文選字 on; one engine for all lines)
+# (as it comes: 長句選字加強 and 接續前文選字 on; one engine for all lines). The box talks TSF itself (like Word, Chrome,
+# Win11 Notepad): through the IMM32 layer TSF shows only the text being typed, see context_imm32_cases.txt
 # sent, then typed right after it: 再 (read after 我們先去吃飯)
 ji3ap7vu0 fm4t z04{ENTER}y94fm4d042u04u/3{ENTER} => 我們先去吃飯再去看電影
 # sent, then the caret moved to the start (Home): what is before it is not what was sent, so no context: 在

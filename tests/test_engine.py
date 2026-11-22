@@ -5430,6 +5430,131 @@ class AutocorrectTest(Base):
         c.undo_commit()
         self.assertEqual(c.composition, "今添的")
 
+    def pick_char_at(self, at, ch, c=None):
+        """Home, → at times, ↓ to ch, Enter (on c, else the class's composer)."""
+        c = c or self.c
+        c.key(special="HOME")
+        for _ in range(at):
+            c.key(special="RIGHT")
+        c.key(special="DOWN")
+        for _ in range(c.candidates.index(ch)):
+            c.key(special="DOWN")
+        c.key(special="ENTER")
+
+    YIN_GAI_XIANG = "ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄕˋ ㄐㄧㄢˋ ㄉㄠˇ ㄓˋ ㄘˇ ㄘˋ ㄉㄜ˙ ㄐㄧㄝˊ ㄍㄨㄛˇ"
+
+    def test_a_pick_judges_the_swaps_around_it_again(self):
+        # (#60, the user 2026-11-22: 應該向事件導致此次的結果, 項 picked: 應該項 - the swap was judged on the readings alone,
+        # and what the pick kept before it held the swap. With 項 written the dictionary finds 因該項 likelier: 因 back.
+        # A swap the pick does not tip stays (我應該要去, 耀 picked), and so does the swapped syllable picked itself (英
+        # for ㄧㄥ: a pick there - 應, the character shown, makes none: code-reviewer)
+        c = self.c
+        for text, at, ch, before, after in [
+                (self.YIN_GAI_XIANG, 2, "項", "應該向事件導致此次的結果", "因該項事件導致此次的結果"),
+                ("ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ", 3, "耀", "我應該要去", "我應該耀去"),
+                ("ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ", 1, "英", "我應該要去", "我英該要去")]:
+            with self.subTest(ch=ch):
+                c.reset()
+                for k in keys(text):
+                    c.key(k)
+                if not c.config.long_sentence:  # (with the model 因該項事件 is not swapped at all: #60's first half)
+                    self.assertEqual(c.composition, before)
+                self.pick_char_at(at, ch)
+                self.assertEqual(c.composition, after)
+                if not c.config.long_sentence:
+                    # (and it stays so as more is typed, the pick there. With the model 項 is there before the pick:
+                    # no pick is made, and with 的 typed light's model swaps 因 again by itself - #60, the user to decide)
+                    c.key(special="END")
+                    for k in keys("ㄉㄜ˙"):
+                        c.key(k)
+                    self.assertEqual(c.composition, after + "的")
+
+    def test_a_pick_only_undoes_swaps_near_it(self):
+        # (code-reviewer 2026-11-22, on the first way of it, which judged every syllable again with the picks and freed
+        # what a pick kept on a swapped syllable: 修正的詞彙, 地 picked, made 修 a swap that kept 正 from its own -
+        # 修鎮地; 台北市信義區, 趨 picked, undid 信 while 義 stayed kept - 現義趨; and a pick from the bar, no pick at
+        # all, judged 信 again - 現義fm. Now as 3.3.0 gives them)
+        if self.c.config.long_sentence:
+            self.skipTest("the dictionary's choices, the model off")
+        # (and code-reviewer's second look: a word picked half outside the window, the other half no character alone,
+        # undid 應 - 我應該要徬徨, 彷徨 picked; an undone swap kept by the next pick never came back - 正在下載並, 仔 then
+        # 載 picked: 鎮; the partner of an undone swap, a word of its own then, stayed kept - light, 例如英雄連, 聯
+        # picked: 因熊聯, and 英熊聯盟 with 盟)
+        for keys_, steps, want in [
+                ("vu. 5p42k7h6cjo4cjo41o4vu4wj/3ru45j4", [(2, "地")], "修正地詞彙會被系統記住"),
+                # (趨 picked breaks 信義區, the word the swap made: 信 judged again goes back to 現, and 現役 is written
+                # whole - before /code-review high's #33 the rest of the word broken was kept and held 信 back)
+                ("w961o3g4vu04u4fm ", [(5, "趨")], "台北市現役趨"),
+                ("w961o3g4vu04u4fm ", ["LEFT", "UP", "RIGHT", "RIGHT", "ENTER"], "台北市信義fm "),
+                ("ji3up e9 ul4q;6cj;6", [(4, "彷徨")], "我應該要彷徨"),
+                ("5p4y94vu84y931u/4", [(3, "仔"), (3, "載"), "END", "e/ vu/ "], "正在下載並更新"),
+                # (an undo the margin leaves alone: 項 undoes 應, 向 picked after it brings it back - kept loose, findings
+                # #31: with the margin the line above no longer undoes 正)
+                ("up e9 vu;4g4ru042l354h3h42k7ru,6eji3", [(2, "項"), (2, "向")], "應該向事件導致此次的結果"),
+                # (a pick far off first keeps 應該 as shown; a pick near it then frees it to be judged again -
+                # /code-review high: that keeping held 應)
+                ("up e9 vu;4g4ru042l354h3h42k7ru,6eji3", [(11, "裹"), (2, "項")], "因該項事件導致此次的結裹"),
+                # (項 typed without its tone, settled after the swap was decided: it counts too - findings #43)
+                ("up e9 vu;g4ru042l354h3h42k7ru,6eji3", [(2, "項")], "因該項事件導致此次的結果"),
+                # (a pick that only takes away the word the swap leaned on, 好嘛, undoes nothing: 0.795 lower - #44)
+                ("su3xl3a87", [(2, "嗎")], "你好嗎"),
+                ("xu4bj6up vm/6xu06", [(4, "聯"), "END", "a/6"], "例如英雄聯盟"),
+                # (...and no swap undone for a moment before the word is whole: a margin, findings #30)
+                ("xu4bj6up vm/6xu06", [(4, "聯")], "例如英雄聯")]:
+            with self.subTest(want=want), tempfile.TemporaryDirectory() as tmp:
+                # (a composer of its own: the bar's keys put back as typed are remembered - fm as English, the
+                # syllable as typed - and the class's composer would read 台北市信義區 otherwise in the next test)
+                c = create_composer(os.path.join(tmp, "user.json"))
+                c.config.values = dict(self.c.config.values)
+                c.settings_changed()
+                for k in keys_:
+                    c.key(k)
+                for step in steps:
+                    if isinstance(step, tuple):
+                        self.pick_char_at(*step, c=c)
+                    elif step.isupper():
+                        c.key(special=step)
+                    else:
+                        for k in step:
+                            c.key(k)
+                self.assertEqual(c.composition, want)
+
+    def test_the_partner_of_a_swap_undone_is_written_again_with_it(self):
+        # (#60, findings #29/#31: light writes 因 熊 apart once 英 is undone by 聯 picked - with no margin, the only way
+        # there - and 熊 kept by the pick stayed when 盟 brought 英 back: 英熊聯盟)
+        if not self.c.config.long_sentence:
+            self.skipTest("light's model writes the two apart")
+        c = self.c
+        c.reset()
+        with unittest.mock.patch.object(composer, "PICK_UNDO_MARGIN", 0.0), \
+                unittest.mock.patch.object(composer, "PICK_UNDO_DROP", 0.0):
+            for k in "xu4bj6up vm/6xu06":
+                c.key(k)
+            self.pick_char_at(4, "聯")
+            self.assertEqual(c.composition[2], "因")
+            c.key(special="END")
+            for k in "a/6":
+                c.key(k)
+            self.assertEqual(c.composition, "例如英雄聯盟")
+
+    def test_a_swap_is_judged_without_a_pick_once_it_is_gone(self):
+        # (#60: the pick deleted with its syllables and these typed again: as before the pick)
+        if self.c.config.long_sentence:
+            self.skipTest("not swapped with the model (#60)")
+        c = self.c
+        c.reset()
+        for k in keys(self.YIN_GAI_XIANG):
+            c.key(k)
+        self.pick_char_at(2, "項")
+        self.assertEqual(c.composition, "因該項事件導致此次的結果")
+        tail = self.YIN_GAI_XIANG.split()[2:]
+        c.key(special="END")
+        for _ in tail:
+            c.key(special="BACK")
+        for k in keys(" ".join(tail)):
+            c.key(k)
+        self.assertEqual(c.composition, "應該向事件導致此次的結果")
+
     def test_off_by_default(self):
         self.c.config.set(autocorrect=False)
         self.c.settings_changed()
@@ -5919,9 +6044,27 @@ class AutocorrectModelTest(Base):
         self.assertIn("換進", self.typed(self.JIN, **{"ㄐㄧㄥˋ": veto})[0])
         self.assertIn("幻境", self.typed(self.JIN, **{"ㄐㄧㄥˋ": veto + 1})[0])
 
-    def test_a_swap_clearing_its_gain_by_far_is_made_whatever_the_model_says(self):
-        self.assertEqual(self.typed("".join(keys("ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ")), **{"ㄧㄥ": -99999})[0], "我應該要去")
-        self.assertNotIn((1, "ㄧㄥ", "ㄧㄣ"), self.asked)
+    def test_a_nasal_swap_clearing_its_gain_by_far_is_not_made_when_the_model_finds_it_far_less_likely(self):
+        # (#60: ㄣ/ㄥ with the keys typed making no word, more than SWAP_LM_VETO_MARGIN over its gain - 0.906 here: made
+        # unless the model finds it SWAP_LM_FAR_VETO_NASAL_Q10 or less likely; 因該項事件導致此次的結果, the user 2026-11-22)
+        far = composer.SWAP_LM_FAR_VETO_NASAL_Q10
+        yin = "".join(keys("ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ"))
+        self.assertEqual(self.typed(yin, **{"ㄧㄥ": far})[0], "我因該要去")
+        self.assertIn((1, "ㄧㄥ", "ㄧㄣ"), self.asked)
+        self.assertEqual(self.typed(yin, **{"ㄧㄥ": far + 1})[0], "我應該要去")
+
+    def test_light_vetoes_a_nasal_swap_clearing_its_gain_by_far_at_its_own_bar(self):
+        # (#60: light's model is less sure of 因該, and what came after the sentence tipped it - 結果需要再檢討 -0.88:
+        # its own bar, SWAP_LM_FAR_VETO_NASAL_LIGHT_Q10, the user 2026-11-22)
+        vars(self.scorer.lm).pop("knows_english")
+        far = composer.SWAP_LM_FAR_VETO_NASAL_LIGHT_Q10
+        yin = "".join(keys("ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ"))
+        self.assertEqual(self.typed(yin, **{"ㄧㄥ": far})[0], "我因該要去")
+        self.assertEqual(self.typed(yin, **{"ㄧㄥ": far + 1})[0], "我應該要去")
+
+    def test_other_swaps_clearing_their_gain_by_far_are_made_whatever_the_model_says(self):
+        # (not ㄣ/ㄥ: ㄒㄧㄢˋ for ㄒㄧㄣˋ in 台北市信義區, the keys typed a word, 4.0 over its gain)
+        self.assertEqual(self.typed("w961o3g4vu04u4fm ", **{"ㄒㄧㄣˋ": -99999})[0], "台北市信義區")
 
     def test_a_key_next_to_the_one_typed_takes_the_syllable_the_model_finds_clearly_likelier(self):
         self.assertEqual(self.typed(self.XIAO)[1][3], "ㄒㄧㄠˋ")
@@ -5933,7 +6076,7 @@ class AutocorrectModelTest(Base):
         c.config.set(lm_context=True)
         contexts = []
 
-        def gain(readings, k, alt, base, lexicon, bigram, scorer):
+        def gain(readings, k, alt, base, lexicon, bigram, scorer, fixed=None):
             contexts.append(getattr(scorer, "_context", ""))
             return 0
         self.type("".join(keys("ㄨㄛˇ ㄇㄣ˙")))
@@ -5950,12 +6093,12 @@ class AutocorrectModelTest(Base):
         self.type("".join(keys("ㄨㄛˇ ㄇㄣ˙")))
         boost = composer.SWAP_LM_BOOST_Q10
         for read, alone, kept in ((1, 0, True), (0, 1, True), (1, 1, False)):
-            def gain(readings, k, alt, base, lexicon, bigram, scorer, read=read, alone=alone):
+            def gain(readings, k, alt, base, lexicon, bigram, scorer, fixed=None, read=read, alone=alone):
                 return read if getattr(scorer, "_context", "") else alone
             with self.subTest(read=read, alone=alone), unittest.mock.patch.object(composer, "_swap_lm_gain", gain):
                 self.assertEqual("換進" in self.typed(self.JIN)[0], kept)
         for read, alone, made in ((boost, boost - 1, False), (boost - 1, boost, False), (boost, boost, True)):
-            def gain(readings, k, alt, base, lexicon, bigram, scorer, read=read, alone=alone):
+            def gain(readings, k, alt, base, lexicon, bigram, scorer, fixed=None, read=read, alone=alone):
                 return read if getattr(scorer, "_context", "") else alone
             with self.subTest(read=read, alone=alone), unittest.mock.patch.object(composer, "_swap_lm_gain", gain):
                 self.assertEqual("不還原" in self.typed(self.HUAN)[0], made)
@@ -6035,7 +6178,13 @@ class AutocorrectTierTest(unittest.TestCase):
         # the slip only where the sentence says so; every tier, light too: its model tells them apart as well)
         stays = ["ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄐㄧˋ ㄏㄨㄚˋ ㄉㄠˇ ㄓˋ ㄍㄨㄥ ㄔㄥˊ ㄧㄢˊ ㄉㄤˋ",
                  "ㄧㄣ ㄍㄞ ㄅㄨˋ ㄇㄧㄥˊ ㄌㄞˊ ㄩㄢˊ ㄏㄨㄛˋ ㄆㄧㄣˇ ㄅㄟˋ ㄎㄡˋ ㄌㄧㄡˊ",
-                 "ㄧㄣ ㄍㄞ ㄉㄧˋ ㄑㄩ ㄉㄧㄢˋ ㄌㄧˋ ㄅㄨˋ ㄗㄨˊ"]
+                 "ㄧㄣ ㄍㄞ ㄉㄧˋ ㄑㄩ ㄉㄧㄢˋ ㄌㄧˋ ㄅㄨˋ ㄗㄨˊ",
+                 # (the user 2026-11-22, 3.3.0 max: 應該向事件...; the swap clears its gain by 0.675, past the near veto, #60)
+                 "ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄕˋ ㄐㄧㄢˋ ㄉㄠˇ ㄓˋ ㄘˇ ㄘˋ ㄉㄜ˙ ㄐㄧㄝˊ ㄍㄨㄛˇ",
+                 # (...and what may come after it: light swapped these at -1.5, #60)
+                 "ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄕˋ ㄐㄧㄢˋ ㄉㄠˇ ㄓˋ ㄘˇ ㄘˋ ㄉㄜ˙ ㄐㄧㄝˊ ㄍㄨㄛˇ ㄒㄩ ㄧㄠˋ ㄗㄞˋ ㄐㄧㄢˇ ㄊㄠˇ",
+                 "ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄕˋ ㄐㄧㄢˋ ㄉㄠˇ ㄓˋ ㄘˇ ㄘˋ ㄉㄜ˙ ㄐㄧㄝˊ ㄍㄨㄛˇ ㄨㄛˇ ㄇㄣ˙ ㄏㄣˇ ㄧˊ ㄏㄢˋ",
+                 "ㄧㄣ ㄍㄞ ㄒㄧㄤˋ ㄕˋ ㄐㄧㄢˋ ㄉㄠˇ ㄓˋ ㄘˇ ㄘˋ ㄉㄜ˙ ㄐㄧㄝˊ ㄍㄨㄛˇ ㄉㄜ˙"]
         fixed = {"ㄨㄛˇ ㄧㄣ ㄍㄞ ㄧㄠˋ ㄑㄩˋ": "我應該要去", "ㄋㄧˇ ㄧㄣ ㄍㄞ ㄓ ㄉㄠˋ": "你應該知道",
                  "ㄧㄣ ㄍㄞ ㄅㄨˋ ㄏㄨㄟˋ ㄌㄞˊ": "應該不會來", "ㄧㄣ ㄍㄞ": "應該"}
         for tier in ("light", "plus", "max"):

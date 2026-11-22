@@ -38,6 +38,10 @@ from engine.zhuyin import reading_to_keys  # noqa: E402
 EXE = os.path.join(ROOT, "cpp", "build", "x64-Release", "sz_trace.exe")
 
 CASES = [
+    # #60, first on a fresh state: 項 typed without its tone, settled after the swap of 因 was decided, picked (the
+    # 10th): 因 back. Later cases teach 因該, and there it never swaps (#45). {RESET} after it: with 注音自動校正 off the
+    # list does not open and Enter sends the text - its context must not reach the 接續前文選字 case next (#46)
+    "up e9 vu;g4ru042l354h3h42k7ru,6eji3{HOME}{RIGHT}{RIGHT}" + "{DOWN}" * 10 + "{ENTER}{RESET}",
     # 接續前文選字 (#37): 我們先去吃飯 sent, then ㄗㄞˋ去看電影 read after it; after {CL} (the caret moved) and after
     # English at the buffer's start, without it; three sentences in a row; undo puts the context back
     "ji3ap7vu0 fm4t z04{ENTER}y94fm4d042u04u/3{ENTER}ji3ap7vu0 fm4t z04{ENTER}{CL}y94fm4d042u04u/3{ENTER}",
@@ -103,6 +107,33 @@ CASES = [
     "up e9 {ENTER}vu/ fu/6{ENTER}ji3up e9 fm4{ENTER}up jo4{ENTER}up e9 {HOME}{DOWN}{ESC}{ESC}",
     # ...a character picked on the swapped one, then ㄅㄢˋ typed (the swap undone by the sentence): the pick stays
     "up e9 {HOME}{DOWN}6{END}104{ENTER}",
+    # ...one the dictionary favours swapping by far, the model sure it is 因該 (#60: not swapped where the model is on)
+    "up e9 vu;4g4ru042l354h3h42k7ru,6eji3{ENTER}",
+    # ...a pick after a swap judges it again with the character picked (#60: 項 picked, 因 back where it was swapped),
+    # more typed after it; a pick the swap stands (耀); the swapped syllable picked itself (應); the pick deleted with its
+    # syllables and these typed again
+    "up e9 vu;4g4ru042l354h3h42k7ru,6eji3{HOME}{RIGHT}{RIGHT}{DOWN}7{END}2k7{ENTER}",
+    "ji3up e9 ul4fm4{HOME}{RIGHT}{RIGHT}{RIGHT}{DOWN}3{ENTER}", "ji3up e9 ul4fm4{HOME}{RIGHT}{DOWN}5{ENTER}",
+    "up e9 vu;4g4ru042l354h3h42k7ru,6eji3{HOME}{RIGHT}{RIGHT}{DOWN}7{END}" + "{BACK}" * 10 +
+    "vu;4g4ru042l354h3h42k7ru,6eji3{ENTER}",
+    # ...the swapped syllable picked itself (英 for ㄧㄥ), more typed after it; a pick that breaks the word a swap made
+    # (信義區, 區 picked otherwise); a pick from the bar, no pick (信義fm); a pick next to a swap with one before it
+    # (修正的, 地 picked: 正 stays) - code-reviewer 2026-11-22
+    "ji3up e9 ul4fm4{HOME}{RIGHT}{DOWN}6{END}2k7{ENTER}",
+    "w961o3g4vu04u4fm {HOME}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{DOWN}2{ENTER}",
+    "w961o3g4vu04u4fm {LEFT}{UP}{RIGHT}{RIGHT}{ENTER}{ENTER}",
+    "vu. 5p42k7h6cjo4cjo41o4vu4wj/3ru45j4{HOME}{RIGHT}{RIGHT}{DOWN}{DOWN}{ENTER}{ENTER}",
+    # ...a word picked half outside the window (彷徨); a swap undone, then the character back (仔, 載), more typed; a pick
+    # before the word is whole (聯, then 盟) - code-reviewer's second look
+    "ji3up e9 ul4q;6cj;6{HOME}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{DOWN}2{ENTER}",
+    "5p4y94vu84y931u/4{HOME}{RIGHT}{RIGHT}{RIGHT}{DOWN}2{HOME}{RIGHT}{RIGHT}{RIGHT}{DOWN}1{END}e/ vu/ {ENTER}",
+    "xu4bj6up vm/6xu06{HOME}{RIGHT}{RIGHT}{RIGHT}{RIGHT}{DOWN}2{END}a/6{ENTER}",
+    # ...a swap undone (項), then the character shown before picked (向): the swap back (findings #31)
+    "up e9 vu;4g4ru042l354h3h42k7ru,6eji3{HOME}{RIGHT}{RIGHT}{DOWN}7{HOME}{RIGHT}{RIGHT}{DOWN}5{ENTER}",
+    # ...a pick far off first (裹 for 果), then one near the swap (項): the first one's keeping lets 應 go
+    "up e9 vu;4g4ru042l354h3h42k7ru,6eji3{HOME}" + "{RIGHT}" * 11 + "{DOWN}2{HOME}{RIGHT}{RIGHT}{DOWN}7{ENTER}",
+    # ...a pick taking away the word the swap leaned on (好嘛, 嗎); 項 typed without its tone: the first case
+    "su3xl3a87{HOME}{RIGHT}{RIGHT}{DOWN}1{ENTER}",
     ("w961o3g4vu04u4fm {HOME}{RIGHT}{RIGHT}{RIGHT}" + "{DOWN}" * 31 + "{ENTER}{ENTER}") * 2 + "w961o3g4vu04u4fm {ENTER}",
     "ok hi go su ios 5k ", "5ke; {HOME}{DOWN}3{END}e; 1u0 {ENTER}",  # (浙 picked for 5k: kept as more comes)
     # a word across the phrase sent last (怎麼 sent, then 辦: not 半), and 長句選字加強 keeping cohesive
@@ -435,6 +466,7 @@ CONFIGS = [
                                   # alone with full-width marks and spaces: keys after an open keyboard are symbols)
     {"autocorrect": True},  # 注音自動校正
     {"long_sentence": False},  # 長句選字加強 off ({} above: on, the default)
+    {"long_sentence": False, "autocorrect": True},  # 注音自動校正 with the dictionary alone (#60: a pick undoing a swap)
     {"cand_keys": "1234qweras", "cand_layout": "grid",  # other candidate keys, a grid (#23)
      "no_quick_fill": True},  # (not a setting: no quick_fill.json, so 快速填入 lists its samples, #33)
     {"simplified": True},  # 簡體輸出 (#32): shown and sent in Simplified characters, its memory in user_simplified.json

@@ -119,6 +119,7 @@ private:
         bool simplified_hotkey = false;  // ...switched with the key below (off: the key is the app's)
         UINT script_vk = 0;              // simplified_key: the key and its modifiers (parse_hotkey)
         bool script_ctrl = false, script_alt = false, script_shift = false;
+        bool symbols_stay_open = false;  // 符號鍵盤選完不關 (#49): Backspace with nothing typed is then the app's
     };
 
     bool test_key_down(ITfContext* ctx, WPARAM vk, LPARAM lp);

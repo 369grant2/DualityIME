@@ -92,6 +92,18 @@ SWAP_WINDOW = 3           # syllables on each side of it that count (run_score)
 SWAP_LM_VETO_MARGIN = 0.5  # a swap clearing its gain by no more than this (log10) is not made when the model finds the run
 SWAP_LM_VETO_Q10 = 1179   # likelier with it by no more than this (0.5 in log10: 我簡單寄個郵件, not 幾個)...
 SWAP_LM_VETO_NASAL_Q10 = 0  # ...ㄣ/ㄥ, ㄢ/ㄤ: no likelier (因該不明來源, 因該項計畫 stay; 我因該要去 clears it by far)
+SWAP_LM_FAR_VETO_NASAL_Q10 = -3537  # ...and clearing it by more, the keys typed making no word: when the model finds it less
+                          # likely by this (1.5 in log10: 因該項事件導致此次的結果, 0.675 over, light -1.70, plus -3.76, max
+                          # -2.50; #60, docs/superpowers/items/60/far_veto.py: at most one slip fixed less a tier)
+SWAP_LM_FAR_VETO_NASAL_LIGHT_Q10 = -1886  # ...light's (-0.8 in log10): its say on 因該 weaker, what came after the
+                            # sentence tipped it (結果需要再檢討 -0.88, 結果的 -1.08; the user 2026-11-22: light alone,
+                            # far_veto.py: 3 slips of random words fixed less, plus and max as at -1.5)
+PICK_UNDO_MARGIN = 0.5  # a swap judged again with the user's picks (#60) is undone only failing by more than this (log10;
+                        # 例如英雄連, 聯 picked before 盟: 0.025 short, 因雄聯 until 盟 - the user 2026-11-22;
+                        # docs/superpowers/items/60/pick_typing_sim.py)
+PICK_UNDO_DROP = 1.0  # ...and only where the picks lowered its gain by more than this (log10): a pick that just takes the
+                      # word the swap leaned on away is no sign it was wrong (你老嗎 typed, 你好嘛 shown, 嗎 picked: 0.795
+                      # lower, 你好嗎 stays; 因該項事件, 項 picked: 1.357 lower, 因 back - code-reviewer, the user 2026-11-22)
 SWAP_LM_SHORT_NASAL = 0.4  # ㄣ/ㄥ, ㄢ/ㄤ short of its gain by (every model; at 0.5 max changed 說法新需要 to 形)
 SWAP_LM_BOOST_Q10 = 4716  # less than this, the keys typed making no word, passes when the model finds it likelier by this
                           # (2 in log10); not the other kinds (on cases it was not picked on, more words typed right changed)
@@ -141,7 +153,7 @@ MAX_RAW = 100           # keys in the buffer before the oldest phrase is sent (t
 
 
 class Token:
-    __slots__ = ("kind", "raw", "value", "start", "corrected", "orig")
+    __slots__ = ("kind", "raw", "value", "start", "corrected", "orig", "undone")
 
     def __init__(self, kind, raw, value, start, corrected=None):
         self.kind = kind    # "zh" (reading), "partial" (symbols), "en", "lit"
@@ -152,6 +164,7 @@ class Token:
         # to the right one: si3 = 你), "order" (digits out of order: 817 = 吧), "valid" (a
         # syllable swapped for its neighbour's to make a word: 你老 -> 你好, orig the reading typed)
         self.corrected = corrected
+        self.undone = False  # (#60: a swap a pick of the user's undid: a later pick keeps it loose)
         self.orig = None
 
     def __repr__(self):
@@ -190,7 +203,8 @@ def _after_chinese_mark(toks, end=None):
 
 def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
              digits_as_zhuyin=False, literal=(), chinese=(), fixed=None, lexicon=None, breaks=(), exact=(),
-             taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False, starts=False):
+             taken=None, bigram=None, lm=None, sent="", context_len=None, marks=False, lit_keys=False, starts=False,
+             picks=None):
     """Split raw keys into the cheapest sequence of tokens.
 
     literal: raw offsets of keys that are always themselves (numpad digits and
@@ -206,6 +220,8 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
         characters with the runs before (LM_CONTEXT if None); marks: EN_MARK where English came before a run (a
         model that knows English, #41); lit_keys: punctuation is sent as the key typed (half width), read so;
         starts: 補字提示 is on - the start of what Tab would complete reads as English (#54).
+        picks: {raw offset: (keys, reading, character)} the user picked (#60): 注音自動校正 judges the syllables around
+        them with those characters (_check_corrections).
     Other arguments: see _tokenize_run.
     """
     cuts = sorted([(p, p + 1, None) for p in literal if p < len(raw)] +
@@ -216,7 +232,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
         tokens = _tokenize_run(raw, table, user, english, forced, after_english, digits_as_zhuyin, chinese, lexicon,
                                breaks, exact, True, starts)
         return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
-                                  lit_keys) if table.autocorrect else tokens
+                                  lit_keys, picks) if table.autocorrect else tokens
     tokens, start, spaced = [], 0, False
     for a, b, text in cuts + [(len(raw), len(raw), None)]:
         if a < start:
@@ -242,7 +258,7 @@ def tokenize(raw, table, user=None, english=(), forced=(), after_english=False,
                 spaced = _word_starts_after(tokens[-1])
         start = b
     return _check_corrections(tokens, table, lexicon, user, exact, bigram, lm, sent, context_len, marks,
-                              lit_keys) if table.autocorrect else tokens
+                              lit_keys, picks) if table.autocorrect else tokens
 
 
 def _tokenize_run(raw, table, user=None, english=(), forced=(), after_english=False,
@@ -782,21 +798,24 @@ def _best_neighbour(table, tok, readings, k, lexicon, user):
     return best_alt, best, scored
 
 
-def _swap_lm_gain(readings, k, alt, base, lexicon, bigram, scorer):
+def _swap_lm_gain(readings, k, alt, base, lexicon, bigram, scorer, fixed=None):
     """#43: how much likelier the model (scorer, after its context) finds the run read with alt at k than with base
     there (Q10 natural log): each the text convert writes (no model, no user: the dictionary and the corpus), at k the
     character of that syllable the model finds the run likeliest with, of convert's and the SWAP_LM_CHARS likeliest
     after the text before it (convert writes 記個郵件 for ㄐㄧˋ ㄍㄜ˙ ㄧㄡˊ ㄐㄧㄢˋ - 寄 is not among the characters it tries -
     and 記 loses to 幾 where 寄 ties). None when convert writes either with other than one character a syllable. The
     same syllables give the same: kept across keys (_SWAP_GAINS). The whole run: cut after k (as SWAP_WINDOW), 換進 in
-    常選的同音字不再換進緊密的詞 became 幻境."""
+    常選的同音字不再換進緊密的詞 became 幻境. fixed: {syllable: character} the user picked in the run (never k), written
+    so in both texts (#60)."""
     rds = list(readings)
-    key = (id(scorer.lm), getattr(scorer, "_context", ""), tuple(rds), k, alt, base)
+    picks = tuple(sorted(fixed.items())) if fixed else ()
+    key = (id(scorer.lm), getattr(scorer, "_context", ""), tuple(rds), k, alt, base, picks)
     if key in _SWAP_GAINS:
         return _SWAP_GAINS[key]
+    overrides = {(i, 1): ch for i, ch in picks}
 
     def best(r):
-        t = "".join(p for _, _, p in convert(rds[:k] + [r] + rds[k + 1:], lexicon, None, {}, bigram))
+        t = "".join(p for _, _, p in convert(rds[:k] + [r] + rds[k + 1:], lexicon, None, overrides, bigram))
         if len(t) != len(rds):
             return None
         return max(scorer.units_logp(t[:k] + ch + t[k + 1:]) for ch in [t[k]] + scorer.top_chars(t[:k], r, SWAP_LM_CHARS))
@@ -853,7 +872,7 @@ def _model_reads_it(tokens, run, k, readings, lexicon, user, bigram, lm, numbers
 
 
 def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None, lm=None, sent="", context_len=None,
-                       marks=False, lit_keys=False):
+                       marks=False, lit_keys=False, picks=None):
     """The 注音自動校正 that needs the words around a syllable, once the keys are split:
     digits read out of order (817) stay zhuyin on their own (吧) or in a word (好吧), or at the end
     of a run when 長句選字加強's model expects the syllable there (lm, _model_reads_it: 我們走吧), else they
@@ -866,7 +885,10 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
     dictionary (你老嗎 -> 你好嘛; tuned with tools/autocorrect_eval.py, not larger: a word typed
     is no likelier right than a syllable that makes none) - never if they make one of the
     user's own (the personal dictionary, a learned word). The
-    readings are settled here, before conversion, so picks (by reading) keep."""
+    readings are settled here, before conversion, so picks (by reading) keep. picks: {raw offset: (keys, reading,
+    character)} the user picked (#60): a swap made with one of them within SWAP_WINDOW is judged again with those
+    characters, and undone if it no longer passes (因該項事件, 項 picked: 因 back) - picks only undo swaps, every other
+    decision is the one without them."""
     memory = user.corrections if user is not None else None
 
     def picked(t):
@@ -931,21 +953,27 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
         tokens = out
     if lexicon is None:
         return tokens
-    def in_sentence(readings, k, reading):
+    def in_sentence(readings, k, reading, fx=None):
         """run_score of the syllables around k (SWAP_WINDOW on each side) with k read so; the
         dictionary's and the context model's alone (what the user taught has its own rule,
         _makes_user_word), so the same syllables always score the same: kept across keys. Never
         the language model of 長句選字加強: it cost most of its time per key, for no measurable
-        gain (tools/autocorrect_eval.py, 2026-10-30)."""
+        gain (tools/autocorrect_eval.py, 2026-10-30). fx: {syllable: (reading, character)} the user picked (#60),
+        written so in the window where the syllable still reads so (never k)."""
         a, b = max(0, k - SWAP_WINDOW), min(len(readings), k + SWAP_WINDOW + 1)
         window = tuple(readings[a:k]) + (reading,) + tuple(readings[k + 1:b])
-        # (the syllables alone are the key: the dictionary and the context model are the same files)
-        score = _RUN_SCORES.get(window)
+        # (a character of a word picked whose other half lies outside the window, and the dictionary has not alone: not
+        # written - no path would write the window either way, code-reviewer: 徬徨 picked as 彷徨)
+        ov = {(i - a, 1): ch for i, (r, ch) in (fx or {}).items()
+              if a <= i < b and i != k and readings[i] == r and lexicon.has([r], ch)}
+        # (the syllables alone are the key: the dictionary and the context model are the same files; and the picks)
+        key = (window, tuple(sorted(ov.items()))) if ov else window
+        score = _RUN_SCORES.get(key)
         if score is None:
             if len(_RUN_SCORES) >= RUN_SCORES_KEPT:
                 _RUN_SCORES.clear()
-            score = run_score(list(window), lexicon, None, bigram)
-            score = _RUN_SCORES[window] = -99.0 * len(window) if score is None else score
+            score = run_score(list(window), lexicon, None, bigram, ov)
+            score = _RUN_SCORES[key] = -99.0 * len(window) if score is None else score
         return score
 
     # 長句選字加強's model: its say too (#43, the SWAP_LM_ constants; the neighbour keys for plus and max), the run read
@@ -956,25 +984,51 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
         readings = [t.value for t in run]
         swapped = False  # (two syllables side by side are not both swapped)
         view = []
+        made = []  # (#60: the swaps made below, judged again with the picks around them after the run)
 
-        def model_gain(k, alt, base):
+        def chars(fx, k, rds=None):
+            rds = readings if rds is None else rds
+            return {i: ch for i, (r, ch) in (fx or {}).items() if i != k and rds[i] == r and lexicon.has([r], ch)}
+
+        def model_gain(k, alt, base, fx=None, rds=None):
             if not view:
                 n = starts.get(run[0].start, len(earlier))
                 text = "".join(m + "".join(ch for _, _, p in convert(e, lexicon, user, {}, bigram) for ch in p
                                            if is_han(ch)) for m, e in earlier[:n])
                 ctx = (sent + text + (earlier[n][0] if n < len(earlier) else ""))[-(context_len or LM_CONTEXT):]
                 view.append(lm.view(ctx) if ctx else lm)
-            return _swap_lm_gain(readings, k, alt, base, lexicon, bigram, view[0])
+            return _swap_lm_gain(readings if rds is None else rds, k, alt, base, lexicon, bigram, view[0],
+                                 chars(fx, k, rds))
 
-        def swap_gain(k, alt, base):
+        def swap_gain(k, alt, base, fx=None, rds=None):
             # (a swap: model_gain and the same with nothing before, the lower - the rules were picked on runs typed
             # alone, and what was sent tipped a 因該 meant: 因該不明來源貨品被扣留 after 今天天氣很好, plus and max;
             # the user 2026-11-20)
-            g = model_gain(k, alt, base)
+            g = model_gain(k, alt, base, fx, rds)
             if g is None or view[0] is lm:
                 return g
-            alone = _swap_lm_gain(readings, k, alt, base, lexicon, bigram, lm)
+            alone = _swap_lm_gain(readings if rds is None else rds, k, alt, base, lexicon, bigram, lm, chars(fx, k, rds))
             return None if alone is None else min(g, alone)
+
+        def passes(k, alt, base, best, typed, need, nasal, typed_word, fx=None, rds=None):
+            """base swapped for alt at k, the run reading best with it and typed as typed: past its gain, unless the
+            model finds it unlikely close to the gain (or, ㄣ/ㄥ making no word, far less likely further over it, #60;
+            light's model at its own bar); or short of it, the model finding it far likelier (ㄣ/ㄥ making no word)."""
+            if best - typed > need:
+                if lm is None:
+                    veto = None
+                elif best - typed <= need + SWAP_LM_VETO_MARGIN:
+                    veto = SWAP_LM_VETO_NASAL_Q10 if nasal else SWAP_LM_VETO_Q10
+                elif nasal and not typed_word:
+                    veto = SWAP_LM_FAR_VETO_NASAL_Q10 if strong else SWAP_LM_FAR_VETO_NASAL_LIGHT_Q10
+                else:
+                    veto = None
+                g = swap_gain(k, alt, base, fx, rds) if veto is not None else None
+                return g is None or g > veto
+            if lm is not None and nasal and not typed_word and best - typed > need - SWAP_LM_SHORT_NASAL:
+                g = swap_gain(k, alt, base, fx, rds)  # (short of its gain: made when the model finds it far likelier)
+                return g is not None and g >= SWAP_LM_BOOST_Q10
+            return False
 
         for k, t in enumerate(run):
             if t.corrected == "adjacent":
@@ -1050,25 +1104,58 @@ def _check_corrections(tokens, table, lexicon, user=None, exact=(), bigram=None,
             passing = []
             for best, alt, nasal in found:
                 need = SWAP_GAIN_WORD if typed_word else SWAP_GAIN_NASAL if nasal else SWAP_GAIN_NO_WORD
-                if best - typed > need:
-                    # (close to its gain and the model finds it unlikely: not made)
-                    g = swap_gain(k, alt, t.value) if lm is not None and best - typed <= need + SWAP_LM_VETO_MARGIN else None
-                    if g is None or g > (SWAP_LM_VETO_NASAL_Q10 if nasal else SWAP_LM_VETO_Q10):
-                        passing.append((best, alt))
-                elif lm is not None and nasal and not typed_word and best - typed > need - SWAP_LM_SHORT_NASAL:
-                    g = swap_gain(k, alt, t.value)  # (short of its gain: made when the model finds it far likelier)
-                    if g is not None and g >= SWAP_LM_BOOST_Q10:
-                        passing.append((best, alt))
+                if passes(k, alt, t.value, best, typed, need, nasal, typed_word):
+                    passing.append((best, alt, nasal, need))
             # ...and where the tones differ in another syllable (匹配 for ㄆㄧ ㄆㄟˋ: ㄆㄟˋ as there),
             # this one is no slip at all: left alone (not 批判, o next to 0); a pick makes it the
             # word (_learn_tone_variant_words)
             if passing and not _makes_other_tones_word(readings, k, lexicon):
-                best, best_alt = max(passing, key=lambda p: p[0])
+                best, best_alt, nasal, need = max(passing, key=lambda p: p[0])
+                made.append((k, list(readings), t.value, best_alt, nasal, need, typed_word, t.orig, t.corrected))
                 t.orig, t.value, t.corrected = t.value, best_alt, "valid"
                 readings[k] = best_alt
                 swapped = True
             else:
                 swapped = False
+        # #60: a swap with a pick of the user's within SWAP_WINDOW is judged again with the picked characters written,
+        # and undone if it no longer passes (因該項事件, 項 picked: 因 back). Picks only undo: every decision above is
+        # the one without them (an undone swap still kept the syllable after it from being swapped), and a syllable
+        # picked itself keeps its swap (its pick holds it)
+        # (the picks as the run reads after its loop: a pick on a syllable a tone, a key next to it or 校正記憶 read
+        # counts too, and a pick on the swapped syllable itself, on the reading it was swapped to, makes it picked -
+        # /code-review high; each swap judged on the readings it was decided on, never a later swap's)
+        fixed = {}
+        for i, t in enumerate(run):
+            p = picks.get(t.start) if picks else None
+            if p is not None and p[0] == t.raw and p[1] == t.value:
+                fixed[i] = (p[1], p[2])
+        # (after k, the readings as settled - a tone, a key next to it - and a later swap at what was typed:
+        # code-reviewer, 項 typed without its tone counted no more)
+        bases = {m[0]: m[2] for m in made}
+        for k, snap, base, alt, nasal, need, typed_word, orig, corrected in made:
+            rds = snap[:k + 1] + [bases.get(i, readings[i]) for i in range(k + 1, len(readings))]
+            fx = {i: v for i, v in fixed.items() if i != k and abs(i - k) <= SWAP_WINDOW}
+            if k in fixed or not chars(fx, k, rds):
+                continue
+
+            def gain(fx):
+                typed = in_sentence(rds, k, base, fx)
+                variant = _other_tones_reading(rds, k, lexicon)
+                if variant is not None:
+                    typed = max(typed, in_sentence(variant, k, variant[k], fx))
+                return typed, in_sentence(rds, k, alt, fx)
+            typed, best = gain(fx)
+            nothing = -99.0 * (min(len(rds), k + SWAP_WINDOW + 1) - max(0, k - SWAP_WINDOW))
+            if nothing in (typed, best):
+                continue  # (no path writes the window with the picks one way: no say on the swap)
+            typed0, best0 = gain(None)
+            if (best0 - typed0) - (best - typed) <= PICK_UNDO_DROP:
+                continue  # (the picks hardly tip it)
+            if not passes(k, alt, base, best + PICK_UNDO_MARGIN, typed, need, nasal, typed_word, fx, rds):
+                t = run[k]
+                t.value, t.orig, t.corrected = base, orig, corrected
+                t.undone = True
+                readings[k] = base
     return tokens
 
 
@@ -1641,11 +1728,13 @@ def nbest(readings, options, bigram, prev_word, k, n):
     return out
 
 
-def run_score(readings, lexicon, user, bigram):
-    """log10 score of the best way to write these syllables (convert's search, no picks, nothing
-    before): how well a reading of a syllable reads with the ones around it, for 注音自動校正
-    (老 or 好 in 你老嗎). None if some syllable has no character."""
-    ends, _, _ = _search(readings, lexicon, user, {}, bigram, None)
+def run_score(readings, lexicon, user, bigram, overrides=None):
+    """log10 score of the best way to write these syllables (convert's search, nothing before): how well a reading of
+    a syllable reads with the ones around it, for 注音自動校正 (老 or 好 in 你老嗎). None if some syllable has no
+    character. overrides: {(start, 1): character} the user picked there (#60): only the paths writing them, scored as
+    they are (no pick bonus: it went through the corpus models unevenly - 正在下載並 with 載 picked again, the
+    character already there, read a lower gain and undid 正)."""
+    ends, _, _ = _search(readings, lexicon, user, overrides or {}, bigram, None, pick_bonus=0.0)
     return max(v[0] for v in ends.values()) if ends else None
 
 
@@ -1676,10 +1765,11 @@ def inherited_best(rds, phrase, user):
     return best[n]
 
 
-def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, bare=False, lead=None):
+def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, bare=False, lead=None, pick_bonus=1000.0):
     """convert's beam search: ({last phrase: (score, path)} at the end, options, full). alone: the
     syllable is all that is typed (None: a run of one syllable). bare: a syllable with no character
-    is written as its zhuyin (NO_CHAR_SCORE) instead of ending every path there."""
+    is written as its zhuyin (NO_CHAR_SCORE) instead of ending every path there. pick_bonus: what a phrase
+    gets for each pick it writes (run_score: none, the paths writing them alone scored as they are, #60)."""
     n = len(readings)
     alone = n == 1 if alone is None else alone
     overrides = overrides or {}
@@ -1701,9 +1791,9 @@ def _search(readings, lexicon, user, overrides, bigram, prev_word, alone=None, b
                 continue
             cands = phrase_candidates(readings[i:i + l], lexicon, user, names=True)
             if span in overrides:
-                cands = [(p, s + 1000.0) for p, s in cands if p == overrides[span]]
+                cands = [(p, s + pick_bonus) for p, s in cands if p == overrides[span]]
             elif inside:
-                cands = [(p, s + 1000.0 * len(inside)) for p, s in cands
+                cands = [(p, s + pick_bonus * len(inside)) for p, s in cands
                          if len(p) == l and all(p[a - i:a - i + b] == overrides[(a, b)] for a, b in inside)]
             elif l >= 3 and user:
                 cands = sorted(((p, s + inherited_bonus(readings[i:i + l], p, user)) for p, s in cands),
@@ -2054,6 +2144,8 @@ class Composer:
         self.chinese = set()    # raw offsets the user wants as zhuyin after all
         self.breaks = set()     # raw offsets where a syllable picked from the bar ends: nothing reads across
         self.exact = set()      # raw offsets of syllables read as typed, not autocorrected (picked so)
+        self._picks = None      # while _refresh reads the keys: the user's picks, for 注音自動校正 (#60)
+        self._loose_words = []  # the words the pick's keeping left free, as shown then (_keep_before, #60)
         self.literal = set()    # raw offsets of numpad keys: always themselves
         self.caps = set()       # raw offsets of letters typed with Caps Lock on (shown in the other case)
         self.caps_lock = False  # Caps Lock was on for the last key
@@ -2121,12 +2213,17 @@ class Composer:
         pinned = {}
         old = [(t.start, t.raw) for t in getattr(self, "tokens", ()) if t.kind == "zh"] if old_syllables is None \
             else old_syllables
+        picks = {}  # (#60: the user's own picks, for 注音自動校正 - not what a pick kept around it)
         for (s, l), v in self.overrides.items():
             for k in range(l):
                 if s + k < len(old):
                     pinned[old[s + k][0]] = (old[s + k][1], v[0][k])
+                    if len(v) == 2 and len(v[1]) == l:
+                        picks[old[s + k][0]] = (old[s + k][1], v[0][k], v[1][k])
+        self._picks = picks
         self.tokens = self._tokens_with(self.chinese, self.forced)
         self._split_by_model([start for start, _ in old], pinned)
+        self._picks = None
         if self.table.autocorrect:
             for t in self.tokens:
                 pin = pinned.get(t.start)
@@ -2135,6 +2232,7 @@ class Composer:
                 back = self._pin_reading(t, pin[1])
                 if back is not None:
                     t.value, t.orig, t.corrected = back
+                    t.undone = False  # (the swap back: no longer one a pick undid, /code-review high)
         self.readings = [t.value for t in self.tokens if t.kind == "zh"]
         if self.caret is not None:  # (the keys may read differently now)
             self.caret = next((p for p in self._stops() if p >= self.caret), None)
@@ -3813,6 +3911,7 @@ class Composer:
 
     def _pick(self, i, from_bar=False):
         self._settle_soft()
+        self._loose_words = []  # (#60: what this pick's keeping frees, from the first keeping to the one after the refresh)
         action = self._cand_actions[i]
         picked = None  # (first syllable, count) of a phrase picked from the list
         shown = list(self.segments)  # when the user picked: what comes before stays (_keep_before)
@@ -4096,6 +4195,33 @@ class Composer:
         that word, as in _keep_rest (事實, 時 picked: 適時; 夏在, 載 picked: 下載), and is kept once
         that is settled (own: shown is then what the pick made). A character the dictionary does
         not have alone under its syllable is kept as its word."""
+        # (#60: nor a word with a syllable 注音自動校正 swapped within SWAP_WINDOW before the pick, or one a pick undid:
+        # judged again with the pick, the whole word is written again - 台北市信義區, 趨 picked: 現役 if 信 goes back,
+        # never 現義; a word kept held its reading, and an undone one kept never came back: 正在下載並, 仔 then 載
+        # picked, stayed 鎮 - code-reviewer)
+        # After the refresh (own), only what a pick undid stays loose, with the word it made at the pick (its partner
+        # may be a word of its own by then - light, 例如英雄連, 聯 picked: 因 熊, and 熊 kept stayed when 英 came back
+        # with 盟); a swap that stood keeps its word as shown at the pick (耀 picked: 應該 - /code-review high). A
+        # pick's earlier keeping, or _keep_rest's, holds a loose syllable no more (應該向事件, 果 then 項 picked).
+        zh = [t for t in self.tokens if t.kind == "zh"]
+        near = range(max(0, s - SWAP_WINDOW), min(s, len(zh)))
+        stood = []
+        if own:
+            undone = {k for k in near if zh[k].undone}
+            loose = undone | {k for a, b, q in shown if any(a <= x < a + b for x in undone) for k in range(a, a + b)}
+            for a, b, q in self._loose_words:
+                if any(a <= x < a + b for x in undone):
+                    loose |= set(range(a, a + b))
+            stood = [w for w in self._loose_words if not any(w[0] <= x < w[0] + w[1] for x in loose)]
+            self._loose_words = []
+        else:
+            loose = {k for k in near if zh[k].corrected == "valid" or zh[k].undone}
+            self._loose_words = [(a, b, q) for a, b, q in shown if len(q) == b and any(a <= x < a + b for x in loose)]
+            loose |= {k for a, b, q in shown if any(a <= x < a + b for x in loose) for k in range(a, a + b)}
+            self.overrides = {sp: v for sp, v in self.overrides.items()
+                              if len(v) == 2 or not any(sp[0] <= k < sp[0] + sp[1] for k in loose)}
+        for a, b, q in stood:
+            self._keep_as_shown(a, q, [k for k in range(a, min(a + b, s))], (s, l))
         in_word = set()
         if not own:
             now = self._convert_all()
@@ -4111,11 +4237,11 @@ class Composer:
                         if all(k in chars for k in range(x, e)) and self.lexicon.reads_with_other_tones(
                                 self.readings[x:e], "".join(chars[k] for k in range(x, e))):
                             for k in range(x, s):
-                                if not any(i <= k < i + j for i, j in self.overrides) \
+                                if k not in loose and not any(i <= k < i + j for i, j in self.overrides) \
                                         and self.lexicon.has([self.readings[k]], chars[k]):
                                     self.overrides[(k, 1)] = ((self.readings[k],), chars[k], KEPT, (s, l))
         for a, b, q in shown:
-            if len(q) != b or a >= s or (a + b > s and not own):
+            if len(q) != b or a >= s or (a + b > s and not own) or any(a <= k < a + b for k in loose):
                 continue
             self._keep_as_shown(a, q, [k for k in range(a, min(a + b, s)) if k not in in_word], (s, l))
 
@@ -4688,7 +4814,7 @@ class Composer:
                                self.after_english, self.digits_as_zhuyin, self.literal, chinese, self.fixed,
                                self.lexicon, self.breaks, self.exact, self.taken, self.bigram, self._lm(),
                                self._sent_context(), self._context_len(), _knows_english(self._lm()),
-                               self._lit_keys(), self.config.completion)
+                               self._lit_keys(), self.config.completion, self._picks)
         self._marks_before_symbols()
         return self.tokens
 

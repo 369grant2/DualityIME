@@ -65,10 +65,15 @@ constexpr size_t ORIG_FIRST = 3;  // 注音自動校正 swapped a syllable: this
 constexpr int SWAP_WINDOW = 3;             // syllables on each side of it that count (run_score)
 // ...with 長句選字加強's model, its say on the run read with the swap against as typed (#43; swap_lm_gain, Q10 natural
 // log; 2358 is one in log10; the values: engine/composer.py): close to its gain, not made when the model finds it hardly
-// likelier; ㄣ/ㄥ short of its gain made when the model finds it far likelier
+// likelier; ㄣ/ㄥ making no word further over it, not made when the model finds it far less likely (#60); ㄣ/ㄥ short of
+// its gain made when the model finds it far likelier
 constexpr double SWAP_LM_VETO_MARGIN = 0.5;
 constexpr int64_t SWAP_LM_VETO_Q10 = 1179;
 constexpr int64_t SWAP_LM_VETO_NASAL_Q10 = 0;
+constexpr int64_t SWAP_LM_FAR_VETO_NASAL_Q10 = -3537;
+constexpr int64_t SWAP_LM_FAR_VETO_NASAL_LIGHT_Q10 = -1886;  // light's (#60: its say on 因該 weaker, the user 2026-11-22)
+constexpr double PICK_UNDO_MARGIN = 0.5;  // a swap judged again with the user's picks is undone only failing by more (#60)
+constexpr double PICK_UNDO_DROP = 1.0;  // ...and only where the picks lowered its gain by more than this (你老嗎: 你好嗎 stays)
 constexpr double SWAP_LM_SHORT_NASAL = 0.4;
 constexpr int64_t SWAP_LM_BOOST_Q10 = 4716;
 constexpr size_t SWAP_LM_CHARS = 10;
@@ -1137,8 +1142,10 @@ bool model_reads_it(const std::vector<Token>& tokens, const std::vector<size_t>&
 // (Q10 natural log): each the text convert writes (no model, no user), at k the character of that syllable the model
 // finds the run likeliest with, of convert's and the SWAP_LM_CHARS likeliest after the text before it; nullopt when
 // convert writes either with other than one character a syllable. Kept across keys (engine/composer.py _swap_lm_gain)
+// fixed: {syllable: character} the user picked in the run (never k), written so in both texts (#60)
 static std::optional<int64_t> swap_lm_gain(const std::vector<ustr>& rds, size_t k, const ustr& alt, const ustr& base,
-                                           const Lexicon& lexicon, const BigramModel* bigram, const LmScorer& scorer) {
+                                           const Lexicon& lexicon, const BigramModel* bigram, const LmScorer& scorer,
+                                           const std::map<size_t, char32_t>* fixed = nullptr) {
     static std::unordered_map<ustr, std::optional<int64_t>> kept;
     ustr key = U(std::to_string(reinterpret_cast<std::uintptr_t>(&scorer.model())));
     for (const ustr* part : {&scorer.context(), &alt, &base}) {
@@ -1149,13 +1156,21 @@ static std::optional<int64_t> swap_lm_gain(const std::vector<ustr>& rds, size_t 
     key += U(std::to_string(k));
     key.push_back(U'\x01');
     key += join(rds, U'-');
+    std::map<std::pair<int, int>, ustr> overrides;
+    if (fixed)
+        for (auto& [i, ch] : *fixed) {
+            overrides[{static_cast<int>(i), 1}] = ustr(1, ch);
+            key.push_back(U'\x02');
+            key += U(std::to_string(i));
+            key.push_back(ch);
+        }
     if (auto it = kept.find(key); it != kept.end()) return it->second;
     // (the texts of each reading, then all read together by units_logp_many: the same numbers as one by one)
     auto texts_of = [&](const ustr& reading, std::vector<ustr>& out) -> bool {
         auto trial = rds;
         trial[k] = reading;
         ustr text;
-        for (auto& seg : convert(trial, lexicon, nullptr, {}, bigram, std::nullopt)) text += seg.phrase;
+        for (auto& seg : convert(trial, lexicon, nullptr, overrides, bigram, std::nullopt)) text += seg.phrase;
         if (text.size() != trial.size()) return false;
         std::vector<char32_t> chars{text[k]};
         for (char32_t ch : scorer.top_chars(text.substr(0, k), reading, SWAP_LM_CHARS)) chars.push_back(ch);
@@ -1259,7 +1274,7 @@ static std::map<size_t, ustr> gap_texts(const std::vector<Token>& tokens, bool l
 std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTable& table, const Lexicon* lexicon,
                                      const UserModel* user, const std::set<int>& exact, const BigramModel* bigram,
                                      const LmScorer* lm, const ustr& sent, size_t context_len, bool marks,
-                                     bool lit_keys) {
+                                     bool lit_keys, const Picks* picks = nullptr) {
     // the 注音自動校正 that needs the words around a syllable (see engine/composer.py): digits
     // out of order stay zhuyin on their own (吧) or in a word likelier than the characters apart
     // (好吧), or at the end of a run when 長句選字加強's model expects the syllable there
@@ -1270,7 +1285,9 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
     // SWAP_GAIN_NO_WORD (老嗎 -> 好嗎), or by SWAP_GAIN_WORD if the keys typed make a word of the
     // dictionary (你老嗎 -> 你好嘛; tuned, not larger) - never if they make one of the user's own.
     // Settled before conversion, so picks (by reading) keep. The sentence scores never use the
-    // language model of 長句選字加強: it cost most of its time per key, for no measurable gain.
+    // language model of 長句選字加強: it cost most of its time per key, for no measurable gain. picks: the user's (#60):
+    // a swap made with one of them within SWAP_WINDOW is judged again with them, undone if it no longer passes - picks
+    // only undo swaps, every other decision is the one without them.
     const CorrectionMemory* memory = user ? &user->corrections : nullptr;
     auto picked = [&](const Token& t) -> std::optional<ustr> {
         if (!memory || contains(exact, t.start)) return std::nullopt;
@@ -1368,18 +1385,33 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
         tokens = std::move(out);
     }
     if (!lexicon) return tokens;
-    // run_score of the syllables around k (SWAP_WINDOW on each side) with k read so
-    auto in_sentence = [&](const std::vector<ustr>& rds, size_t k, const ustr& reading) {
+    // the user's picks in a run (#60): {syllable: (reading, character)}
+    using Fx = std::map<size_t, std::pair<ustr, char32_t>>;
+    // run_score of the syllables around k (SWAP_WINDOW on each side) with k read so; fx written so in the window where
+    // the syllable still reads so (never k)
+    auto in_sentence = [&](const std::vector<ustr>& rds, size_t k, const ustr& reading, const Fx* fx = nullptr) {
         size_t a = k >= static_cast<size_t>(SWAP_WINDOW) ? k - SWAP_WINDOW : 0;
         size_t b = std::min(rds.size(), k + SWAP_WINDOW + 1);
         std::vector<ustr> window(rds.begin() + a, rds.begin() + b);
         window[k - a] = reading;
-        // (the syllables alone are the key: the dictionary and the context model are the same files)
+        // (a character of a word picked whose other half lies outside the window, and the dictionary has not alone: not
+        // written - no path would write the window either way, code-reviewer: 徬徨 picked as 彷徨)
+        std::map<std::pair<int, int>, ustr> ov;
+        if (fx)
+            for (auto& [i, rc] : *fx)
+                if (i >= a && i < b && i != k && rds[i] == rc.first && lexicon->has({rc.first}, ustr(1, rc.second)))
+                    ov[{static_cast<int>(i - a), 1}] = ustr(1, rc.second);
+        // (the syllables alone are the key: the dictionary and the context model are the same files; and the picks)
         ustr key = join(window, U'-');
+        for (auto& [span, ch] : ov) {
+            key.push_back(U'\x02');
+            key += U(std::to_string(span.first));
+            key += ch;
+        }
         auto& kept = run_scores();
         if (auto it = kept.find(key); it != kept.end()) return it->second;
         if (kept.size() >= RUN_SCORES_KEPT) kept.clear();
-        auto score = run_score(window, *lexicon, nullptr, bigram);
+        auto score = run_score(window, *lexicon, nullptr, bigram, ov);
         return kept[key] = score ? *score : -99.0 * static_cast<double>(window.size());
     };
     // 長句選字加強's model: its say too (#43, the SWAP_LM_ constants; the neighbour keys for plus and max), the run
@@ -1391,7 +1423,29 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
         for (size_t i : run) rds.push_back(tokens[i].value);
         bool swapped = false;  // (two syllables side by side are not both swapped)
         const LmScorer* view = nullptr;
-        auto model_gain = [&](size_t k, const ustr& alt, const ustr& base) {
+        // (#60: the swaps made below, judged again with the picks around them after the run, on the readings each was
+        // decided on)
+        struct Made {
+            size_t k;
+            std::vector<ustr> rds;
+            ustr base, alt;
+            bool nasal;
+            double gain;
+            bool typed_word;
+            ustr orig;
+            std::string corrected;
+        };
+        std::vector<Made> made;
+        auto chars = [&](const Fx* fx, size_t k, const std::vector<ustr>* at = nullptr) {
+            const std::vector<ustr>& r = at ? *at : rds;
+            std::map<size_t, char32_t> out;
+            if (fx)
+                for (auto& [i, rc] : *fx)
+                    if (i != k && r[i] == rc.first && lexicon->has({rc.first}, ustr(1, rc.second))) out[i] = rc.second;
+            return out;
+        };
+        auto model_gain = [&](size_t k, const ustr& alt, const ustr& base, const Fx* fx = nullptr,
+                              const std::vector<ustr>* at = nullptr) {
             if (!view) {
                 auto at = starts.find(tokens[run[0]].start);
                 size_t n = at != starts.end() ? at->second : earlier.size();
@@ -1407,16 +1461,42 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
                 if (ctx.size() > keep) ctx.erase(0, ctx.size() - keep);
                 view = ctx.empty() ? lm : lm->view(ctx);
             }
-            return swap_lm_gain(rds, k, alt, base, *lexicon, bigram, *view);
+            auto ch = chars(fx, k, at);
+            return swap_lm_gain(at ? *at : rds, k, alt, base, *lexicon, bigram, *view, &ch);
         };
         // (a swap: model_gain and the same with nothing before, the lower - the rules were picked on runs typed alone,
         // and what was sent tipped a 因該 meant; engine/composer.py swap_gain)
-        auto swap_gain = [&](size_t k, const ustr& alt, const ustr& base) -> std::optional<int64_t> {
-            auto g = model_gain(k, alt, base);
+        auto swap_gain = [&](size_t k, const ustr& alt, const ustr& base, const Fx* fx,
+                             const std::vector<ustr>* at = nullptr) -> std::optional<int64_t> {
+            auto g = model_gain(k, alt, base, fx, at);
             if (!g || view == lm) return g;
-            auto alone = swap_lm_gain(rds, k, alt, base, *lexicon, bigram, *lm);
+            auto ch = chars(fx, k, at);
+            auto alone = swap_lm_gain(at ? *at : rds, k, alt, base, *lexicon, bigram, *lm, &ch);
             if (!alone) return std::nullopt;
             return std::min(*g, *alone);
+        };
+        // base swapped for alt at k, the run reading best with it and typed as typed: past its gain, unless the model
+        // finds it unlikely close to the gain (or, ㄣ/ㄥ making no word, far less likely further over it, #60; light's
+        // model at its own bar); or short of it, the model finding it far likelier (engine/composer.py passes)
+        auto passes = [&](size_t k, const ustr& alt, const ustr& base, double best, double typed, double gain, bool nasal,
+                          bool typed_word, const Fx* fx, const std::vector<ustr>* at = nullptr) {
+            if (best - typed > gain) {
+                std::optional<int64_t> veto;
+                if (!lm)
+                    ;
+                else if (best - typed <= gain + SWAP_LM_VETO_MARGIN)
+                    veto = nasal ? SWAP_LM_VETO_NASAL_Q10 : SWAP_LM_VETO_Q10;
+                else if (nasal && !typed_word)
+                    veto = strong ? SWAP_LM_FAR_VETO_NASAL_Q10 : SWAP_LM_FAR_VETO_NASAL_LIGHT_Q10;
+                if (!veto) return true;
+                auto g = swap_gain(k, alt, base, fx, at);
+                return !g || *g > *veto;
+            }
+            if (lm && nasal && !typed_word && best - typed > gain - SWAP_LM_SHORT_NASAL) {
+                auto g = swap_gain(k, alt, base, fx, at);  // (short of its gain: made when the model finds it far likelier)
+                return g && *g >= SWAP_LM_BOOST_Q10;
+            }
+            return false;
         };
         for (size_t k = 0; k < run.size(); ++k) {
             Token& t = tokens[run[k]];
@@ -1539,29 +1619,23 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
                 typed = std::max(typed, in_sentence(*variant, k, (*variant)[k]));
             bool typed_word = word_score(rds, k, *lexicon, nullptr).has_value();
             std::optional<ustr> best_alt;
-            double best = 0;
+            double best = 0, best_gain = 0;
+            bool best_nasal = false;
             for (auto& f : found) {  // (the best of those passing their gain; the first of equals, as Python's max)
                 double gain = typed_word ? SWAP_GAIN_WORD : f.nasal ? SWAP_GAIN_NASAL : SWAP_GAIN_NO_WORD;
-                bool passes = f.score - typed > gain;
-                if (passes) {
-                    // (close to its gain and the model finds it unlikely: not made)
-                    if (lm && f.score - typed <= gain + SWAP_LM_VETO_MARGIN) {
-                        auto g = swap_gain(k, f.alt, t.value);
-                        passes = !g || *g > (f.nasal ? SWAP_LM_VETO_NASAL_Q10 : SWAP_LM_VETO_Q10);
-                    }
-                } else if (lm && f.nasal && !typed_word && f.score - typed > gain - SWAP_LM_SHORT_NASAL) {
-                    auto g = swap_gain(k, f.alt, t.value);  // (short of its gain: made when the model finds it far likelier)
-                    passes = g && *g >= SWAP_LM_BOOST_Q10;
-                }
-                if (passes && (!best_alt || f.score > best)) {
+                if (passes(k, f.alt, t.value, f.score, typed, gain, f.nasal, typed_word, nullptr) &&
+                    (!best_alt || f.score > best)) {
                     best_alt = f.alt;
                     best = f.score;
+                    best_gain = gain;
+                    best_nasal = f.nasal;
                 }
             }
             // ...and where the tones differ in another syllable (匹配 for ㄆㄧ ㄆㄟˋ: ㄆㄟˋ as there),
             // this one is no slip at all: left alone (not 批判, o next to 0); a pick makes it the
             // word (learn_tone_variant_words)
             if (best_alt && !makes_other_tones_word(rds, k, *lexicon)) {
+                made.push_back(Made{k, rds, t.value, *best_alt, best_nasal, best_gain, typed_word, t.orig, t.corrected});
                 t.orig = t.value;
                 t.value = *best_alt;
                 t.corrected = "valid";
@@ -1569,6 +1643,54 @@ std::vector<Token> check_corrections(std::vector<Token> tokens, const SyllableTa
                 swapped = true;
             } else {
                 swapped = false;
+            }
+        }
+        // #60: a swap with a pick of the user's within SWAP_WINDOW is judged again with the picked characters written,
+        // and undone if it no longer passes (因該項事件, 項 picked: 因 back). Picks only undo: every decision above is
+        // the one without them, and a syllable picked itself keeps its swap (engine/composer.py)
+        // (the picks as the run reads after its loop: a pick on a syllable a tone, a key next to it or 校正記憶 read
+        // counts too, and one on the swapped syllable itself makes it picked; engine/composer.py)
+        Fx fixed;
+        if (picks)
+            for (size_t i = 0; i < run.size(); ++i) {
+                const Token& t = tokens[run[i]];
+                auto p = picks->find(t.start);
+                if (p != picks->end() && p->second.keys == t.raw && p->second.reading == t.value)
+                    fixed[i] = {p->second.reading, p->second.ch};
+            }
+        // (after k, the readings as settled - a tone, a key next to it - and a later swap at what was typed)
+        std::map<size_t, ustr> bases;
+        for (auto& m : made) bases[m.k] = m.base;
+        for (auto& m : made) {
+            std::vector<ustr> trial(m.rds.begin(), m.rds.begin() + static_cast<std::ptrdiff_t>(m.k + 1));
+            for (size_t i = m.k + 1; i < rds.size(); ++i) {
+                auto b = bases.find(i);
+                trial.push_back(b != bases.end() ? b->second : rds[i]);
+            }
+            Fx fx;
+            for (auto& [i, rc] : fixed)
+                if (i != m.k && (i > m.k ? i - m.k : m.k - i) <= static_cast<size_t>(SWAP_WINDOW)) fx[i] = rc;
+            if (fixed.count(m.k) || chars(&fx, m.k, &trial).empty()) continue;
+            auto gain = [&](const Fx* f) {
+                double typed = in_sentence(trial, m.k, m.base, f);
+                if (auto variant = other_tones_reading(trial, m.k, *lexicon))
+                    typed = std::max(typed, in_sentence(*variant, m.k, (*variant)[m.k], f));
+                return std::make_pair(typed, in_sentence(trial, m.k, m.alt, f));
+            };
+            auto [typed, best] = gain(&fx);
+            size_t lo = m.k >= static_cast<size_t>(SWAP_WINDOW) ? m.k - SWAP_WINDOW : 0;
+            double nothing = -99.0 * static_cast<double>(std::min(trial.size(), m.k + SWAP_WINDOW + 1) - lo);
+            if (typed == nothing || best == nothing) continue;  // (no path writes the window with the picks one way)
+            auto [typed0, best0] = gain(nullptr);
+            if ((best0 - typed0) - (best - typed) <= PICK_UNDO_DROP) continue;  // (the picks hardly tip it)
+            if (!passes(m.k, m.alt, m.base, best + PICK_UNDO_MARGIN, typed, m.gain, m.nasal, m.typed_word, &fx,
+                        &trial)) {
+                Token& t = tokens[run[m.k]];
+                t.value = m.base;
+                t.orig = m.orig;
+                t.corrected = m.corrected;
+                t.undone = true;
+                rds[m.k] = m.base;
             }
         }
     }
@@ -1608,7 +1730,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
                             const Fixed* fixed, const Lexicon* lexicon, const std::set<int>* breaks,
                             const std::set<int>* exact, const Fixed* taken, const BigramModel* bigram,
                             const LmScorer* lm, const ustr* sent, size_t context_len, bool marks, bool lit_keys,
-                            bool starts) {
+                            bool starts, const Picks* picks) {
     // literal: raw offsets of keys that are always themselves (numpad); fixed: keys shown
     // as picked from the replacement bar (ㄏㄠˇ, clˇ); taken: keys read as a syllable picked
     // from the list (注音自動校正: si3 as ㄋㄧˇ). They cut the text in two.
@@ -1633,7 +1755,7 @@ std::vector<Token> tokenize(const std::string& raw, const SyllableTable& table, 
     const std::set<int>& ex = exact ? *exact : no_breaks;
     auto checked = [&](std::vector<Token> toks) {
         return table.autocorrect ? check_corrections(std::move(toks), table, lexicon, user, ex, bigram, lm, sent ? *sent : ustr(),
-                                                     context_len, marks, lit_keys)
+                                                     context_len, marks, lit_keys, picks)
                                  : toks;
     };
     if (cuts.empty())
@@ -2106,10 +2228,11 @@ static double inherited_bonus(const std::vector<ustr>& rds, const ustr& phrase, 
     return std::max(0.0, inherited_best(rds, phrase, user) - user.bonus(join(rds, U'-'), phrase));
 }
 
+// pick_bonus: what a phrase gets for each pick it writes (run_score: none, #60; engine/composer.py _search)
 static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
                      const std::map<std::pair<int, int>, ustr>& overrides, const BigramModel* bigram,
                      const std::optional<ustr>& prev_word, std::optional<bool> alone_ = std::nullopt, bool bare = false,
-                     std::optional<char32_t> lead = std::nullopt) {
+                     std::optional<char32_t> lead = std::nullopt, double pick_bonus = 1000.0) {
     // beam search over (position, previous phrase) so that context counts; alone: the syllable is
     // all that is typed (none: a run of one syllable). bare: a syllable with no character is
     // written as its zhuyin (NO_CHAR_SCORE) instead of ending every path there
@@ -2143,7 +2266,7 @@ static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, 
             if (ov != overrides.end()) {
                 std::vector<Scored> kept;
                 for (auto& [p, s] : cands)
-                    if (p == ov->second) kept.emplace_back(p, s + 1000.0);
+                    if (p == ov->second) kept.emplace_back(p, s + pick_bonus);
                 cands = std::move(kept);
             } else if (!inside.empty()) {
                 std::vector<Scored> kept;
@@ -2151,7 +2274,7 @@ static Search search(const std::vector<ustr>& readings, const Lexicon& lexicon, 
                     bool has = static_cast<int>(p.size()) == l;
                     for (auto [a, b] : inside)
                         if (has && p.substr(a - i, b) != overrides.at({a, b})) has = false;
-                    if (has) kept.emplace_back(p, s + 1000.0 * static_cast<double>(inside.size()));
+                    if (has) kept.emplace_back(p, s + pick_bonus * static_cast<double>(inside.size()));
                 }
                 cands = std::move(kept);
             } else if (l >= 3 && user) {
@@ -2325,8 +2448,9 @@ static std::vector<std::pair<double, std::vector<Segment>>> nbest(const std::vec
 }
 
 std::optional<double> run_score(const std::vector<ustr>& readings, const Lexicon& lexicon, const UserModel* user,
-                                const BigramModel* bigram) {
-    Search found = search(readings, lexicon, user, {}, bigram, std::nullopt);
+                                const BigramModel* bigram, const std::map<std::pair<int, int>, ustr>& overrides) {
+    Search found = search(readings, lexicon, user, overrides, bigram, std::nullopt, std::nullopt, false, std::nullopt,
+                          0.0);
     std::optional<double> best;
     for (auto& [_, st] : found.ends)
         if (!best || st.score > *best) best = st.score;
@@ -2701,15 +2825,26 @@ void Composer::refresh(const std::vector<std::pair<int, std::string>>* old_given
     else
         for (auto& t : tokens)
             if (t.kind == Kind::Zh) old.push_back({t.start, t.raw});
+    Picks picks;  // (#60: the user's own picks, for 注音自動校正 - not what a pick kept around it)
     std::map<int, std::pair<std::string, ustr>> pinned;
     for (auto& [span, v] : overrides_)
         for (int k = 0; k < span.second && k < static_cast<int>(v.first.size()); ++k)
-            if (span.first + k < static_cast<int>(old.size()))
-                pinned[old[span.first + k].first] = {old[span.first + k].second, v.first[k]};
+            if (span.first + k < static_cast<int>(old.size())) {
+                const auto& [start, keys] = old[span.first + k];
+                pinned[start] = {keys, v.first[k]};
+                if (!v.kept && static_cast<int>(v.second.size()) == span.second)
+                    picks[start] = Picked{keys, v.first[k], v.second[k]};
+            }
     std::vector<int> old_starts;
     for (auto& [start, keys] : old) old_starts.push_back(start);
+    struct Reset {
+        const Picks*& p;
+        ~Reset() { p = nullptr; }
+    } reset{picks_};
+    picks_ = &picks;
     tokens_with(chinese_, forced_);
     split_by_model(old_starts, pinned);
+    picks_ = nullptr;
     if (table_.autocorrect) {
         for (auto& t : tokens) {
             auto pin = pinned.find(t.start);
@@ -2720,6 +2855,7 @@ void Composer::refresh(const std::vector<std::pair<int, std::string>>* old_given
                 t.value = std::get<0>(*back);
                 t.orig = std::get<1>(*back);
                 t.corrected = std::get<2>(*back);
+                t.undone = false;  // (the swap back: no longer one a pick undid)
             }
         }
     }
@@ -5137,6 +5273,7 @@ void Composer::pick(int i, bool from_bar) {
     }
     std::optional<std::pair<int, int>> picked;  // (first syllable, count) of a phrase picked from the list
     const std::vector<Segment> shown_then = segments_;  // when the user picked: what comes before stays (keep_before)
+    loose_words_.clear();  // (#60: what this pick's keeping frees, from the first keeping to the one after the refresh)
     if (action.type == "phrase") {
         int s = action.s, l = action.l;
         std::map<int, char32_t> shown;
@@ -5459,6 +5596,61 @@ void Composer::keep_before(int s, int l, const std::vector<Segment>& shown, bool
     // 以精選好的字). Kept like the rest of a word a pick broke (keep_rest). What makes a word with
     // the pick comes as that word (夏在, 載 picked: 下載) and is kept once that is settled (own).
     // See engine/composer.py.
+    // (#60: nor a word with a syllable 注音自動校正 swapped within SWAP_WINDOW before the pick, or one a pick undid:
+    // judged again with the pick, the whole word is written again - 台北市信義區, 趨 picked: 現役 if 信 goes back,
+    // never 現義; an undone one kept never came back: 正在下載並, 仔 then 載 picked, stayed 鎮)
+    // After the refresh (own), only what a pick undid stays loose, with the word it made at the pick (light, 例如英雄連,
+    // 聯 picked: 因 熊); a swap that stood keeps its word as shown at the pick (耀 picked: 應該). A pick's earlier keeping,
+    // or keep_rest's, holds a loose syllable no more (應該向事件, 果 then 項 picked). engine/composer.py
+    std::set<int> loose;
+    std::vector<Segment> stood;
+    {
+        std::set<int> base;
+        int z = 0;
+        for (auto& t : tokens) {
+            if (t.kind != Kind::Zh) continue;
+            if (z >= std::max(0, s - SWAP_WINDOW) && z < s && (own ? t.undone : (t.corrected == "valid" || t.undone)))
+                base.insert(z);
+            ++z;
+        }
+        auto overlaps = [](const Segment& seg, const std::set<int>& at) {
+            for (int x : at)
+                if (seg.start <= x && x < seg.start + seg.length) return true;
+            return false;
+        };
+        loose = base;
+        if (!own) {
+            loose_words_.clear();
+            for (auto& seg : shown)
+                if (static_cast<int>(seg.phrase.size()) == seg.length && overlaps(seg, base)) loose_words_.push_back(seg);
+        }
+        for (auto& seg : shown)
+            if (overlaps(seg, base))
+                for (int k = seg.start; k < seg.start + seg.length; ++k) loose.insert(k);
+        if (own) {
+            for (auto& seg : loose_words_)
+                if (overlaps(seg, base))
+                    for (int k = seg.start; k < seg.start + seg.length; ++k) loose.insert(k);
+            for (auto& seg : loose_words_)
+                if (!overlaps(seg, loose)) stood.push_back(seg);
+            loose_words_.clear();
+        } else {
+            for (auto it = overrides_.begin(); it != overrides_.end();) {
+                bool hit = false;
+                for (int k = it->first.first; k < it->first.first + it->first.second; ++k)
+                    if (loose.count(k)) hit = true;
+                if (it->second.kept && hit)
+                    it = overrides_.erase(it);
+                else
+                    ++it;
+            }
+        }
+    }
+    for (auto& seg : stood) {
+        std::vector<int> where;
+        for (int k = seg.start; k < std::min(seg.start + seg.length, s); ++k) where.push_back(k);
+        keep_as_shown(seg.start, seg.phrase, where, {s, l});
+    }
     std::set<int> in_word;
     if (!own) {
         auto now = convert_all();
@@ -5486,7 +5678,7 @@ void Composer::keep_before(int s, int l, const std::vector<Segment>& shown, bool
                         for (auto& [span, _] : overrides_)
                             if (span.first <= k && k < span.first + span.second) covered = true;
                         ustr ch(1, chars[k]);
-                        if (!covered && lexicon_.has({readings[k]}, ch))
+                        if (!covered && !loose.count(k) && lexicon_.has({readings[k]}, ch))
                             overrides_[{k, 1}] = Pin{{readings[k]}, ch, true, {s, l}};
                     }
                 }
@@ -5494,6 +5686,10 @@ void Composer::keep_before(int s, int l, const std::vector<Segment>& shown, bool
     for (auto& seg : shown) {
         int a = seg.start, b = seg.length;
         if (static_cast<int>(seg.phrase.size()) != b || a >= s || (a + b > s && !own)) continue;
+        bool swapped_in = false;
+        for (int k : loose)
+            if (a <= k && k < a + b) swapped_in = true;
+        if (swapped_in) continue;
         std::vector<int> where;
         for (int k = a; k < std::min(a + b, s); ++k)
             if (!in_word.count(k)) where.push_back(k);
@@ -6361,7 +6557,7 @@ const std::vector<Token>& Composer::tokens_with(const std::set<int>& chinese, co
     // the keys as tokens, with these marks of 注音 / English
     tokens = tokenize(raw, table_, &user, english_, forced, after_english_, digits_as_zhuyin_, literal_, chinese, &fixed_,
                       &lexicon_, &breaks_, &exact_, &taken_, bigram_, lm(), sent_ptr(), context_len(), knows_english(),
-                      lit_keys(), config.flag("completion"));
+                      lit_keys(), config.flag("completion"), picks_);
     marks_before_symbols();
     return tokens;
 }

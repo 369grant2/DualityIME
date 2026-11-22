@@ -107,7 +107,7 @@ Json cfg_json(const Config& c) {
     Json o = Json::object();
     for (const char* k : {"shift_toggle", "start_mode", "lookup", "game_keys", "space", "full_width", "ctrl_full_punct",
                           "cand_font", "cand_font_size", "theme", "appearance", "simplified", "simplified_hotkey",
-                          "simplified_key"})  // (the layout comes in cand_per_line, cand_labels)
+                          "simplified_key", "symbols_stay_open"})  // (the layout comes in cand_per_line, cand_labels)
         if (auto* v = c.values().get(k)) o[k] = *v;
     o["appearance_dir"] = Json(wide_utf8(g->dir + L"appearance"));
     return o;

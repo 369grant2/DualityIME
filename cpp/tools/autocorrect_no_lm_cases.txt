@@ -1,0 +1,7 @@
+# e2e-args: -Config cpp\tools\autocorrect_no_lm_config.json
+# 注音自動校正 on, 長句選字加強 off (the dictionary alone: with the model 因該項事件 is not swapped at all, #60)
+# a pick after a swap judges it again with the character picked: 應該向事件導致此次的結果, 項 picked (7th), 因 back
+# (#60, the user 2026-11-22: it kept 應)
+up e9 vu;4g4ru042l354h3h42k7ru,6eji3{HOME}{RIGHT}{RIGHT}{DOWN}7{ENTER} => 因該項事件導致此次的結果
+# a swap the pick does not tip stays: 我應該要去, 耀 picked (3rd)
+ji3up e9 ul4fm4{HOME}{RIGHT}{RIGHT}{RIGHT}{DOWN}3{ENTER} => 我應該耀去

@@ -3,7 +3,9 @@
 # the engine next to the DLL Windows loads is started again.
 # When what goes into the DLL changed since origin/develop (the last release), the DLL
 # Windows loads must be the one just built (cpp\deploy.cmd, or a setup of this tree).
-#   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 [script] [--tsf]
+#   powershell -ExecutionPolicy Bypass -File cpp\tools\e2e.ps1 [script] [-Mode:--tsf]
+# (-Mode:--tsf: the box talks TSF itself, like Word and Chrome, instead of through the IMM32 layer; a bare --tsf is
+# swallowed by PowerShell and never arrives)
 # The engine just built is used if there is one (the protocol is the same), else the
 # installed one. If that engine is not running when the keys go out, the test stops:
 # the input method would start the everyday engine instead, with your learned words.

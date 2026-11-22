@@ -29,7 +29,9 @@ def main(argv):
     scorer = Scorer(IntLM(os.path.join(work, "models", size + ".npz")), vocab, candidates_by_syllable(lexicon, vocab))
     plain = composer.run_score
 
-    def run_score(readings, lexicon, user, bigram):
+    def run_score(readings, lexicon, user, bigram, overrides=None):
+        if overrides:  # (the user's picks, #60: none in an evaluation - the engine's own sum then)
+            return plain(readings, lexicon, user, bigram, overrides)
         base = plain(readings, lexicon, user, bigram)
         if base is None:
             return None

@@ -799,7 +799,10 @@ bool TextService::test_key_down(ITfContext* ctx, WPARAM vk, LPARAM lp) {
         // in 全形 mode every character is ours to type in full width
         return vk != VK_SHIFT && (composing || (cfg_.full_width && printable(char_of(vk, lp))));
     }
-    if (state_.symbol_page >= 0) return vk != VK_SHIFT;  // every key means a symbol while the keyboard is up
+    // every key means a symbol while the keyboard is up - but with 符號鍵盤選完不關 (#49) Backspace with nothing typed
+    // is the app's (it deletes the symbol just sent; the engine says "not handled"): an app typing through the IMM32
+    // layer never got the key once it was eaten here, whatever OnKeyDown said after (e2e 2026-11-22: ※—… for ※…)
+    if (state_.symbol_page >= 0) return vk != VK_SHIFT && !(vk == VK_BACK && cfg_.symbols_stay_open && !composing);
     if (state_.fill_open) return vk != VK_SHIFT;          // ...and every key is 快速填入's while it is up (#21)
     if (composing) return vk != VK_SHIFT;
     if (is_numpad(vk)) return false;  // numpad always types plain digits
@@ -1010,6 +1013,7 @@ void TextService::read_reply(const Json& r) {
         if (!parse_hotkey(text("simplified_key", "Ctrl+F1"), cfg_.script_vk, cfg_.script_ctrl, cfg_.script_alt,
                           cfg_.script_shift))
             cfg_.script_vk = 0;  // (not a key: no key at all)
+        cfg_.symbols_stay_open = flag("symbols_stay_open", false);
         set_appearance_from(c->get("appearance"), wide(text("appearance_dir", "")));
     }
 }

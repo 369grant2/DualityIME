@@ -5,6 +5,8 @@ su3cl3{LEFT}`f{ENTER} => 你●好
 vu0 cjo6ru8 vu3yl3{^,}y94fm4d042u04u/3{^.}{ENTER} => 先回家洗澡，再去看電影。
 # Backspace right after takes the symbol back, what is before it stays
 su3`f{BACK}cl3{ENTER} => 你好
+# Backspace with the symbol keyboard up and nothing typed closes it (符號鍵盤選完不關 off): what was sent stays
+su3{ENTER}`{BACK}cl3{ENTER} => 你好
 # the words before it can still be picked (last: the picks are remembered)
 su3{^,}{HOME}{DOWN}2{ENTER} => 妳，
 ji3ap7vu0 fm4t z04{^,}{LEFT}{LEFT}{LEFT}{DOWN}2{END}y94fm4d042u04u/3{ENTER} => 我們先去喫飯，再去看電影

@@ -3,7 +3,10 @@
 `ghadf{ESC} => 「」※○●
 # Enter types the symbol at the arrows' cursor, Space a space, and it stays open after both
 `a{RIGHT}{ENTER} f{ESC} => ※2 ●
-# Backspace is the app's: it deletes the symbol just sent, the keyboard still open
+# Backspace is the app's: it deletes the symbol just sent, the keyboard still open (the IME let it through only from
+# 2026-11-22: it ate the key, so ※—…)
 `ab{BACK}c{ESC} => ※…
+# ...but with text being typed it is ours: it takes the symbol back out of that text, the keyboard still open
+su3`ab{BACK}c{ESC}{ENTER} => 你※…
 # with text being typed each symbol joins it (#52), the keyboard stays; Esc closes it, Enter sends all
 su3`af{ESC}{ENTER} => 你※●

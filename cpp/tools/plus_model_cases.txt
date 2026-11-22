@@ -7,6 +7,8 @@ ji3ru0320 ru4ek7u.6ru04{ENTER} => 我簡單寄個郵件
 # 因該 meant stays, 因該 for 應該 is fixed (#43, the user 2026-11-20)
 up e9 vu;4ru4cj842l354ej/ t/6u062;4{ENTER} => 因該項計畫導致工程延宕
 up e9 1j4au/6x96m06cji4qup31o4d.4xu.6{ENTER} => 因該不明來源貨品被扣留
+# ...and one the dictionary favours swapping by far: the model, sure it is 因該, still says no (#60, the user 2026-11-22, 3.3.0 max)
+up e9 vu;4g4ru042l354h3h42k7ru,6eji3{ENTER} => 因該項事件導致此次的結果
 # ...and after a sentence sent (the model reads it: after 今天天氣很好 this model made it 應該; a swap takes the lower of the model with and
 # without it, code-reviewer 2026-11-21)
 rup wu0 wu0 fu4cp3cl3{ENTER}up e9 1j4au/6x96m06cji4qup31o4d.4xu.6{ENTER} => 今天天氣很好因該不明來源貨品被扣留

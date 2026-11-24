@@ -5,65 +5,67 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.IO;
 
-// Redraws IME tray icons in the style of the Windows ones:
-//   tile:  1px 50% black frame, white inside, black glyph
-//   mode:  white glyph with a 1px 50% black outline (25% on the diagonals), no background
-// Up to 48px the strokes are pixel-exact (hinted, 1 bit) with only the steps of diagonal strokes
-// softened, like the hand-tuned originals; above that plain antialiasing.
+// Draws the taskbar icons the way Windows 11 shows its own input methods there (the Korean one's
+// 가 / 한, for instance): the bare character, white, smooth, no tile behind it.
+// The icons are files, so they cannot follow the light / dark theme the way Windows' own do. A
+// black rim around the white character makes one icon do for both: on a dark taskbar the rim cannot
+// be seen, on a light one it carries the character.
 public static class IconDraw {
-    public static string FontName = "Microsoft JhengHei";
+    public const string FontName = "Microsoft JhengHei";
+    const float Boost = 2.2f;   // strokes thinner than a pixel come out grey: lifted, as bright as Windows' own
+    const float Rim = 1.0f;     // how black the rim is (0 = none)
 
-    // the glyph as coverage 0..1 on an S x S canvas, as large as fits in box x box, centred;
-    // grow: pixels added to the right of and below every stroke (a heavier weight)
-    public static float[,] Mask(string ch, int S, int box, FontStyle style, int grow) {
-        bool exact = S <= 48;
-        int C = S * 3, fit = box - grow;
+    public static Bitmap Draw(string ch, int S) {
+        int rim = Math.Max(1, (int)Math.Round(S / 32.0));          // the rim's width
+        int box = S - 2 * rim, C = S * 3;
+        // hinted up to 48px (stems on whole pixels), plain antialiasing above
+        TextRenderingHint hint = S <= 48 ? TextRenderingHint.AntiAliasGridFit : TextRenderingHint.AntiAlias;
+        // the largest size at which the character fits the box
         float lo = 2, hi = S * 3, em = 0;
         Rectangle bb = Rectangle.Empty;
         for (int it = 0; it < 18; it++) {
             float mid = (lo + hi) / 2;
-            Rectangle r; Render(ch, C, mid, style, S, exact ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAlias, out r);
+            Rectangle r; Render(ch, C, mid, hint, S, out r);
             if (r.Width == 0) lo = mid;
-            else if (r.Width <= fit && r.Height <= fit) { lo = mid; em = mid; bb = r; }
+            else if (r.Width <= box && r.Height <= box) { lo = mid; em = mid; bb = r; }
             else hi = mid;
         }
-        var res = new float[S, S];
-        if (em == 0) return res;
+        var b = new Bitmap(S, S, PixelFormat.Format32bppArgb);
+        if (em == 0) return b;
         Rectangle unused;
-        float[,] m = Render(ch, C, em, style, S, exact ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAlias, out unused);
-        if (exact) {
-            float[,] aa = Render(ch, C, em, style, S, TextRenderingHint.AntiAliasGridFit, out unused);
-            var soft = new float[C, C];
-            for (int y = 1; y < C - 1; y++)
-                for (int x = 1; x < C - 1; x++) {
-                    if (m[x, y] > 0) { soft[x, y] = 1; continue; }
-                    bool l = m[x - 1, y] > 0, r = m[x + 1, y] > 0, u = m[x, y - 1] > 0, d = m[x, y + 1] > 0;
-                    // the inside of a step of a diagonal stroke: one side and one of top / bottom, nothing opposite
-                    bool step = (l ^ r) && (u ^ d);
-                    if (step) soft[x, y] = Math.Min(0.6f, aa[x, y]);
-                }
-            m = soft;
-        }
-        int ox = (S - (bb.Width + grow)) / 2 - bb.X, oy = (S - (bb.Height + grow)) / 2 - bb.Y;
+        float[,] m = Render(ch, C, em, hint, S, out unused);
+        int ox = (S - bb.Width) / 2 - bb.X, oy = (S - bb.Height) / 2 - bb.Y;   // centred
+        var glyph = new float[S, S];
         for (int y = 0; y < S; y++)
             for (int x = 0; x < S; x++) {
-                float v = 0;
-                for (int dy = 0; dy <= grow; dy++)
-                    for (int dx = 0; dx <= grow; dx++) {
-                        int sx = x - ox - dx, sy = y - oy - dy;
-                        if (sx < 0 || sy < 0 || sx >= C || sy >= C) continue;
-                        if (m[sx, sy] > v) v = m[sx, sy];
-                    }
-                res[x, y] = v;
+                int sx = x - ox, sy = y - oy;
+                float v = (sx < 0 || sy < 0 || sx >= C || sy >= C) ? 0 : m[sx, sy];
+                glyph[x, y] = S <= 48 ? Math.Min(1, v * Boost) : v;
             }
-        return res;
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++) {
+                float g = glyph[x, y], around = 0;
+                for (int dy = -rim; dy <= rim; dy++)
+                    for (int dx = -rim; dx <= rim; dx++) {
+                        int xx = x + dx, yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= S || yy >= S) continue;
+                        float v = glyph[xx, yy] * (dx == 0 || dy == 0 ? 1f : 0.6f);   // (lighter on the diagonals)
+                        if (v > around) around = v;
+                    }
+                around *= Rim;
+                float a = g + (1 - g) * around;                     // white over the black rim
+                int c = a <= 0 ? 0 : (int)Math.Round(255 * g / a);
+                b.SetPixel(x, y, Color.FromArgb((int)Math.Round(a * 255), c, c, c));
+            }
+        return b;
     }
 
-    static float[,] Render(string ch, int C, float em, FontStyle style, int S, TextRenderingHint hint, out Rectangle bb) {
+    // the character in white on black on a C x C canvas, as coverage 0..1; bb: where it is
+    static float[,] Render(string ch, int C, float em, TextRenderingHint hint, int S, out Rectangle bb) {
         var m = new float[C, C];
         using (var b = new Bitmap(C, C, PixelFormat.Format32bppArgb))
         using (var g = Graphics.FromImage(b))
-        using (var f = new Font(FontName, em, style, GraphicsUnit.Pixel)) {
+        using (var f = new Font(FontName, em, FontStyle.Regular, GraphicsUnit.Pixel)) {
             g.Clear(Color.Black);
             g.TextRenderingHint = hint;
             g.DrawString(ch, f, Brushes.White, S / 2, S / 2, StringFormat.GenericTypographic);
@@ -81,60 +83,6 @@ public static class IconDraw {
             bb = x1 < 0 ? Rectangle.Empty : new Rectangle(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
         }
         return m;
-    }
-
-    // the weight per size, after the originals' strokes: 1px at 16, 2px at 24, 3px at 48
-    static void Weight(int S, out FontStyle style, out int grow) {
-        style = S == 24 ? FontStyle.Bold : FontStyle.Regular;
-        grow = (S == 40 || S == 48) ? 1 : 0;
-    }
-
-    // white glyph (black for a light taskbar) with the outline
-    public static Bitmap Mode(string ch, int S, bool darkGlyph) {
-        int o = Math.Max(1, (int)Math.Round(S / 48.0));           // outline width
-        FontStyle style; int grow; Weight(S, out style, out grow);
-        float[,] m = Mask(ch, S, S - 2 * o, style, grow);
-        var b = new Bitmap(S, S, PixelFormat.Format32bppArgb);
-        for (int y = 0; y < S; y++)
-            for (int x = 0; x < S; x++) {
-                float edge = 0, corner = 0;
-                for (int dy = -o; dy <= o; dy++)
-                    for (int dx = -o; dx <= o; dx++) {
-                        int xx = x + dx, yy = y + dy;
-                        if (xx < 0 || yy < 0 || xx >= S || yy >= S) continue;
-                        float v = m[xx, yy];
-                        if (dx == 0 || dy == 0) { if (v > edge) edge = v; } else if (v > corner) corner = v;
-                    }
-                float outline = Math.Max(0.5f * edge, 0.25f * corner);
-                float g = m[x, y];
-                float a = g + (1 - g) * outline;
-                int c = a <= 0 ? 0 : (int)Math.Round(255 * g / a);
-                if (darkGlyph) c = 255 - c;
-                b.SetPixel(x, y, Color.FromArgb((int)Math.Round(a * 255), c, c, c));
-            }
-        return b;
-    }
-
-    // the framed white tile with a black glyph
-    public static Bitmap Tile(string ch, int S) {
-        // as heavy as the Korean IME's tile (3px strokes at 48) where a many-stroke character still
-        // reads: from 40px up; below that heavier strokes run together
-        return Tile(ch, S, S >= 64 ? FontStyle.Bold : FontStyle.Regular, (S == 40 || S == 48) ? 1 : 0);
-    }
-
-    public static Bitmap Tile(string ch, int S, FontStyle style, int grow) {
-        int f = Math.Max(1, (int)Math.Round(S / 48.0));           // frame width
-        int pad = Math.Max(1, (int)Math.Round(S / 16.0));
-        float[,] m = Mask(ch, S, S - 2 * (f + pad), style, grow);
-        var b = new Bitmap(S, S, PixelFormat.Format32bppArgb);
-        for (int y = 0; y < S; y++)
-            for (int x = 0; x < S; x++) {
-                bool frame = x < f || y < f || x >= S - f || y >= S - f;
-                if (frame) { b.SetPixel(x, y, Color.FromArgb(128, 0, 0, 0)); continue; }
-                int c = (int)Math.Round(255 * (1 - m[x, y]));
-                b.SetPixel(x, y, Color.FromArgb(255, c, c, c));
-            }
-        return b;
     }
 
     // .ico: 32bpp BMP entries below 256px, PNG for 256px (what rc.exe and old loaders expect)

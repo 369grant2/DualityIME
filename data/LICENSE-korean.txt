@@ -1,0 +1,9 @@
+data/korean.txt is the Korean word frequency list ko_50k.txt (2018) of FrequencyWords by Hermit Dave
+(https://github.com/hermitdave/FrequencyWords), generated from the OpenSubtitles 2018 corpus
+(http://opus.nlpl.eu/OpenSubtitles2018.php; P. Lison and J. Tiedemann, 2016, OpenSubtitles2016: Extracting Large
+Parallel Corpora from Movie and TV Subtitles, LREC 2016).
+
+The list is licensed under the Creative Commons Attribution-ShareAlike 4.0 International licence (CC BY-SA 4.0):
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Changes: three comment lines added at the top; the words and counts are unchanged.

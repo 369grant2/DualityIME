@@ -118,7 +118,9 @@ private:
 };
 
 // {word: rank}, most common first; english_tech.txt ranked after english.txt
+class Korean;
 struct English {
+    const Korean* korean = nullptr;  // data/korean.txt (hangul.h): Korean typed on the same keys; nullptr: none
     std::unordered_map<std::string, int> rank;
     std::vector<std::string> by_rank;
     bool contains(const std::string& w) const { return rank.count(w) > 0; }

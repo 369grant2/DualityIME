@@ -22,6 +22,7 @@
 - **中英切分**：由一個評分模型決定（不是逐條規則）：字典裡的英文字便宜、字典外的字母串每個字母都有代價、英文後面直接接注音要付一次「切換」代價、越常用的注音音節越便宜，挑總分最好的切法\
   例如 `pythong4` = python是、`setup.exea87` = setup.exe嗎、`dog4`、`python3` 維持英文\
   分數的參數用 `tools/tune_english.py` 在英文單字、純注音句子與實測華碩的混打例子上調出來
+- **韓文**（`cpp/engine/hangul.cpp`，只有 C++ 版，Python 版沒有：`tools/compare.py` 要用 `"korean": false` 的設定比對）：一串字母照韓文鍵盤（두벌식）組成音節，當成切分的第三種候選和英文、注音一起評分：`data/korean.txt` 裡的詞便宜，單音節的詞只有前面是韓文才便宜，打到一半的詞從兩個音節起算
 - **整句選字**：小麥注音的詞庫（約 14 萬個詞），加上從約 2 億字的維基百科與網頁文章統計出的「哪個詞後面常接哪個詞」（300 萬組詞對）
 - **框選查詢**與終端機裡的補字小框用 UI Automation 讀取選取的文字、找出游標所在的格子
 - **遊戲中 Shift 交給遊戲**認得的遊戲：遊戲列記得的（`HKCU\System\GameConfigStore`）和全螢幕獨佔執行的程式\
@@ -35,9 +36,9 @@
 | `engine/` | Python 版核心：C++ 版的標準答案（`tools/compare.py` 逐鍵比對）與實驗用 |
 | `installer/` | 安裝檔、解除安裝程式、設定工具、框選查詢的原始碼（`src/`）、安裝與移除腳本、`build.ps1`（用 Windows 內建的編譯器建置） |
 | `settings/ui/` | 設定工具的畫面（HTML／CSS／JS；直接用瀏覽器開 `index.html` 可以預覽，資料是假的） |
-| `data/` | 詞庫 `lexicon.txt`、前後文模型 `bigram.bin`、英文字表（`english_tech.txt` 補上一般字表沒有的電腦用語） |
+| `data/` | 詞庫 `lexicon.txt`、前後文模型 `bigram.bin`、英文字表（`english_tech.txt` 補上一般字表沒有的電腦用語）、韓文詞表 `korean.txt`（[FrequencyWords](https://github.com/hermitdave/FrequencyWords) 的 ko_50k，CC BY-SA 4.0） |
 | `third_party/webview2/` | 微軟的 WebView2 元件（BSD 授權，跟設定工具一起散布） |
-| `icons/` | 圖示的向量原稿；`py tools/make_icons.py` 產生程式本身的圖示（`installer/app.ico`）和設定工具的標誌。工作列上的圖示（`cpp/tip/*.ico`：儀／兩／英，各有白字與黑字兩個，跟著工作列的深色、淺色主題換）由 `tools/make_tray_icons.ps1` 用微軟正黑體畫出 |
+| `icons/` | 圖示的向量原稿；`py tools/make_icons.py` 產生程式本身的圖示（`installer/app.ico`）和設定工具的標誌。工作列上的圖示（`cpp/tip/*.ico`：相／三／英，各有白字與黑字兩個，跟著工作列的深色、淺色主題換）由 `tools/make_tray_icons.ps1` 用微軟正黑體畫出 |
 | `tools/` | 產生資料、評估、試打、測試、發版 |
 | `tests/` | 測試 |
 | `VERSION` | 版本號 |

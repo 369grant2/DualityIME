@@ -71,6 +71,8 @@ $files = [ordered]@{
 foreach ($dll in $webview) { $files[$dll] = "third_party\webview2\$dll" }
 # the engine's data: only what it reads (not the corpus the bigram is built from)
 foreach ($f in @("lexicon.txt", "names.txt", "bigram.bin", "lm.bin", "english.txt", "english_tech.txt", "after_english.txt", "LICENSE-McBopomofo.txt",
+                  # 韓文 (cpp/engine/hangul.h): the Korean word list and its licence
+                  "korean.txt", "LICENSE-korean.txt",
                   # 簡體輸出 (#32): OpenCC's tables (tools/build_opencc.py) and their licence
                   "opencc\TSPhrases.txt", "opencc\TSCharacters.txt", "opencc\TWVariantsRev.txt", "opencc\TWVariantsRevPhrases.txt",
                   "opencc\TWPhrasesRev.txt", "opencc\TWPhrases.txt", "opencc\mainland_words.txt", "LICENSE-OpenCC.txt")) {

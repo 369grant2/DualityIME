@@ -310,6 +310,15 @@ std::set<int> protected_offsets(const std::string& raw, const English& english,
 
 // Scoring English pieces (tuned with tools/tune_english.py; the same as EN in engine/composer.py).
 // A piece is split into letter runs (with - or ' inside: e-mail, user's), digit runs and symbols.
+// Korean (hangul.h), weighed with the same costs as English and zhuyin
+constexpr double KO_KNOWN = -0.5;         // a word of the list, two syllables or more (dkssud: 안녕); English wins a tie
+constexpr double KO_KNOWN_AFTER = -0.7;   // ...right after Korean, a word of one syllable too
+constexpr double KO_KNOWN_SHORT = 0.6;    // a word of one syllable elsewhere: zhuyin wins where the keys spell a syllable
+constexpr double KO_SHORT_COMMON = -3.8;  // ...and only one this common (log10 of its share of the words counted)
+constexpr double KO_TYPING = 0.25;        // each syllable of the start of a word of the list, still being typed
+constexpr double KO_STEM = 0.4;           // a word of the list with an ending the list lacks...
+constexpr double KO_ENDING = 0.3;         // ...each syllable of that ending
+constexpr double KO_UNKNOWN_AFTER = 0.5;  // each syllable of other Korean right after Korean
 constexpr double EN_KNOWN_LONG = -0.6;  // a dictionary word of 3+ letters (python, look, exe)
 constexpr double EN_KNOWN_SHORT = 0.6;  // a 1-2 letter one (up, pm): zhuyin wins unless...
 constexpr double EN_KNOWN_AFTER = -0.6; // ...it follows an English word (look up)
@@ -556,6 +565,10 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
             !ends_with(nodes[cur].tok.raw, std::string(" ")))
             // letters right after a syllable 注音自動校正 made of keys typed otherwise: likelier one English word
             // (tmux, bella: not 吃 + ux, 日 + lla - #42)
+            cost += EN_SWITCH;
+        if ((tok.kind == Kind::Zh || tok.kind == Kind::Partial) && cur != 0 && nodes[cur].tok.kind == Kind::Ko)
+            // zhuyin right after Korean with no space: the switch, as after English (the . of 안녕하세요. is the mark,
+            // not ㄡ)
             cost += EN_SWITCH;
         if (cur_open) {
             if (tok.kind == Kind::En) return;  // (two pieces side by side are one piece, scored as such)
@@ -826,6 +839,57 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
                           Token{Kind::En, raw.substr(i, j - i), U(raw.substr(i, j - i)), ii});
             }
         }
+        // Korean (hangul.h): the run of letters from here as a Korean keyboard would read it. A word of the
+        // list is cheap, as an English word is; a word of one syllable only where it ends at a space, or
+        // after Korean (sk + space stays 呢; after 안녕 it is 나); a word being typed reads as Korean once two
+        // syllables of it are there. Not where the user asked for English or zhuyin; nor right after English or a
+        // number with no space (the ek7 of 813ek7 is 個, the switch from the number paid), nor before a digit (a
+        // tone key: the keys are a syllable's).
+        if (english.korean && korean_context().on && is_alpha(ch) && (i == 0 || !is_alpha(raw[i - 1])) && !cur_open &&
+            !contains(forced, ii) && !contains(chinese, ii)) {
+            size_t e = i;
+            while (e < n && is_alpha(raw[e])) ++e;
+            const std::string keys = raw.substr(i, e - i);
+            if (auto units = e < n && is_digit(raw[e]) ? std::nullopt : hangul_units(keys)) {
+                int syllables = 0, alone = 0;
+                for (auto& u : *units) (u.syllable ? syllables : alone)++;
+                // a letter on its own only at the very end, a consonant: the next syllable being typed
+                const bool typing = alone == 1 && e == n && !units->back().syllable && units->back().ch < 0x314F;
+                if (syllables > 0 && (alone == 0 || typing)) {
+                    bool after = false;  // Korean before it, marks and spaces between
+                    {
+                        size_t p = cur;
+                        while (p != 0 && nodes[p].tok.kind == Kind::Lit) p = nodes[p].prev;
+                        after = p == 0 ? korean_context().after : nodes[p].tok.kind == Kind::Ko;
+                    }
+                    std::optional<double> cost;
+                    const auto known = alone == 0 ? english.korean->score(keys) : std::nullopt;
+                    if (known) {
+                        if (syllables >= 2) cost = after ? KO_KNOWN_AFTER : KO_KNOWN;
+                        else if (after) cost = KO_KNOWN_AFTER;
+                        // (a common one: 안, 왜, 잘 - not 행 for a god the English list lacks; nor while it is typed: the
+                        // start of an English word)
+                        else if (e < n && *known >= KO_SHORT_COMMON) cost = KO_KNOWN_SHORT;
+                    } else if (e == n && (syllables >= 2 || after) && english.korean->starts_word(keys)) {
+                        cost = KO_TYPING * (syllables + alone);
+                    } else {
+                        // a word of the list with an ending the list lacks (two syllables of it at least), or any
+                        // Korean right after Korean
+                        const size_t stem = english.korean->known_start(keys);
+                        int covered = 0;
+                        for (auto& u : *units)
+                            if (u.syllable && static_cast<size_t>(u.start + u.length) <= stem) ++covered;
+                        if (covered >= 2) cost = KO_STEM + KO_ENDING * (syllables + alone - covered);
+                        else if (after) cost = KO_UNKNOWN_AFTER * (syllables + alone);
+                    }
+                    if (cost) {
+                        ustr text;
+                        for (auto& u : *units) text.push_back(u.ch);
+                        offer(i, e, *cost + crosses(i, e), Token{Kind::Ko, keys, text, ii});
+                    }
+                }
+            }
+        }
         // English (and the numbers / symbols inside it): every piece from here up to the
         // next space is a candidate, scored by english_piece_cost; the space after a piece
         // that reaches it belongs to it. Which pieces win is left to the costs.
@@ -883,6 +947,21 @@ std::vector<Token> tokenize_run(const std::string& raw, const SyllableTable& tab
         }
         for (size_t p = pick; p != 0; p = nodes[p].prev) tokens.push_back(nodes[p].tok);
         std::reverse(tokens.begin(), tokens.end());
+    }
+    {  // a Korean run as its syllables, a token each: the caret goes by them, as by Chinese characters
+        std::vector<Token> out;
+        out.reserve(tokens.size());
+        for (auto& t : tokens) {
+            auto units = t.kind == Kind::Ko ? hangul_units(t.raw) : std::nullopt;
+            if (!units) {
+                out.push_back(std::move(t));
+                continue;
+            }
+            for (auto& u : *units)
+                out.push_back(Token{Kind::Ko, t.raw.substr(static_cast<size_t>(u.start), static_cast<size_t>(u.length)),
+                                    ustr(1, u.ch), t.start + u.start});
+        }
+        tokens = std::move(out);
     }
     if (digits_as_zhuyin) return tokens;
     // (a syllable picked twice right after this English stays one, digits too: CP56 is CP值, as the pick made it - #42)
@@ -1249,7 +1328,7 @@ ustr context_units(const ustr& raw) {
 // (lit_keys: punctuation is sent as the key typed, half width - abc.def one run then)
 static ustr gap_text(const Token& t, bool lit_keys) {
     if (t.kind == Kind::Lit && lit_keys) return U(t.raw);
-    return t.kind == Kind::Fix || t.kind == Kind::Lit ? t.value : U(t.raw);
+    return t.kind == Kind::Fix || t.kind == Kind::Lit || t.kind == Kind::Ko ? t.value : U(t.raw);
 }
 
 // each run of syllables' first token (index) -> the text of the tokens between the run before it (or the buffer's
@@ -2624,6 +2703,8 @@ Resources Resources::load(const std::wstring& data_dir) {
     r.lexicon = std::make_unique<Lexicon>(data_dir + L"\\lexicon.txt");
     r.table = std::make_unique<SyllableTable>(*r.lexicon);
     r.english = load_english({data_dir + L"\\english.txt", data_dir + L"\\english_tech.txt"});
+    r.korean = std::make_unique<Korean>(data_dir + L"\\korean.txt");
+    if (r.korean->loaded()) r.english.korean = r.korean.get();  // (no file: no Korean)
     r.bigram = std::make_unique<BigramModel>(*r.lexicon, data_dir + L"\\bigram.bin");
     r.lm = std::make_unique<LanguageModel>(data_dir, *r.lexicon);
     return r;
@@ -2647,6 +2728,7 @@ void Composer::reset() {
     lm_context_.clear();
     lm_units_.clear();
     after_english_ = false;
+    after_korean_ = false;
     commit.clear();
     last_commit_.reset();
     clear_input();
@@ -3120,7 +3202,7 @@ void Composer::render() {
             text += shown;
             if (shown.size() != 1) wide_[t.start] = static_cast<int>(shown.size());
             ++idx;
-        } else if (t.kind == Kind::Fix) {
+        } else if (t.kind == Kind::Fix || t.kind == Kind::Ko) {
             text += t.value;
         } else if (t.kind == Kind::Partial) {
             text += zhuyin_preview ? t.value : as_typed(t.start, t.raw);
@@ -3187,7 +3269,7 @@ std::vector<int> Composer::stops() const {
     // every key of English, numbers and the rest (103 can be edited)
     std::vector<int> out;
     for (auto& t : tokens) {
-        if (t.kind == Kind::Zh || t.kind == Kind::Fix) {
+        if (t.kind == Kind::Zh || t.kind == Kind::Fix || t.kind == Kind::Ko) {
             if (term_hidden_.count(t.start)) continue;  // (inside a shorter Mainland word, 位元組 shown 字节, #32)
             out.push_back(t.start);
         } else {
@@ -4752,6 +4834,25 @@ void Composer::replacement_bar(std::vector<ustr>& out_labels, std::vector<Action
         out_actions = actions;
         return;
     }
+    if (tok->kind == Kind::Ko) {
+        // Korean: the keys of its word as typed, this once (not remembered as an English word)
+        size_t a = static_cast<size_t>(tok - tokens.data()), b = a;
+        auto joined = [&](size_t k) {
+            return tokens[k].kind == Kind::Ko && tokens[k + 1].kind == Kind::Ko &&
+                   tokens[k].start + static_cast<int>(tokens[k].raw.size()) == tokens[k + 1].start;
+        };
+        while (a > 0 && joined(a - 1)) --a;
+        while (b + 1 < tokens.size() && joined(b)) ++b;
+        Action r;
+        r.type = "typed";
+        r.start = tokens[a].start;
+        r.word = raw.substr(static_cast<size_t>(r.start),
+                            static_cast<size_t>(tokens[b].start) + tokens[b].raw.size() - static_cast<size_t>(r.start));
+        add(as_typed(r.start, r.word), r);
+        out_labels = labels;
+        out_actions = actions;
+        return;
+    }
     std::vector<ustr> more_labels;
     std::vector<Action> more_actions;
     syllables_from(*caret_, *tok, more_labels, more_actions);
@@ -6166,6 +6267,11 @@ void Composer::do_commit() {
     // what is sent ends the sentence: the English at its end is not the next one's (Codex + Enter,
     // then co nk4 is 黑色, not co 色; look up 還是 reads its look within the sentence)
     after_english_ = false;
+    {  // ...but Korean goes on: the next word, a short one too, is likelier Korean
+        size_t k = tokens.size();
+        while (k > 0 && tokens[k - 1].kind == Kind::Lit) --k;
+        after_korean_ = k > 0 && tokens[k - 1].kind == Kind::Ko;
+    }
     if (last && last->kind == Kind::Zh && !segments_.empty()) context_word_ = segments_.back().phrase;
     else context_word_.reset();
     {  // (接續前文選字, #37)
@@ -6889,6 +6995,7 @@ bool Composer::key(std::optional<char32_t> ch, const std::string& special, bool 
         refresh();
     }
     if (ch) caps_lock_ = caps;  // (special keys carry no Caps Lock state)
+    korean_context() = {config.flag("korean"), after_korean_};  // (for the tokenizer: hangul.h)
     if (fill_) return key_fill(ch, special);
     if (symbol_page) return key_symbols(ch, special);
     if (!candidates.empty()) return key_candidates(ch, special);
@@ -7000,7 +7107,7 @@ bool Composer::key_special(const std::string& special) {
                     break;
                 }
         if (tok) {
-            bool whole = tok->kind == Kind::Zh || tok->kind == Kind::Fix;
+            bool whole = tok->kind == Kind::Zh || tok->kind == Kind::Fix || tok->kind == Kind::Ko;
             int p = whole ? tok->start : at;
             int q = whole ? tok->start + static_cast<int>(tok->raw.size()) : at + 1;
             bool mark = tok->kind == Kind::Fix && tok->raw == std::string(1, NAME_MARK_KEY);  // (#52, or a name's ·)

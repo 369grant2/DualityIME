@@ -12,6 +12,7 @@
 
 #include "bigram.h"
 #include "config.h"
+#include "hangul.h"
 #include "lexicon.h"
 #include "lm.h"
 #include "util.h"
@@ -19,7 +20,7 @@
 
 namespace sz {
 
-enum class Kind { Zh, Partial, En, Lit, Fix };  // Fix: keys shown as picked
+enum class Kind { Zh, Partial, En, Lit, Fix, Ko };  // Fix: keys shown as picked; Ko: a Korean syllable (hangul.h)
 
 struct Token {
     Kind kind;
@@ -111,6 +112,7 @@ struct Resources {
     English english;
     std::unique_ptr<BigramModel> bigram;
     std::unique_ptr<LanguageModel> lm;  // 長句選字加強 (data/lm.bin, read when first used; after lexicon)
+    std::unique_ptr<Korean> korean;     // data/korean.txt (english.korean points at it)
     static Resources load(const std::wstring& data_dir);
 };
 
@@ -418,6 +420,7 @@ private:
     // their Chinese characters into lm_context_, units (else the phrases' context_units) into lm_units_
     void sent(const std::vector<ustr>& phrases, const ustr* units = nullptr);
     bool after_english_ = false;
+    bool after_korean_ = false;  // what was just sent ended in Korean (KoreanContext::after)
     std::optional<std::pair<ustr, Undo>> last_commit_;
     Overrides overrides_;
     std::map<std::pair<int, int>, Replaced> replaced_;  // by the span of the word Tab fixed

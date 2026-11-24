@@ -1,9 +1,9 @@
-# Draws the three icons the input method shows on the taskbar (cpp\tip\*.ico), the way Windows 11
-# shows its own input methods there: the bare character in white, with a black rim so the same
-# icon reads on a light taskbar too.
-#   icon_profile.ico  the input method's own: U+5100 (yi)
-#   icon.ico          the mode button in mixed mode: U+5169 (liang)
-#   icon_en.ico       the mode button in English mode: U+82F1 (ying)
+# Draws the icons the input method shows on the taskbar (cpp\tip\*.ico), the way Windows 11 shows
+# its own input methods there: the bare character, white on a dark taskbar and black on a light one.
+#   icon_profile.ico, icon_profile_light.ico   the input method's own: U+5100 (yi)
+#   icon.ico, icon_light.ico                   the mode button in mixed mode: U+5169 (liang)
+#   icon_en.ico, icon_en_light.ico             the mode button in English mode: U+82F1 (ying)
+# (the _light ones are black: for a light taskbar)
 # The drawing is in tools\tray_icons.cs. Needs the Microsoft JhengHei font (part of Windows).
 #   powershell -ExecutionPolicy Bypass -File tools\make_tray_icons.ps1
 # (installer\app.ico and settings\ui\logo.svg still come from tools\make_icons.py.)
@@ -16,13 +16,17 @@ Add-Type -Path (Join-Path $PSScriptRoot "tray_icons.cs") -ReferencedAssemblies S
 $sizes = 16, 20, 24, 32, 40, 48, 64, 256
 # (code points, not the characters: Windows PowerShell reads a script without a BOM as ANSI)
 $icons = [ordered]@{
-    "icon_profile.ico" = [string][char]0x5100
-    "icon.ico"         = [string][char]0x5169
-    "icon_en.ico"      = [string][char]0x82F1
+    "icon_profile" = [string][char]0x5100
+    "icon"         = [string][char]0x5169
+    "icon_en"      = [string][char]0x82F1
 }
+$all = -join $icons.Values   # one size and one line for all three: they sit level on the taskbar
 foreach ($name in $icons.Keys) {
-    $frames = New-Object 'System.Collections.Generic.List[System.Drawing.Bitmap]'
-    foreach ($size in $sizes) { $frames.Add([IconDraw]::Draw($icons[$name], $size)) }
-    [IconDraw]::SaveIco((Join-Path $tip $name), $frames)
-    Write-Host "wrote cpp\tip\$name"
+    foreach ($black in $false, $true) {
+        $frames = New-Object 'System.Collections.Generic.List[System.Drawing.Bitmap]'
+        foreach ($size in $sizes) { $frames.Add([IconDraw]::Draw($icons[$name], $all, $size, $black)) }
+        $file = if ($black) { "${name}_light.ico" } else { "$name.ico" }
+        [IconDraw]::SaveIco((Join-Path $tip $file), $frames)
+        Write-Host "wrote cpp\tip\$file"
+    }
 }

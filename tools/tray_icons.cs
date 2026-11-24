@@ -7,34 +7,46 @@ using System.IO;
 
 // Draws the taskbar icons the way Windows 11 shows its own input methods there (the Korean one's
 // 가 / 한, for instance): the bare character, white, smooth, no tile behind it.
-// The icons are files, so they cannot follow the light / dark theme the way Windows' own do. A
-// black rim around the white character makes one icon do for both: on a dark taskbar the rim cannot
-// be seen, on a light one it carries the character.
+// Each comes white (for a dark taskbar) and black (for a light one): the input method shows the one
+// for the taskbar's theme (cpp\tip\langbar.cpp, and the engine for the input method's own icon).
+// Around the character goes a thin rim of the other colour. On the taskbar the icon is made for it
+// cannot be seen; it is there for the moment after the theme changes, until Windows draws the icon
+// again (its own icon only when the input method is switched): the character still reads.
 public static class IconDraw {
     public const string FontName = "Microsoft JhengHei";
-    const float Boost = 2.2f;   // strokes thinner than a pixel come out grey: lifted, as bright as Windows' own
-    const float Rim = 1.0f;     // how black the rim is (0 = none)
+    const float Boost = 2.2f;   // strokes thinner than a pixel come out grey: lifted, as strong as Windows' own
 
-    public static Bitmap Draw(string ch, int S) {
-        int rim = Math.Max(1, (int)Math.Round(S / 32.0));          // the rim's width
+    // ch at S x S pixels. all: every character of the set: they are drawn at one size and on one
+    // line, as in a line of text, so the icons sit level next to each other on the taskbar.
+    public static Bitmap Draw(string ch, string all, int S, bool black) {
+        int rim = Math.Max(1, (int)Math.Round(S / 32.0));
         int box = S - 2 * rim, C = S * 3;
         // hinted up to 48px (stems on whole pixels), plain antialiasing above
         TextRenderingHint hint = S <= 48 ? TextRenderingHint.AntiAliasGridFit : TextRenderingHint.AntiAlias;
-        // the largest size at which the character fits the box
+        // the largest size at which every character fits the box; where they all are (drawn from the same point)
         float lo = 2, hi = S * 3, em = 0;
         Rectangle bb = Rectangle.Empty;
         for (int it = 0; it < 18; it++) {
             float mid = (lo + hi) / 2;
-            Rectangle r; Render(ch, C, mid, hint, S, out r);
-            if (r.Width == 0) lo = mid;
-            else if (r.Width <= box && r.Height <= box) { lo = mid; em = mid; bb = r; }
+            Rectangle u = Rectangle.Empty;
+            bool fits = true, any = false;
+            foreach (char c in all) {
+                Rectangle r; Render(c.ToString(), C, mid, hint, S, out r);
+                if (r.Width == 0) continue;
+                any = true;
+                if (r.Width > box || r.Height > box) fits = false;
+                u = u.IsEmpty ? r : Rectangle.Union(u, r);
+            }
+            if (!any) lo = mid;
+            else if (fits && u.Height <= box) { lo = mid; em = mid; bb = u; }
             else hi = mid;
         }
         var b = new Bitmap(S, S, PixelFormat.Format32bppArgb);
         if (em == 0) return b;
-        Rectangle unused;
-        float[,] m = Render(ch, C, em, hint, S, out unused);
-        int ox = (S - bb.Width) / 2 - bb.X, oy = (S - bb.Height) / 2 - bb.Y;   // centred
+        Rectangle own;
+        float[,] m = Render(ch, C, em, hint, S, out own);
+        // across: this character centred; up and down: the line all of them stand on, centred
+        int ox = (S - own.Width) / 2 - own.X, oy = (S - bb.Height) / 2 - bb.Y;
         var glyph = new float[S, S];
         for (int y = 0; y < S; y++)
             for (int x = 0; x < S; x++) {
@@ -52,9 +64,9 @@ public static class IconDraw {
                         float v = glyph[xx, yy] * (dx == 0 || dy == 0 ? 1f : 0.6f);   // (lighter on the diagonals)
                         if (v > around) around = v;
                     }
-                around *= Rim;
-                float a = g + (1 - g) * around;                     // white over the black rim
-                int c = a <= 0 ? 0 : (int)Math.Round(255 * g / a);
+                float a = g + (1 - g) * around;                     // the character over its rim
+                int c = a <= 0 ? 0 : (int)Math.Round(255 * g / a);  // (white character, black rim)
+                if (black) c = 255 - c;
                 b.SetPixel(x, y, Color.FromArgb((int)Math.Round(a * 255), c, c, c));
             }
         return b;
